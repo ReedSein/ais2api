@@ -2,17 +2,19 @@
 
 本地默认分支为 `main`。第一次上传只发布源码和文档；浏览器、依赖 checkout、凭据、数据库、日志及构建输出不进入 Git。当前测试状态以 `validation.md` 为准，不能标成三端完整正式版。
 
+当前推送目标为私有仓库 [mananekoha114/ais2api](https://github.com/mananekoha114/ais2api)。自有源码的版权署名为 Mana Nekoha (mananekoha114)，采用 MPL 2.0；第三方署名与许可不属于本次变更范围。
+
 ## 首次上传
 
 1. 在自己的 GitHub 账号或组织下创建空仓库；名称建议 `ais2api`。公开性由维护者选择。不要额外初始化 README、LICENSE 或 .gitignore，以免与已有本地历史分叉。
 2. 检查待发布提交，确认 `.analysis/`、`.tools/`、`build/`、`vcpkg_installed/`、本地账号文件及数据库没有被跟踪。
-3. 配置实际仓库地址并推送。下面的 OWNER 需要替换；没有预设远程地址或自动推送：
+3. 首次配置远程时使用实际仓库地址，再推送：
 
 ```sh
 git status --short
 git log -1 --oneline
 git ls-files
-git remote add origin https://github.com/OWNER/ais2api.git
+git remote add origin https://github.com/mananekoha114/ais2api.git
 git push -u origin main
 ```
 

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Mana Nekoha (mananekoha114)
 # SPDX-License-Identifier: MPL-2.0
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -90,7 +91,7 @@ if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
     FILES_MATCHING PATTERN copyright)
 endif()
 set(CPACK_PACKAGE_NAME "ais2api")
-set(CPACK_PACKAGE_VENDOR "ais2api contributors")
+set(CPACK_PACKAGE_VENDOR "Mana Nekoha (mananekoha114)")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native local AI Studio API gateway")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")

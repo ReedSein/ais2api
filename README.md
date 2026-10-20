@@ -105,6 +105,8 @@ ais2api stop
 
 ## 许可与贡献
 
+Copyright (c) 2026 Mana Nekoha (mananekoha114)。
+
 本项目自有源码、脚本、schema、测试及文档采用 [Mozilla Public License 2.0](LICENSE)。许可声明见 [NOTICE](NOTICE)，第三方依赖及浏览器保留各自许可，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。GitHub 首次上传及发布步骤见 [docs/github-publishing.md](docs/github-publishing.md)。当前仍为开发版本，不因上传 GitHub 而改变验收状态。
