@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ais2api.local/schemas/protocol-extensions.schema.json",
+  "title": "ais2api protocol extensions version 1",
+  "description": "Schemas for the ais2api property only. Standard Gemini/OpenAI properties remain defined by their respective protocols.",
+  "$defs": {
+    "part": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string"},
+        "thought": {"type": "boolean"},
+        "thoughtSignature": {"type": "string"},
+        "inlineData": {
+          "type": "object", "required": ["mimeType", "data"], "additionalProperties": false,
+          "properties": {"mimeType": {"type": "string", "minLength": 1}, "data": {"type": "string", "minLength": 1}}
+        },
+        "functionCall": {"$ref": "#/$defs/functionCall"},
+        "functionResponse": {
+          "type": "object", "required": ["name", "response"], "additionalProperties": false,
+          "properties": {"name": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "response": {"type": "object"}, "parts": {"type": "array", "items": {"$ref": "#/$defs/part"}}}
+        },
+        "executableCode": {"type": "object", "required": ["code"], "properties": {"code": {"type": "string"}, "language": {"type": "string"}}},
+        "codeExecutionResult": {"type": "object", "required": ["output"], "properties": {"output": {"type": "string"}, "outcome": {"type": "string"}}}
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["text"]}, {"required": ["inlineData"]}, {"required": ["functionCall"]},
+        {"required": ["functionResponse"]}, {"required": ["executableCode"]}, {"required": ["codeExecutionResult"]},
+        {"required": ["thoughtSignature"], "not": {"anyOf": [
+          {"required": ["text"]}, {"required": ["inlineData"]}, {"required": ["functionCall"]},
+          {"required": ["functionResponse"]}, {"required": ["executableCode"]}, {"required": ["codeExecutionResult"]}
+        ]}}
+      ]
+    },
+    "functionCall": {
+      "type": "object", "required": ["name"], "additionalProperties": false,
+      "properties": {"name": {"type": "string", "minLength": 1}, "id": {"type": "string"}, "args": {"type": "object"}}
+    },
+    "content": {
+      "type": "object", "required": ["parts"], "additionalProperties": false,
+      "properties": {"role": {"enum": ["user", "model", "system"]}, "parts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/part"}}}
+    },
+    "generationConfig": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "stopSequences": {"type": "array", "items": {"type": "string"}},
+        "maxOutputTokens": {"type": "integer", "minimum": 0},
+        "temperature": {"type": "number"}, "topP": {"type": "number"}, "topK": {"type": "integer", "minimum": 0},
+        "responseMimeType": {"type": "string"}, "responseSchema": {"type": "object"},
+        "presencePenalty": {"type": "number"}, "frequencyPenalty": {"type": "number"},
+        "responseLogprobs": {"type": "boolean"}, "logprobs": {"type": "integer", "minimum": 0},
+        "responseModalities": {"type": "array", "items": {"enum": ["TEXT", "IMAGE"]}},
+        "thinkingConfig": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"thinkingLevel": {"enum": ["MINIMAL", "LOW", "MEDIUM", "HIGH"]}}
+        },
+        "mediaResolution": {"enum": ["MEDIA_RESOLUTION_LOW", "MEDIA_RESOLUTION_MEDIUM", "MEDIA_RESOLUTION_HIGH"]},
+        "imageConfig": {"type": "object", "additionalProperties": false, "properties": {"aspectRatio": {"type": "string"}, "imageSize": {"type": "string"}}}
+      }
+    },
+    "requestExtension": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "gemini": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "generationConfig": {"$ref": "#/$defs/generationConfig"},
+            "systemInstruction": {"$ref": "#/$defs/content"},
+            "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},
+            "toolConfig": {"$ref": "#/$defs/toolConfig"},
+            "safetySettings": {"type": "array", "items": {"type": "object"}}
+          }
+        }
+      }
+    },
+    "toolConfig": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"functionCallingConfig": {
+        "type": "object", "additionalProperties": false,
+        "properties": {"mode": {"enum": ["AUTO", "NONE"]}, "allowedFunctionNames": {"type": "array", "items": {"type": "string"}}}
+      }}
+    },
+    "emptyTool": {"type": "object", "additionalProperties": false},
+    "tool": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "functionDeclarations": {"type": "array", "items": {"type": "object"}},
+        "codeExecution": {"$ref": "#/$defs/emptyTool"}, "googleMaps": {"$ref": "#/$defs/emptyTool"},
+        "urlContext": {"$ref": "#/$defs/emptyTool"}, "googleSearchRetrieval": {"$ref": "#/$defs/emptyTool"},
+        "googleSearch": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"searchTypes": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"webSearch": {"$ref": "#/$defs/emptyTool"}, "imageSearch": {"$ref": "#/$defs/emptyTool"}}
+          }}
+        }
+      }
+    },
+    "assistantExtension": {
+      "type": "object", "required": ["gemini_content"], "additionalProperties": false,
+      "properties": {
+        "gemini_content": {"allOf": [{"$ref": "#/$defs/content"}, {"properties": {"role": {"const": "model"}}}]}
+      }
+    },
+    "deltaExtension": {
+      "type": "object", "required": ["gemini_delta"], "additionalProperties": false,
+      "properties": {"gemini_delta": {"type": "object", "description": "The entire normalized Gemini response chunk, including candidates, part signatures, finish and usage metadata."}}
+    }
+  },
+  "$ref": "#/$defs/requestExtension"
+}

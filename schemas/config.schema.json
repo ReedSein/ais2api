@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ais2api.local/schemas/config-v1.json",
+  "title": "ais2api configuration version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "bind": { "type": "string", "minLength": 1, "default": "127.0.0.1" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 11451 },
+    "data_dir": { "type": "string", "minLength": 1 },
+    "browser_executable": { "type": "string" },
+    "proxy": { "type": "string" },
+    "headless": { "type": "boolean", "default": true },
+    "model_aliases": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+    "configured_models": { "type": "array", "items": { "oneOf": [{ "type": "string" }, { "type": "object" }] } },
+    "model_defaults": { "type": "object" },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "request_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 33554432 },
+        "object_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 67108864 },
+        "relay_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 1048576 },
+        "queue_size": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 8 },
+        "queue_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 30 },
+        "generation_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 240 },
+        "stream_idle_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 240 },
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 16, "default": 3 }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+ais2api
+Copyright (c) 2026 ais2api contributors
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+Unless a file states otherwise, the first-party source code, build scripts,
+schemas, tests and documentation in this repository are covered by MPL-2.0.
+Third-party dependencies and separately downloaded browser runtimes retain
+their own licenses. See THIRD_PARTY_NOTICES.md.

@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Native builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check scripts and browser bridge
+        run: |
+          sh -n scripts/build.sh
+          node --check browser/bridge.js
+          node --test browser/test_bridge.cjs
+  linux:
+    name: Ubuntu 24.04 / ${{ matrix.compiler }} / sanitizers ${{ matrix.sanitize }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        sanitize: ['OFF', 'ON']
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
+      VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install development tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+      - uses: actions/cache@v4
+        with:
+          path: build/vcpkg-cache
+          key: ubuntu24-vcpkg-${{ matrix.compiler }}-${{ hashFiles('vcpkg.json') }}
+      - name: Build, test, and stage native runtime
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+          BUILD_TYPE: ${{ matrix.sanitize == 'ON' && 'RelWithDebInfo' || 'Release' }}
+        run: |
+          options=()
+          if [[ '${{ matrix.sanitize }}' == ON ]]; then options+=(--sanitizers); else options+=(--package); fi
+          if [[ '${{ matrix.compiler }}' == clang && '${{ matrix.sanitize }}' == ON ]]; then options+=(--fuzzer); fi
+          sh scripts/build.sh linux --jobs 2 "${options[@]}"
+      - name: CLI and IPC smoke without Google credentials
+        run: python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+      - name: Short wire-parser fuzz smoke
+        if: matrix.compiler == 'clang' && matrix.sanitize == 'ON'
+        run: build/linux/ais2api_fuzz_wire -max_total_time=15 -max_len=65536
+      - name: Verify runtime archive contents and checksum
+        if: matrix.sanitize == 'OFF'
+        run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: matrix.sanitize == 'OFF'
+        with:
+          name: ubuntu24-${{ matrix.compiler }}-runtime
+          path: build/linux/packages/*.tar.gz*
+          if-no-files-found: error
+  windows:
+    name: Windows / MSVC x64
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache
+      VCPKG_ROOT: ${{ github.workspace }}\build\deps\vcpkg
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare dependency cache
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+      - uses: actions/cache@v4
+        with:
+          path: build/vcpkg-cache
+          key: windows-msvc-static-${{ hashFiles('vcpkg.json') }}
+      - name: Parse PowerShell build entry point
+        shell: pwsh
+        run: |
+          $parseErrors = $null
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/build.ps1'), [ref]$null, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { throw 'PowerShell syntax check failed' }
+      - name: Build, test, install, and package
+        shell: pwsh
+        run: ./scripts/build.ps1 -Jobs 2 -Package
+      - name: CLI and IPC smoke without Google credentials
+        shell: pwsh
+        run: python tests/cli_smoke.py --exe build/windows/install/bin/ais2api.exe
+      - name: Verify runtime archive contents and checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem build/windows/packages/*.zip | ForEach-Object {
+            python scripts/check-package.py $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'Runtime archive validation failed' }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-x64-runtime
+          path: build/windows/packages/*.zip*
+          if-no-files-found: error

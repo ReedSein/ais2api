@@ -1,0 +1,11 @@
+{
+ "version":6,
+ "configurePresets":[
+  {"name":"base","hidden":true,"generator":"Ninja","cacheVariables":{"CMAKE_BUILD_TYPE":"Release","BUILD_TESTING":"ON"}},
+  {"name":"windows","inherits":"base","binaryDir":"${sourceDir}/build/windows","cacheVariables":{"CMAKE_TOOLCHAIN_FILE":"${sourceDir}/.tools/vcpkg/scripts/buildsystems/vcpkg.cmake","VCPKG_TARGET_TRIPLET":"x64-windows-static"}},
+  {"name":"linux","inherits":"base","binaryDir":"${sourceDir}/build/linux","cacheVariables":{"CMAKE_TOOLCHAIN_FILE":"${sourceDir}/.tools/vcpkg/scripts/buildsystems/vcpkg.cmake"}},
+  {"name":"termux","inherits":"base","binaryDir":"${sourceDir}/build/termux","cacheVariables":{"CMAKE_PREFIX_PATH":"$env{PREFIX}","Boost_NO_BOOST_CMAKE":"OFF"}}
+ ],
+ "buildPresets":[{"name":"windows","configurePreset":"windows"},{"name":"linux","configurePreset":"linux"},{"name":"termux","configurePreset":"termux"}],
+ "testPresets":[{"name":"windows","configurePreset":"windows","output":{"outputOnFailure":true}},{"name":"linux","configurePreset":"linux","output":{"outputOnFailure":true}},{"name":"termux","configurePreset":"termux","output":{"outputOnFailure":true}}]
+}
