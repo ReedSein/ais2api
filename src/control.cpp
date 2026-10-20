@@ -155,17 +155,47 @@ void close_native(Native fd) {
 fs::path endpoint(const Config &config) {
   return config.data_dir / "control.sock";
 }
-sockaddr_un address(const Config &config) {
-  sockaddr_un out{};
-  out.sun_family = AF_UNIX;
-  auto path = endpoint(config).string();
-  if (path.size() >= sizeof(out.sun_path))
-    throw Error(
-        400, "control_path",
-        "Control socket path is too long; use a shorter data directory");
-  std::memcpy(out.sun_path, path.c_str(), path.size() + 1);
-  return out;
-}
+// Linux pathname sockets still live in the owned data directory. A procfs
+// directory-fd alias avoids sockaddr_un's small pathname field without changing
+// process cwd or moving the endpoint into a shared/global namespace.
+struct SocketAddress {
+  sockaddr_un value{};
+  Native directory = invalid;
+  explicit SocketAddress(const Config &config) {
+    value.sun_family = AF_UNIX;
+    auto path = endpoint(config).string();
+    if (path.size() >= sizeof(value.sun_path)) {
+      directory = ::open(config.data_dir.c_str(),
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      if (directory < 0)
+        throw Error(503, "not_running", "Cannot open local control directory");
+      struct stat st{};
+      if (::fstat(directory, &st) != 0 || !S_ISDIR(st.st_mode) ||
+          st.st_uid != ::geteuid()) {
+        close_native(directory);
+        directory = invalid;
+        throw Error(403, "unsafe_control_path",
+                    "Local control directory has unexpected ownership or type");
+      }
+      try {
+        path = "/proc/self/fd/" + std::to_string(directory) + "/control.sock";
+      } catch (...) {
+        close_native(directory);
+        directory = invalid;
+        throw;
+      }
+    }
+    if (path.size() >= sizeof(value.sun_path)) {
+      close_native(directory);
+      directory = invalid;
+      throw Error(400, "control_path", "Cannot address local control directory");
+    }
+    std::memcpy(value.sun_path, path.c_str(), path.size() + 1);
+  }
+  ~SocketAddress() { close_native(directory); }
+  SocketAddress(const SocketAddress &) = delete;
+  SocketAddress &operator=(const SocketAddress &) = delete;
+};
 void ready(Native fd, short events, Clock::time_point deadline,
            std::stop_token stop) {
   for (;;) {
@@ -274,7 +304,7 @@ struct ControlServer::Impl {
   Impl(const Config &c, Handler h) : config(c), handler(std::move(h)) {
     secure_directory(config.data_dir);
 #ifndef _WIN32
-    auto addr = address(config);
+    SocketAddress addr(config);
     auto path = endpoint(config);
     struct stat st{};
     if (::lstat(path.c_str(), &st) == 0) {
@@ -290,8 +320,8 @@ struct ControlServer::Impl {
       int connected =
           probe.handle < 0
               ? -1
-              : ::connect(probe.handle, reinterpret_cast<sockaddr *>(&addr),
-                          sizeof(addr));
+              : ::connect(probe.handle, reinterpret_cast<sockaddr *>(&addr.value),
+                          sizeof(addr.value));
       if (connected == 0 ||
           (probe.handle >= 0 && (errno == EINPROGRESS || errno == EAGAIN)))
         throw Error(409, "already_running",
@@ -307,7 +337,7 @@ struct ControlServer::Impl {
       throw Error(500, "control_io", "Cannot create control socket");
     try {
       nonblock(listener);
-      if (::bind(listener, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) !=
+      if (::bind(listener, reinterpret_cast<sockaddr *>(&addr.value), sizeof(addr.value)) !=
               0 ||
           ::chmod(path.c_str(), 0600) != 0 || ::listen(listener, 8) != 0)
         throw Error(500, "control_io", "Cannot bind control socket");
@@ -473,9 +503,9 @@ json::object local_call(const Config &config, const json::object &command) {
   if (connection.handle < 0)
     throw Error(503, "not_running", "Cannot open local control socket");
   nonblock(connection.handle);
-  auto addr = address(config);
-  if (::connect(connection.handle, reinterpret_cast<sockaddr *>(&addr),
-                sizeof(addr)) != 0) {
+  SocketAddress addr(config);
+  if (::connect(connection.handle, reinterpret_cast<sockaddr *>(&addr.value),
+                sizeof(addr.value)) != 0) {
     if (errno != EINPROGRESS)
       throw Error(503, "not_running", "Local service is not running");
     try {

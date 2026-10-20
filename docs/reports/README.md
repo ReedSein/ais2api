@@ -1,4 +1,10 @@
-# Windows 开发回放记录
+# 本机验证与回放记录
+
+[Debian 13 / WSL 2 本机适配](debian13-wsl2-2026-10-20.md)记录额外 Linux 目标的构建、运行与无账号浏览器验证；与真实生成验收分开。
+
+[便携存储、并行下载与浏览器整合包](portable-browser-2026-10-20.md)记录后续 Windows / Debian 回归、下载对照和本地整合包校验。
+
+## Windows 开发回放记录
 
 2026-10-20，Windows 11 Pro Insider Preview 10.0.29634 x64；AMD Ryzen AI 7 H 350（16 逻辑处理器），系统可见内存 32,630,636 KiB。MSVC 14.51、C++20、Release、静态运行库，依赖由根 vcpkg baseline 锁定。采集时工作区尚未初始化 Git，不能将这些历史测量回填绑定到之后的首次提交或某个已发布提交。
 

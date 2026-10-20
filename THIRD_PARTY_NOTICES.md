@@ -20,7 +20,11 @@ ais2api 的自有实现采用 [MPL 2.0](LICENSE)。该许可不替换第三方�
 
 ## 浏览器
 
-CloakBrowser/Chromium 独立下载，不包含在后端源码仓库或当前后端 ZIP 内。其归档内的许可、版权和上游条款继续适用；本项目没有将浏览器改为 MPL 2.0。准备流程保留所下载归档中的文件。
+CloakBrowser/Chromium 二进制不纳入后端源码仓库。精简包按锁定清单从官方渠道下载浏览器；可选 `Browser-Local` 包供本机个人或内部使用，包含未修改的浏览器及其单独许可。浏览器没有改为 MPL 2.0。
+
+官方 [CloakBrowser Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md) 允许个人及内部使用，向第三方再分发、嵌入产品或提供相应服务需要另行授权。内置浏览器的本机包不应作为普通公开发行包上传。浏览器归档原有版权和许可证保持原样。
+
+本仓库保存了 2026-10-20 获取的官方许可原文 [CloakBrowser-BINARY-LICENSE.md](licenses/CloakBrowser-BINARY-LICENSE.md)，SHA-256 为 `a959b6f9db58f7e273694368659140e9d82960d964ab48b5f6cf9c4545cc2981`。它作为第三方许可文件按原文保留。打包工具从锁定原始附件重新提取浏览器、校验每个文件并附带该许可，不打包已有浏览器资料目录。
 
 ## 原理参考
 

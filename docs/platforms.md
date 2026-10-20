@@ -1,7 +1,7 @@
 # Build, package, and validate each platform
 
-The delivery targets are Windows 10/11 x64 with MSVC, Ubuntu 24.04 x86_64 with GCC
-or Clang, and an ARM64 Termux host with Clang. CMake requires 3.25 or newer and
+The delivery targets are Windows 10/11 x64 with MSVC, Ubuntu 24.04 and Debian 13
+x86_64 with GCC or Clang, and an ARM64 Termux host with Clang. CMake requires 3.25 or newer and
 C++20. A desktop build or GitHub Actions job does not certify Android behavior.
 
 The service executable is C++. Node and Python are optional development test
@@ -10,7 +10,7 @@ python-pip; these belong to its browser-container management tool, not the
 service implementation. The official package recipe is the source for this
 distinction. [Termux proot-distro recipe](https://github.com/termux/termux-packages/blob/master/packages/proot-distro/build.sh)
 
-## Ubuntu 24.04 x86_64
+## Ubuntu 24.04 / Debian 13 x86_64
 
 Install compiler and build prerequisites using the OS package manager:
 
@@ -26,6 +26,59 @@ CTest, installs under `build/linux/install`, and writes a TGZ under
 does not update an existing checkout to another commit. To reuse an already
 prepared tool checkout, set `VCPKG_ROOT` to that exact pinned revision. Dependency
 downloads still require network access or populated vcpkg caches.
+
+### WSL 2 with Debian 13
+
+From Windows, enter the distribution using `wsl.exe -d Debian`. Use the Linux
+compiler and executable inside this shell. Keep the checkout, build/dependency
+trees and service data in the Linux filesystem, for example `~/src/ais2api`,
+rather than `/mnt/c` or `/mnt/d`. This also gives the owner-only data directory
+and Unix control socket normal Linux permissions. Microsoft recommends native
+Linux storage for Linux build performance:
+[WSL filesystem guidance](https://learn.microsoft.com/en-us/windows/wsl/interop).
+
+Run the prerequisite commands above, then build and check the installed runtime:
+
+```sh
+env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  sh scripts/build.sh linux --package --jobs 2
+python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+python3 scripts/check-package.py build/linux/packages/*.tar.gz
+```
+
+The build command scopes `PATH` to Linux tools. WSL's inherited Windows paths
+can make repeated CMake tool searches expensive; no global shell or WSL setting
+is changed. Add any custom Linux toolchain directory if needed.
+
+Python is only needed for these development checks. For normal use:
+
+```sh
+build/linux/install/bin/ais2api init
+build/linux/install/bin/ais2api setup --yes --headless=true
+build/linux/install/bin/ais2api doctor
+```
+
+Keep the API key printed by `init` private. Run the service as the regular Linux
+user; `setup --yes` invokes `sudo` for the listed system packages. It requires a
+working sudo authentication session or an interactive terminal. Debian 13 and
+Ubuntu 24.04 use the `t64` browser library package names; other distribution IDs
+or versions are rejected rather than guessed. Headless browser preparation does
+not require WSLg, a desktop session, or Windows Chrome. It verifies local CDP and
+isolated context creation, without logging into Google. Account import and real
+generation remain separate steps. A Debian-built executable targets Debian's
+glibc ABI and does not replace an Ubuntu release artifact.
+
+For a real browser check through the C++ gateway without package installation or
+Google access, explicitly run the hidden integration test with a prepared browser:
+
+```sh
+AIS2API_TEST_BROWSER=/absolute/path/to/chrome \
+  build/linux/ais2api_tests '[.browser-runtime]'
+```
+
+It uses a temporary profile, verifies CDP and an isolated context, and checks
+process/profile cleanup. It fails if the executable is missing. Normal CTest
+runs exclude this test and remain independent of installed browsers.
 
 Choose another compiler or sanitizer build in a distinct build directory:
 
@@ -79,10 +132,53 @@ generator. [CPack Archive documentation](https://cmake.org/cmake/help/latest/cpa
 assets, dependency licenses, SHA-256 and exclusion of known private/build paths
 without extracting the package. This helper requires Python 3.11+ for development.
 
-These are runtime archives, not browser bundles. Run the application's runtime
-setup separately. The Linux executable still depends on the target OS ABI;
+The default archives contain the backend. Optional `Browser-Local` archives
+also contain a verified browser. The Linux executable still depends on the target OS ABI;
 Ubuntu-built artifacts are not claimed to run on older glibc systems, musl, or
 Android. Check dependencies with `ldd bin/ais2api` on the destination.
+
+### Portable data and local browser packages
+
+The executable directory owns `config.json` and `data/` by default. Downloads,
+SQLite, setup journals, service logs and browser profiles live under `data/`.
+Persisted local paths are relative to the configuration file, so move the entire
+folder together. Explicit external paths continue to work. An unwritable program
+directory fails rather than redirecting into a user profile. Browser children
+receive private HOME/XDG/AppData/temp/cache/log paths; the parent environment is
+unchanged. System package managers, OS services and Termux/proot container state
+remain managed by their respective tools.
+
+Browser bundles are for your own local/internal use under the separate
+[CloakBrowser binary license](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md).
+Do not upload a bundled browser as an unrestricted public release. The Python
+staging/checking helpers are development tools, not runtime dependencies.
+
+Start from the original archive whose SHA-256 is locked in `runtime-manifest.json`:
+
+```sh
+python3 scripts/browser-bundle.py stage \
+  --archive /path/to/cloakbrowser-linux-x64.tar.gz --platform linux-x64 \
+  --output build/browser-bundle-linux \
+  --license-file licenses/CloakBrowser-BINARY-LICENSE.md
+sh scripts/build.sh linux --package --browser-bundle build/browser-bundle-linux
+python3 scripts/check-package.py --with-browser build/linux/packages/*Browser-Local.tar.gz
+```
+
+Windows uses `--platform windows-x64` with the official ZIP, then:
+
+```powershell
+./scripts/build.ps1 -Package -BrowserBundleDirectory build/browser-bundle-windows
+python scripts/check-package.py --with-browser build/windows/packages/*Browser-Local.zip
+```
+
+Use a separate build directory when keeping both variants. CMake's equivalent is
+`-DAIS2API_BROWSER_BUNDLE_DIR=/absolute/clean/staged/runtime`. Configure/install
+validate its full inventory; CPack includes only the explicit browser directory
+and adds `-Browser-Local` to the archive name. Existing profiles/configs/download
+caches are rejected, and no runtime database or API key is packaged.
+`init` and `start` auto-detect the locked browser beside the executable; `setup`
+can verify every file and prepare system libraries. Bundling does not eliminate
+Linux OS dependencies or perform Google login.
 
 ## ARM64 Termux host
 
@@ -139,10 +235,12 @@ results. This work adds no claim that these device or account checks have run.
 
 `.github/workflows/build.yml` defines Ubuntu 24.04 GCC and Clang builds with
 ASan/UBSan both enabled and disabled, a short Clang fuzz smoke, a Windows MSVC
-build, and Node bridge syntax/behavior checks. Desktop jobs run the isolated
+build, a Debian 13 container/GCC build, and Node bridge syntax/behavior checks. Desktop jobs run the isolated
 CLI/IPC/HTTP smoke harness without Google credentials and archive the installed
 runtime. The workflow has no path filter that could skip script-only changes.
 
 Workflow definitions are not successful remote runs. Real Google login, private
 RPC compatibility, browser downloads and Android process lifecycle remain
 separate acceptance checks; no Termux job or badge is fabricated here.
+The Debian container job is not a WSL installation test; local WSL results are
+recorded separately in the validation report.

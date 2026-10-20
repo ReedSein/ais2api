@@ -6,6 +6,7 @@
 
 #include "ais2api/runtime.hpp"
 #include "ais2api/browser.hpp"
+#include "ais2api/bundle.hpp"
 #include <archive.h>
 #include <archive_entry.h>
 #include <curl/curl.h>
@@ -18,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <thread>
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -47,36 +49,6 @@ Curl curl_handle() {
     curl_easy_setopt(c.get(), CURLOPT_USERAGENT, "ais2api/0.1");
     return c;
 }
-std::string file_digest(const fs::path &path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
-        throw Error(500, "download_read", "Cannot read downloaded archive");
-    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),
-                                                                    EVP_MD_CTX_free);
-    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1)
-        throw Error(500, "digest", "Cannot initialize digest");
-    std::array<char, 65536> bytes{};
-    while (in) {
-        in.read(bytes.data(), bytes.size());
-        auto n = in.gcount();
-        if (n > 0 &&
-            EVP_DigestUpdate(context.get(), bytes.data(), static_cast<std::size_t>(n)) != 1)
-            throw Error(500, "digest", "Cannot update digest");
-    }
-    if (!in.eof())
-        throw Error(500, "download_read", "Cannot read complete archive");
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned n{};
-    if (EVP_DigestFinal_ex(context.get(), digest, &n) != 1)
-        throw Error(500, "digest", "Cannot finalize digest");
-    constexpr char hex[] = "0123456789abcdef";
-    std::string out;
-    for (unsigned i = 0; i < n; ++i) {
-        out += hex[digest[i] >> 4];
-        out += hex[digest[i] & 15];
-    }
-    return out;
-}
 std::string platform() {
 #ifdef _WIN32
     return "windows-x64";
@@ -85,7 +57,7 @@ std::string platform() {
         std::string(std::getenv("PREFIX")).find("com.termux") != std::string::npos)
         return "termux-arm64";
     throw Error(400, "unsupported_platform",
-                "Automatic setup supports ARM64 Termux, Windows x64 and Ubuntu x64");
+                "Automatic setup supports ARM64 Termux, Windows x64, Ubuntu x64 and Debian x64");
 #elif defined(__x86_64__)
     return "linux-x64";
 #else
@@ -176,111 +148,6 @@ curl_socket_t public_socket(void *, curlsocktype, struct curl_sockaddr *address)
     return ::socket(address->family, address->socktype, address->protocol);
 }
 } // namespace
-void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,
-                       std::string_view proxy, std::uint64_t expected_size) {
-    if (!url.starts_with("https://") || digest.size() != 64)
-        throw Error(400, "invalid_artifact", "Artifact requires HTTPS and a SHA-256 digest");
-    fs::create_directories(destination.parent_path());
-    auto part = destination;
-    part += ".part";
-    if (fs::is_symlink(fs::symlink_status(part)) || fs::is_symlink(fs::symlink_status(destination)))
-        throw Error(400, "unsafe_path", "Download path cannot be a symbolic link");
-    if (fs::is_regular_file(destination) && file_digest(destination) == digest)
-        return;
-    for (unsigned attempt = 0; attempt < 3; ++attempt) {
-        auto offset = fs::exists(part) ? fs::file_size(part) : 0;
-        const auto cap = expected_size ? expected_size : 1024ull * 1024 * 1024;
-        if (offset > cap) {
-            fs::remove(part);
-            throw Error(413, "download_limit",
-                        "Partial download exceeded its permitted archive size");
-        }
-        if (offset && file_digest(part) == digest) {
-            if (fs::exists(destination))
-                fs::remove(destination);
-            fs::rename(part, destination);
-            return;
-        }
-        std::ofstream out(part, std::ios::binary | std::ios::app);
-        if (!out)
-            throw Error(500, "download_write", "Cannot write download cache");
-        auto c = curl_handle();
-        std::string address(url), proxy_value(proxy);
-        curl_easy_setopt(c.get(), CURLOPT_URL, address.c_str());
-        curl_easy_setopt(c.get(), CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(c.get(), CURLOPT_MAXREDIRS, 5L);
-        curl_easy_setopt(c.get(), CURLOPT_FAILONERROR, 1L);
-        curl_easy_setopt(c.get(), CURLOPT_RESUME_FROM_LARGE, static_cast<curl_off_t>(offset));
-        if (!proxy_value.empty())
-            curl_easy_setopt(c.get(), CURLOPT_PROXY, proxy_value.c_str());
-        struct Download {
-            std::ofstream *output;
-            std::uint64_t bytes, cap;
-            bool exceeded = false;
-            Clock::time_point logged = Clock::now();
-        } progress{&out, offset, cap};
-        curl_easy_setopt(c.get(), CURLOPT_TIMEOUT, 1800L);
-        curl_easy_setopt(c.get(), CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(c.get(), CURLOPT_XFERINFODATA, &progress);
-        curl_easy_setopt(
-            c.get(), CURLOPT_XFERINFOFUNCTION,
-            +[](void *p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
-                auto &state = *static_cast<Download *>(p);
-                if (Clock::now() - state.logged >= std::chrono::seconds(5)) {
-                    std::cerr << json::serialize(json::object{{"event", "setup_download"},
-                                                              {"received_bytes", state.bytes},
-                                                              {"maximum_bytes", state.cap}})
-                              << '\n';
-                    state.logged = Clock::now();
-                }
-                return 0;
-            });
-        curl_easy_setopt(c.get(), CURLOPT_WRITEDATA, &progress);
-        curl_easy_setopt(
-            c.get(), CURLOPT_WRITEFUNCTION, +[](char *b, size_t s, size_t n, void *p) -> size_t {
-                auto size = s * n;
-                auto &state = *static_cast<Download *>(p);
-                if (size > state.cap - state.bytes) {
-                    state.exceeded = true;
-                    return 0;
-                }
-                state.output->write(b, static_cast<std::streamsize>(size));
-                if (!*state.output)
-                    return 0;
-                state.bytes += size;
-                return size;
-            });
-        auto result = curl_easy_perform(c.get());
-        long status = 0;
-        curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &status);
-        out.close();
-        if (progress.exceeded) {
-            fs::remove(part);
-            throw Error(413, "download_limit", "Browser archive exceeded its locked size");
-        }
-        if (result == CURLE_OK) {
-            if (file_digest(part) != digest) {
-                fs::remove(part);
-                throw Error(502, "digest_mismatch",
-                            "Browser archive SHA-256 mismatch; partial archive removed");
-            }
-            if (fs::exists(destination))
-                fs::remove(destination);
-            fs::rename(part, destination);
-            return;
-        }
-        if (result == CURLE_RANGE_ERROR || status == 416) {
-            fs::remove(part);
-            continue;
-        }
-        if (attempt == 2)
-            throw Error(502, "download_failed",
-                        std::string("Archive download failed: ") + curl_easy_strerror(result) +
-                            "; partial bytes retained for a later retry");
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-    throw Error(502, "download_failed", "Archive server did not accept resumed downloads");
-}
 void extract_archive(const fs::path &input, const fs::path &destination) {
     if (fs::exists(destination) && (!fs::is_directory(destination) || !fs::is_empty(destination)))
         throw Error(409, "directory_not_empty",
@@ -372,6 +239,38 @@ void extract_archive(const fs::path &input, const fs::path &destination) {
     if (result != ARCHIVE_EOF)
         throw Error(400, "invalid_archive", "Truncated runtime archive");
 }
+std::vector<std::string> linux_runtime_packages(std::string_view os_release) {
+    // Read os-release as data: never source distribution metadata in a shell.
+    std::istringstream input{std::string(os_release)};
+    std::string id, version, line;
+    while (std::getline(input, line)) {
+        auto begin = line.find_first_not_of(" \t\r");
+        if (begin == std::string::npos || line[begin] == '#')
+            continue;
+        auto equals = line.find('=', begin);
+        if (equals == std::string::npos)
+            continue;
+        auto key = line.substr(begin, equals - begin);
+        if (key != "ID" && key != "VERSION_ID")
+            continue;
+        auto value = line.substr(equals + 1);
+        auto end = value.find_last_not_of(" \t\r");
+        value.resize(end == std::string::npos ? 0 : end + 1);
+        if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"') &&
+            value.back() == value.front())
+            value = value.substr(1, value.size() - 2);
+        (key == "ID" ? id : version) = value;
+    }
+    if (!((id == "ubuntu" && version == "24.04") || (id == "debian" && version == "13")))
+        throw Error(400, "unsupported_distribution",
+                    "Automatic Linux setup supports Ubuntu 24.04 x64 and Debian 13 x64; "
+                    "manually configure browser_executable on other distributions");
+    // Ubuntu 24.04 and Debian 13 both use the t64 library package names.
+    return {"libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
+            "libcups2t64", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1",
+            "libxfixes3", "libxrandr2", "libgbm1", "libasound2t64", "libgtk-3-0t64",
+            "fonts-noto-cjk", "fonts-noto-color-emoji", "ca-certificates"};
+}
 json::object setup_runtime(Config &config, bool approved) {
     auto m = manifest();
     auto system = platform();
@@ -394,17 +293,35 @@ json::object setup_runtime(Config &config, bool approved) {
                                                   {"platform", system}}),
                      true);
     };
+    auto prepared = [&](const fs::path &launcher, bool bundled) -> json::object {
+        stage("verify");
+        auto browser_verification = verify_browser(config, launcher);
+        if (!config.browser_executable.empty() && config.browser_executable != launcher)
+            atomic_write(root / "previous.json",
+                         json::serialize(json::object{{"browser_executable",
+                             config.to_json(true).at("browser_executable")}}), true);
+        auto previous = config.browser_executable;
+        config.browser_executable = launcher;
+        try {
+            atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
+        } catch (...) {
+            config.browser_executable = previous;
+            throw;
+        }
+        stage("complete");
+        return {{"status", "prepared"}, {"browser_version", version},
+                {"browser_executable", path_utf8(launcher)}, {"bundled", bundled},
+                {"verified", "local_cdp_and_isolated_context"},
+                {"browser_verification", browser_verification},
+                {"note", "Run accounts probe and an actual generation to verify Google access"}};
+    };
     stage("system-check");
     if (system != "windows-x64" && !approved)
         throw Error(409, "system_confirmation_required",
                     "System packages may be installed. Review the setup documentation and run "
                     "setup --yes to approve package-manager changes");
     if (system == "linux-x64") {
-        auto os = read_file("/etc/os-release", 65536);
-        if (os.find("ID=ubuntu") == std::string::npos || os.find("24.04") == std::string::npos)
-            throw Error(400, "unsupported_distribution",
-                        "Automatic Linux setup supports Ubuntu 24.04 x64; manually configure "
-                        "browser_executable on other distributions");
+        auto packages = linux_runtime_packages(read_file("/etc/os-release", 65536));
         std::vector<std::string> prefix;
 #ifndef _WIN32
         if (geteuid() != 0)
@@ -414,26 +331,8 @@ json::object setup_runtime(Config &config, bool approved) {
         command.insert(command.end(), {"apt-get", "update"});
         checked_process(command);
         command = prefix;
-        command.insert(command.end(), {"apt-get",
-                                       "install",
-                                       "-y",
-                                       "libnss3",
-                                       "libnspr4",
-                                       "libatk1.0-0t64",
-                                       "libatk-bridge2.0-0t64",
-                                       "libcups2t64",
-                                       "libdrm2",
-                                       "libxkbcommon0",
-                                       "libxcomposite1",
-                                       "libxdamage1",
-                                       "libxfixes3",
-                                       "libxrandr2",
-                                       "libgbm1",
-                                       "libasound2t64",
-                                       "libgtk-3-0t64",
-                                       "fonts-noto-cjk",
-                                       "fonts-noto-color-emoji",
-                                       "ca-certificates"});
+        command.insert(command.end(), {"apt-get", "install", "-y"});
+        command.insert(command.end(), packages.begin(), packages.end());
         checked_process(command);
     } else if (system == "termux-arm64") {
         checked_process({"pkg", "install", "-y", "proot-distro"});
@@ -471,6 +370,11 @@ json::object setup_runtime(Config &config, bool approved) {
                          "fonts-noto-color-emoji",
                          "ca-certificates"});
         atomic_write(created, "{\"version\":1,\"phase\":\"ready\"}", true);
+    }
+    if (auto bundle = bundled_browser(Config::default_directory()); !bundle.empty()) {
+        stage("bundle-check");
+        verify_browser_bundle(bundle);
+        return prepared(bundle, true);
     }
     auto target = root / ("chromium-" + version + "-" + system);
     auto executable = target / (system == "windows-x64" ? "chrome.exe" : "chrome");
@@ -532,45 +436,27 @@ json::object setup_runtime(Config &config, bool approved) {
         fs::permissions(launcher, fs::perms::owner_all);
 #endif
     }
-    stage("verify");
-    auto browser_verification = verify_browser(config, launcher);
-    if (!config.browser_executable.empty() && config.browser_executable != launcher)
-        atomic_write(root / "previous.json",
-                     json::serialize(json::object{
-                         {"browser_executable", path_utf8(config.browser_executable)}}),
-                     true);
-    auto previous = config.browser_executable;
-    config.browser_executable = launcher;
-    try {
-        atomic_write(config.config_file, json::serialize(config.to_json()), true);
-    } catch (...) {
-        config.browser_executable = previous;
-        throw;
-    }
-    stage("complete");
-    return {{"status", "prepared"},
-            {"browser_version", version},
-            {"browser_executable", path_utf8(launcher)},
-            {"verified", "local_cdp_and_isolated_context"},
-            {"browser_verification", browser_verification},
-            {"note", "Run accounts probe and an actual generation to verify Google access"}};
+    return prepared(launcher, false);
 }
 json::object rollback_runtime(Config &config) {
     auto file = config.data_dir / "runtime/previous.json";
     auto previous = json::parse(read_file(file, 65536)).as_object();
     auto path = fs::u8path(string_or(previous, "browser_executable"));
+    if (path.is_relative())
+        path = (config.config_file.parent_path() / path).lexically_normal();
     if (!fs::is_regular_file(path))
         throw Error(409, "rollback_missing", "Previous browser executable no longer exists");
     auto browser_verification = verify_browser(config, path);
     auto current = config.browser_executable;
+    auto stored_current = config.to_json(true).at("browser_executable");
     config.browser_executable = path;
     try {
-        atomic_write(config.config_file, json::serialize(config.to_json()), true);
+        atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
     } catch (...) {
         config.browser_executable = current;
         throw;
     }
-    atomic_write(file, json::serialize(json::object{{"browser_executable", path_utf8(current)}}),
+    atomic_write(file, json::serialize(json::object{{"browser_executable", stored_current}}),
                  true);
     return {{"status", "rolled_back"},
             {"browser_executable", path_utf8(path)},
@@ -578,6 +464,10 @@ json::object rollback_runtime(Config &config) {
 }
 json::object doctor(const Config &config) {
     return {{"config_version", config.version},
+            {"program_directory", path_utf8(Config::default_directory())},
+            {"config_file", path_utf8(config.config_file)},
+            {"download_directory", path_utf8(config.data_dir / "runtime/downloads")},
+            {"service_log", path_utf8(config.data_dir / "service.log")},
             {"browser_configured", !config.browser_executable.empty()},
             {"browser_exists", fs::is_regular_file(config.browser_executable)},
             {"data_directory", path_utf8(config.data_dir)},

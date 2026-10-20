@@ -7,6 +7,10 @@
 #include "ais2api/runtime.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <future>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 using namespace ais2api;
 namespace {
 struct RuntimeDirectory {
@@ -128,3 +132,38 @@ TEST_CASE("local control endpoint cannot be replaced by a second server") {
       Error);
   CHECK(local_call(config, {}).at("ok").as_bool());
 }
+
+#ifndef _WIN32
+TEST_CASE("deep portable data paths retain owned Unix control sockets", "[control][portable]") {
+  RuntimeDirectory directory;
+  auto config = directory.config();
+  config.data_dir /= std::string(64, 'a');
+  config.data_dir /= std::string(64, 'b');
+  config.data_dir /= std::string(64, 'c');
+  const auto cwd = fs::current_path();
+  {
+    InstanceLock owner(config.data_dir);
+    CHECK_THROWS_AS(InstanceLock(config.data_dir), Error);
+    ControlServer server(config, [](const json::object &command) {
+      return json::object{{"echo", command}};
+    });
+    struct stat endpoint{};
+    REQUIRE(::lstat((config.data_dir / "control.sock").c_str(), &endpoint) == 0);
+    CHECK(S_ISSOCK(endpoint.st_mode));
+    CHECK((endpoint.st_mode & 0777) == 0600);
+    CHECK(endpoint.st_uid == ::geteuid());
+    for (int i = 0; i < 4; ++i)
+      CHECK(local_call(config, {{"value", i}}).at("echo").as_object().at("value") == i);
+    CHECK_THROWS_AS(ControlServer(config, [](const json::object &) { return json::object{}; }), Error);
+    CHECK(local_call(config, {{"alive", true}}).at("echo").as_object().at("alive").as_bool());
+  }
+  CHECK_FALSE(fs::exists(config.data_dir / "control.sock"));
+  CHECK_NOTHROW(InstanceLock(config.data_dir));
+  CHECK(fs::current_path() == cwd);
+  auto alias = config.data_dir.parent_path() / "directory-alias";
+  fs::create_directory_symlink(config.data_dir, alias);
+  config.data_dir = alias;
+  CHECK_THROWS_AS(ControlServer(config, [](const json::object &) { return json::object{}; }), Error);
+  CHECK_THROWS_AS(local_call(config, {}), Error);
+}
+#endif

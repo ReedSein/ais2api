@@ -32,7 +32,7 @@ struct Config {
     json::object model_defaults;
     static fs::path default_directory();
     static Config load(const fs::path& file, const json::object& overrides = {});
-    json::object to_json() const;
+    json::object to_json(bool portable_paths = false) const;
     void validate() const;
 };
 }

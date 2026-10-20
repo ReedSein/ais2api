@@ -8,6 +8,7 @@
 #include "../browser/cdp.hpp"
 #include "../browser/rpc_error.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cstdlib>
 #include <future>
 #include <thread>
 
@@ -87,6 +88,30 @@ TEST_CASE("unconfigured browser probe fails without claiming account readiness")
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "templateCaptured"));
     gateway.close(); gateway.close();
+}
+
+// Hidden by default: explicitly select this test with a prepared executable.
+// It opens only about:blank; no cookies, account probe or Google request.
+TEST_CASE("installed browser verifier releases its process and profile", "[.browser-runtime]") {
+    const auto executable = std::getenv("AIS2API_TEST_BROWSER");
+    REQUIRE(executable != nullptr);
+    REQUIRE(fs::is_regular_file(fs::u8path(executable)));
+    Directory directory;
+    Config config;
+    config.data_dir = directory.path;
+    config.browser_executable = fs::u8path(executable);
+    config.headless = true;
+    Store store(config.data_dir);
+    BrowserGateway gateway(config, store);
+    auto result = gateway.verify_runtime();
+    CHECK_FALSE(string_or(result, "product").empty());
+    CHECK_FALSE(string_or(result, "protocol_version").empty());
+    CHECK(bool_or(result, "isolated_context"));
+    REQUIRE(result.contains("google_verified"));
+    CHECK_FALSE(bool_or(result, "google_verified"));
+    CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
+    for (const auto &entry : fs::directory_iterator(config.data_dir / "runtime"))
+        CHECK_FALSE(entry.path().filename().string().starts_with("browser-"));
 }
 
 TEST_CASE("model discovery distinguishes configured data from live Google data") {

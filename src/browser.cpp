@@ -14,8 +14,10 @@
 #include <array>
 #include <cstdlib>
 #include <cctype>
+#include <cwchar>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <thread>
 #ifdef _WIN32
@@ -28,6 +30,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+extern char **environ;
 #endif
 
 namespace ais2api {
@@ -87,8 +90,19 @@ std::string bridge_source() {
 class OwnedProcess {
 public:
     ~OwnedProcess() { stop(); }
-    void start(const fs::path& executable, const std::vector<std::string>& args) {
+    void start(const fs::path& executable, const std::vector<std::string>& args, const fs::path& private_root) {
         stop();
+        // Build a child-only environment before fork/CreateProcess. Never mutate
+        // this multithreaded service's process-wide environment.
+        const auto home = fs::absolute(private_root / "home");
+        const auto cache = fs::absolute(private_root / "cache");
+        const auto settings = fs::absolute(private_root / "settings");
+        const auto temporary = fs::absolute(private_root / "tmp");
+        const auto data = fs::absolute(private_root / "files");
+        const auto state = fs::absolute(private_root / "state");
+        for (const auto& directory : {home, cache, settings, temporary, data, state}) secure_directory(directory);
+        const auto prefix = std::getenv("PREFIX");
+        const bool termux = std::getenv("TERMUX_VERSION") || (prefix && std::string_view(prefix).find("com.termux") != std::string_view::npos);
 #ifdef _WIN32
         auto wide = [](const std::string& s) {
             if (s.empty()) return std::wstring{};
@@ -111,6 +125,35 @@ public:
         };
         std::wstring command = quote(executable.wstring());
         for (const auto& arg : args) command += L" " + quote(wide(arg));
+        auto environment_less = [](const std::wstring& a, const std::wstring& b) {
+            return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()), b.c_str(), static_cast<int>(b.size()), TRUE) == CSTR_LESS_THAN;
+        };
+        std::map<std::wstring, std::wstring, decltype(environment_less)> inherited(environment_less);
+        auto raw_environment = GetEnvironmentStringsW();
+        if (!raw_environment) throw Error(500, "browser_launch", "Cannot read browser environment");
+        for (auto entry = raw_environment; *entry; entry += std::wcslen(entry) + 1) {
+            std::wstring value(entry);
+            // Hidden drive-current-directory variables begin with '=' (e.g. =C:).
+            const auto separator = value.find(L'=', value.front() == L'=' ? 1 : 0);
+            if (separator != std::wstring::npos) inherited[value.substr(0, separator)] = value.substr(separator + 1);
+        }
+        FreeEnvironmentStringsW(raw_environment);
+        inherited[L"LOCALAPPDATA"] = cache.wstring();
+        inherited[L"APPDATA"] = settings.wstring();
+        inherited[L"TEMP"] = temporary.wstring();
+        inherited[L"TMP"] = temporary.wstring();
+        if (!termux) {
+            inherited[L"USERPROFILE"] = home.wstring();
+            inherited[L"HOME"] = home.wstring();
+            inherited[L"HOMEDRIVE"] = home.root_name().wstring();
+            inherited[L"HOMEPATH"] = home.relative_path().empty() ? L"\\" : L"\\" + home.relative_path().wstring();
+        }
+        std::vector<wchar_t> environment;
+        for (const auto& [key, value] : inherited) {
+            environment.insert(environment.end(), key.begin(), key.end()); environment.push_back(L'=');
+            environment.insert(environment.end(), value.begin(), value.end()); environment.push_back(L'\0');
+        }
+        environment.push_back(L'\0');
         job_ = CreateJobObjectW(nullptr, nullptr);
         if (!job_) throw Error(500, "browser_launch", "CreateJobObject failed");
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -118,7 +161,7 @@ public:
         if (!SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) { stop(); throw Error(500, "browser_launch", "Cannot configure browser Job Object"); }
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         PROCESS_INFORMATION pi{};
-        if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &pi)) { stop(); throw Error(500, "browser_launch", "CreateProcessW failed"); }
+        if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, environment.data(), nullptr, &startup, &pi)) { stop(); throw Error(500, "browser_launch", "CreateProcessW failed"); }
         process_ = pi.hProcess;
         if (!AssignProcessToJobObject(job_, process_)) { TerminateProcess(process_, 1); CloseHandle(pi.hThread); stop(); throw Error(500, "browser_launch", "Cannot assign browser to Job Object"); }
         if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) { CloseHandle(pi.hThread); stop(); throw Error(500, "browser_launch", "Cannot resume browser process"); }
@@ -129,13 +172,43 @@ public:
         std::vector<char*> argv;
         for (auto& value : values) argv.push_back(value.data());
         argv.push_back(nullptr);
+        std::map<std::string, std::string> inherited;
+        for (auto entry = ::environ; entry && *entry; ++entry) {
+            std::string value(*entry);
+            auto separator = value.find('=');
+            if (separator != std::string::npos) inherited[value.substr(0, separator)] = value.substr(separator + 1);
+        }
+        inherited["XDG_CONFIG_HOME"] = settings.string();
+        inherited["XDG_CACHE_HOME"] = cache.string();
+        inherited["XDG_DATA_HOME"] = data.string();
+        inherited["XDG_STATE_HOME"] = state.string();
+        inherited["TMPDIR"] = temporary.string();
+#if defined(__linux__) && !defined(__ANDROID__)
+        if (!termux) {
+            // Chromium binds AF_UNIX singleton sockets below TMPDIR. Their
+            // 108-byte address limit otherwise breaks portable installs in
+            // deeply nested directories. Keep the actual files in this private
+            // profile; a held parent directory fd provides a short kernel alias.
+            temporary_directory_fd_ = open(temporary.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (temporary_directory_fd_ < 0) throw Error(500, "browser_launch", "Cannot open private browser temporary directory");
+            const auto alias = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(temporary_directory_fd_);
+            if (!fs::is_directory(alias)) throw Error(500, "browser_launch", "Cannot access private browser temporary directory through /proc");
+            inherited["TMPDIR"] = alias;
+        }
+#endif
+        if (!termux) inherited["HOME"] = home.string();
+        std::vector<std::string> environment;
+        for (const auto& [key, value] : inherited) environment.push_back(key + "=" + value);
+        std::vector<char*> envp;
+        for (auto& value : environment) envp.push_back(value.data());
+        envp.push_back(nullptr);
         pid_ = fork();
         if (pid_ < 0) throw Error(500, "browser_launch", "fork failed");
         if (pid_ == 0) {
             if (setsid() < 0) _exit(126);
             int nullfd = open("/dev/null", O_RDWR);
             if (nullfd >= 0) { dup2(nullfd, STDIN_FILENO); dup2(nullfd, STDOUT_FILENO); dup2(nullfd, STDERR_FILENO); if (nullfd > 2) ::close(nullfd); }
-            execv(argv[0], argv.data()); _exit(127);
+            execve(argv[0], argv.data(), envp.data()); _exit(127);
         }
 #endif
     }
@@ -163,6 +236,7 @@ public:
             int status = 0; while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
             pid_ = -1;
         }
+        if (temporary_directory_fd_ >= 0) { ::close(temporary_directory_fd_); temporary_directory_fd_ = -1; }
 #endif
     }
 private:
@@ -170,6 +244,7 @@ private:
     HANDLE process_ = nullptr, job_ = nullptr;
 #else
     pid_t pid_ = -1;
+    int temporary_directory_fd_ = -1;
 #endif
 };
 
@@ -245,6 +320,10 @@ struct BrowserGateway::Impl {
         profile = config.data_dir / "runtime" / ("browser-" + random_hex(12));
         secure_directory(profile);
         std::vector<std::string> args{"--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--user-data-dir=" + path_utf8(fs::absolute(profile)), "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-dev-shm-usage", "--disable-gpu", "--renderer-process-limit=1"};
+        for (const auto& directory : {profile / "crash-dumps", profile / "disk-cache", profile / "logs"}) secure_directory(directory);
+        args.push_back("--crash-dumps-dir=" + path_utf8(fs::absolute(profile / "crash-dumps")));
+        args.push_back("--disk-cache-dir=" + path_utf8(fs::absolute(profile / "disk-cache")));
+        args.push_back("--log-file=" + path_utf8(fs::absolute(profile / "logs" / "browser.log")));
         if (config.headless) args.push_back("--headless=new");
 #if !defined(_WIN32) && !defined(__APPLE__)
         // proot's root user and Android cannot provide the Chromium sandbox.
@@ -253,7 +332,7 @@ struct BrowserGateway::Impl {
         if (!config.proxy.empty()) args.push_back("--proxy-server=" + config.proxy);
         args.push_back("about:blank");
         try {
-            process.start(config.browser_executable, args);
+            process.start(config.browser_executable, args, profile);
             const auto deadline = Clock::now() + 30s;
             while (Clock::now() < deadline) {
                 check_cancel(token);

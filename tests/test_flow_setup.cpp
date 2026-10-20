@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <archive.h>
 #include <archive_entry.h>
+#include <algorithm>
 #include <future>
 #include <fstream>
 #include <thread>
@@ -46,6 +47,24 @@ void make_tar(const fs::path &path, const std::vector<std::pair<std::string, std
     archive_write_free(out);
 }
 } // namespace
+TEST_CASE("Linux setup accepts exact supported os-release identities", "[setup]") {
+    auto debian = linux_runtime_packages("PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n"
+                                         "VERSION_ID=\"13\"\nID=debian\n");
+    REQUIRE(debian == linux_runtime_packages("ID=\"ubuntu\"\nVERSION_ID=24.04\n"));
+    REQUIRE(debian == linux_runtime_packages("# metadata\r\nID='debian'\r\nVERSION_ID='13'\r\n"));
+    for (auto package : {"libasound2t64", "libcups2t64", "libgtk-3-0t64",
+                         "libatk1.0-0t64", "libatk-bridge2.0-0t64"})
+        REQUIRE(std::find(debian.begin(), debian.end(), package) != debian.end());
+}
+TEST_CASE("Linux setup rejects unsupported distributions and substring lookalikes", "[setup]") {
+    for (auto release : {"ID=debian\nVERSION_ID=12\n", "ID=debian\nVERSION_ID=130\n",
+                         "ID=ubuntu\nVERSION_ID=24.04.1\n", "ID=fedora\nVERSION_ID=13\n",
+                         "ID=mint\nID_LIKE=ubuntu\nVERSION_ID=24.04\n",
+                         "NAME=ubuntu 24.04\n", "# ID=ubuntu\nVERSION_ID=24.04\n",
+                         "ID=ubuntu-derivative\nVERSION_ID=24.04\n",
+                         "ID=ubuntu\nVERSION_ID=\"24.04\n", "ID=debian\n"})
+        REQUIRE_THROWS_AS(linux_runtime_packages(release), Error);
+}
 TEST_CASE("relay producer cannot advance before downstream acknowledgement", "[flow]") {
     EventPipe pipe(4096);
     std::atomic<bool> finished = false;

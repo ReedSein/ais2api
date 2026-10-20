@@ -64,7 +64,9 @@ jobs:
           if [[ '${{ matrix.compiler }}' == clang && '${{ matrix.sanitize }}' == ON ]]; then options+=(--fuzzer); fi
           sh scripts/build.sh linux --jobs 2 "${options[@]}"
       - name: CLI and IPC smoke without Google credentials
-        run: python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+        run: |
+          python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+          python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: Short wire-parser fuzz smoke
         if: matrix.compiler == 'clang' && matrix.sanitize == 'ON'
         run: build/linux/ais2api_fuzz_wire -max_total_time=15 -max_len=65536
@@ -75,6 +77,40 @@ jobs:
         if: matrix.sanitize == 'OFF'
         with:
           name: ubuntu24-${{ matrix.compiler }}-runtime
+          path: build/linux/packages/*.tar.gz*
+          if-no-files-found: error
+  debian:
+    name: Debian 13 / GCC x64
+    runs-on: ubuntu-24.04
+    container: debian:13
+    timeout-minutes: 90
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
+      VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
+      VCPKG_MAX_CONCURRENCY: '2'
+    steps:
+      - name: Install Debian development tools
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3 ca-certificates
+      - uses: actions/checkout@v4
+      - name: Prepare dependency cache
+        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+      - uses: actions/cache@v4
+        with:
+          path: build/vcpkg-cache
+          key: debian13-gcc-vcpkg-${{ hashFiles('vcpkg.json') }}
+      - name: Build, test, install, and package
+        run: sh scripts/build.sh linux --package --jobs 2
+      - name: CLI and IPC smoke without Google credentials
+        run: |
+          python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
+          python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
+      - name: Verify runtime archive contents and checksum
+        run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian13-gcc-runtime
           path: build/linux/packages/*.tar.gz*
           if-no-files-found: error
   windows:
@@ -104,7 +140,11 @@ jobs:
         run: ./scripts/build.ps1 -Jobs 2 -Package
       - name: CLI and IPC smoke without Google credentials
         shell: pwsh
-        run: python tests/cli_smoke.py --exe build/windows/install/bin/ais2api.exe
+        run: |
+          python tests/cli_smoke.py --exe build/windows/install/bin/ais2api.exe
+          if ($LASTEXITCODE -ne 0) { throw 'CLI smoke failed' }
+          python tests/portable_smoke.py --exe build/windows/install/bin/ais2api.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Portable smoke failed' }
       - name: Verify runtime archive contents and checksum
         shell: pwsh
         run: |

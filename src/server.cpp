@@ -726,7 +726,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     stream.socket().async_wait(
         tcp::socket::wait_read,
         [weak = std::weak_ptr<EventPipe>(work->pipe)](boost::system::error_code error) {
-            if (!error)
+            // Windows IOCP reports a reset as an error from wait_read. It is
+            // still a disconnected consumer; only local cancellation of this
+            // monitor should be ignored.
+            if (error != net::error::operation_aborted)
                 if (auto pipe = weak.lock())
                     pipe->cancel();
         });
@@ -850,10 +853,27 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
     net::io_context io(1);
     tcp::endpoint endpoint(net::ip::make_address(config.bind), config.port);
     tcp::acceptor acceptor(io);
-    acceptor.open(endpoint.protocol());
-    acceptor.set_option(net::socket_base::reuse_address(true));
-    acceptor.bind(endpoint);
-    acceptor.listen(32);
+    auto check_listener = [&](std::string_view stage, const boost::system::error_code &ec) {
+        if (!ec)
+            return;
+        const std::string reason = ec == net::error::access_denied ? "permission_denied"
+                                   : ec == net::error::address_in_use ? "address_in_use"
+                                                                     : "listener_error";
+        throw Error(503, "http_" + reason,
+                    "HTTP listener " + std::string(stage) + " failed for bind=" + config.bind +
+                        " port=" + std::to_string(config.port) + " reason=" + reason +
+                        " os_error=" + std::to_string(ec.value()) +
+                        "; configure a different available port and restart");
+    };
+    boost::system::error_code listener_error;
+    acceptor.open(endpoint.protocol(), listener_error);
+    check_listener("open", listener_error);
+    acceptor.set_option(net::socket_base::reuse_address(true), listener_error);
+    check_listener("set_option", listener_error);
+    acceptor.bind(endpoint, listener_error);
+    check_listener("bind", listener_error);
+    acceptor.listen(32, listener_error);
+    check_listener("listen", listener_error);
     ControlServer control(config,
                           [&](const json::object &command) { return service.control(command); });
     net::signal_set signals(io, SIGINT, SIGTERM);

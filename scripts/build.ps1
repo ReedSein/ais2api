@@ -8,6 +8,7 @@
 param(
     [string]$BuildDirectory = 'build/windows',
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
+    [string]$BrowserBundleDirectory = '',
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo')][string]$Configuration = 'Release',
     [ValidateRange(1, 256)][int]$Jobs = 2,
     [switch]$Package,
@@ -17,7 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($Help) {
-    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-Configuration Release] [-Jobs 2] [-Package] [-SkipTests]'
+    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-BrowserBundleDirectory PATH] [-Configuration Release] [-Jobs 2] [-Package] [-SkipTests]'
     Write-Output 'Requires Visual Studio C++ tools, Git and CMake/Ninja. New dependencies go under build/deps; existing .tools is not changed.'
     return
 }
@@ -29,6 +30,7 @@ $project = Split-Path -Parent $PSScriptRoot
 if (-not [IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory = Join-Path $project $BuildDirectory }
 if ([string]::IsNullOrEmpty($VcpkgRoot)) { $VcpkgRoot = Join-Path $project 'build/deps/vcpkg' }
 if (-not [IO.Path]::IsPathRooted($VcpkgRoot)) { $VcpkgRoot = Join-Path $project $VcpkgRoot }
+if ($BrowserBundleDirectory -and -not [IO.Path]::IsPathRooted($BrowserBundleDirectory)) { $BrowserBundleDirectory = Join-Path $project $BrowserBundleDirectory }
 if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue) -or [string]::IsNullOrEmpty($env:INCLUDE)) {
     $locator = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (-not (Test-Path -LiteralPath $locator)) { throw 'Install Visual Studio C++ build tools or use Developer PowerShell.' }
@@ -52,7 +54,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $VcpkgRoot 'vcpkg.exe'))) {
     Invoke-Checked (Join-Path $VcpkgRoot 'bootstrap-vcpkg.bat') @('-disableMetrics')
 }
 $testing = if ($SkipTests) { 'OFF' } else { 'ON' }
-Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", '-DVCPKG_TARGET_TRIPLET=x64-windows-static', "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install")
+Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", '-DVCPKG_TARGET_TRIPLET=x64-windows-static', "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory")
 Invoke-Checked cmake.exe @('--build', $BuildDirectory, '--parallel', "$Jobs")
 if (-not $SkipTests) { Invoke-Checked ctest.exe @('--test-dir', $BuildDirectory, '--output-on-failure') }
 Invoke-Checked cmake.exe @('--install', $BuildDirectory)

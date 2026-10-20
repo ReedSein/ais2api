@@ -60,17 +60,21 @@ public:
             state_->request = request.gemini;
             state_->account_id = account.id;
         }
-        emit(text_event("hello "));
-        if (request.model == "synthetic-after-content-error")
-            throw Error(502, "synthetic_upstream_failure", "Synthetic failure after content");
         if (request.model == "synthetic-cancel") {
+            // emit waits for downstream acknowledgment and may itself throw on
+            // disconnect. Observe cancellation before publishing the first event
+            // so both that race and cancellation during the wait are recorded.
+            std::stop_callback on_cancel(cancel, [state = state_] { state->cancelled = true; });
+            emit(text_event("hello "));
             const auto deadline = Clock::now() + 3s;
             while (!cancel.stop_requested() && Clock::now() < deadline)
                 std::this_thread::sleep_for(5ms);
-            state_->cancelled = cancel.stop_requested();
             check_cancel(cancel);
             throw Error(504, "synthetic_cancel_timeout", "Cancellation did not reach backend");
         }
+        emit(text_event("hello "));
+        if (request.model == "synthetic-after-content-error")
+            throw Error(502, "synthetic_upstream_failure", "Synthetic failure after content");
         emit(text_event("world"));
         emit(finish_event());
     }
@@ -327,7 +331,14 @@ TEST_CASE("Disconnecting an HTTP stream cancels the active generation backend", 
     }
     REQUIRE(received.find("hello ") != std::string::npos);
     boost::system::error_code ignored;
-    socket.shutdown(tcp::socket::shutdown_both, ignored);
+    SECTION("orderly shutdown") {
+        socket.shutdown(tcp::socket::shutdown_both, ignored);
+    }
+    SECTION("connection reset") {
+        // Force RST rather than relying on whether trailing SSE bytes remain
+        // unread when the client closes its receive side.
+        socket.set_option(net::socket_base::linger(true, 0));
+    }
     socket.close(ignored);
     const auto deadline = Clock::now() + 2s;
     while (!server.state->cancelled && Clock::now() < deadline)

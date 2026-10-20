@@ -53,3 +53,46 @@ TEST_CASE("HTTP exposes data routes and enforces authentication without Google",
     auto large=server.call(http::verb::post,"/v1/chat/completions",std::string(5000,'x'),server.key);REQUIRE(large.result_int()==413);
     REQUIRE_FALSE(server.failure);
 }
+
+TEST_CASE("HTTP listener reports an occupied port with actionable diagnostics","[http]"){
+    net::io_context io;
+    tcp::acceptor occupied(io);
+    occupied.open(tcp::v4());
+#ifdef _WIN32
+    // Prevent the service's SO_REUSEADDR from sharing this Windows listener.
+    const BOOL exclusive=TRUE;
+    REQUIRE(::setsockopt(occupied.native_handle(),SOL_SOCKET,SO_EXCLUSIVEADDRUSE,
+                        reinterpret_cast<const char*>(&exclusive),sizeof(exclusive))==0);
+#endif
+    occupied.bind({net::ip::make_address("127.0.0.1"),0});
+    occupied.listen();
+    struct TemporaryDirectory {
+        fs::path path=fs::temp_directory_path()/("ais2api-occupied-http-"+random_hex(8));
+        ~TemporaryDirectory(){std::error_code ec;fs::remove_all(path,ec);}
+    } directory;
+    Config config;
+    config.data_dir=directory.path/"data";
+    config.config_file=directory.path/"config.json";
+    config.bind="127.0.0.1";
+    config.port=occupied.local_endpoint().port();
+    fs::create_directories(directory.path);
+    try {
+        serve(config);
+        FAIL("Service unexpectedly started on an occupied HTTP port");
+    } catch(const Error& error) {
+        REQUIRE(error.status==503);
+#ifdef _WIN32
+        // An exclusive listener can produce WSAEACCES rather than WSAEADDRINUSE.
+        REQUIRE((error.code=="http_permission_denied"||error.code=="http_address_in_use"));
+#else
+        REQUIRE(error.code=="http_address_in_use");
+#endif
+        const std::string message=error.what();
+        REQUIRE(message.find("HTTP listener bind failed")!=std::string::npos);
+        REQUIRE(message.find("bind=127.0.0.1")!=std::string::npos);
+        REQUIRE(message.find("port="+std::to_string(config.port))!=std::string::npos);
+        REQUIRE(message.find("reason="+error.code.substr(5))!=std::string::npos);
+        REQUIRE(message.find("os_error=")!=std::string::npos);
+        REQUIRE(message.find("different available port")!=std::string::npos);
+    }
+}

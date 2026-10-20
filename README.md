@@ -19,7 +19,7 @@ cmake --build --preset windows
 ctest --preset windows
 ```
 
-Ubuntu 24.04 安装 C++20 编译器、CMake、Ninja、Git、curl、zip/unzip 之后运行 `sh scripts/build.sh linux`。所有桌面依赖由 `vcpkg.json` 的固定 baseline 决定；源码下载由 vcpkg 校验。首次构建可能较长。
+Ubuntu 24.04 或 Debian 13 x86_64 安装 C++20 编译器、CMake、Ninja、Git、curl、zip/unzip 之后运行 `sh scripts/build.sh linux`。所有桌面依赖由 `vcpkg.json` 的固定 baseline 决定；源码下载由 vcpkg 校验。首次构建可能较长。WSL 2 的 Debian 13 使用同一 Linux 构建入口，源码、构建及运行数据应放在 Linux 文件系统内；具体步骤见 [平台说明](docs/platforms.md)。
 
 Termux 使用 `sh scripts/build.sh termux`，系统提供 clang、cmake、ninja、boost、libcurl、openssl、libarchive、libsqlite；Catch2 从固定版本构建为开发依赖。Termux 的系统库版本由包管理器管理，并记录在验证报告中，不能宣称与桌面二进制依赖完全相同。
 
@@ -34,7 +34,7 @@ Node.js 和原项目的 Python 服务都不是后端依赖。Termux 的发行版
 
 ## 首次运行
 
-下面所有命令使用同一个配置文件；默认配置位置由 `ais2api init` 输出。Windows 可执行文件位于 `build/windows/ais2api.exe`，其他平台对应各自构建目录。
+配置默认位于可执行文件旁的 `config.json`，数据库、日志、下载和浏览器资料放在旁边的 `data/`，不使用用户的 AppData、HOME 或 XDG 配置目录。请将程序放在当前用户可写的文件夹。内置浏览器包会自动识别旁边的 `browser-runtime/`，不必下载浏览器。Windows 构建可执行文件位于 `build/windows/ais2api.exe`，其他平台对应各自构建目录。
 
 ```text
 ais2api init
@@ -49,7 +49,13 @@ ais2api status
 
 `init` 只在第一次输出初始 API Key；请保存它。所有 CLI 输出采用 JSON，日志写到 stderr。`start` 的日志保存到数据目录的 `service.log`。`serve` 在当前终端运行。`stop` 使用当前用户专属的本地控制通道停止服务。
 
-`setup --yes` 授权安装本次列出的系统依赖；Ubuntu 可能需要 sudo，Termux 会创建项目专属的 proot Ubuntu 24.04 容器。Windows 在用户目录准备浏览器。不会自动升级所有系统软件或切换镜像源。安装中断后可重跑；浏览器归档按固定摘要和大小验证。系统包的改变不属于浏览器回退范围。
+程序自己写入的配置使用相对路径，整个程序目录可一起移动；配置文件内的相对路径以配置文件所在目录为基准，CLI/环境变量中的相对路径以当前工作目录为基准。显式 `--config`、`--data-dir` 及现有配置中的绝对路径继续有效；不会自动搬动原来用户目录中的状态。
+
+下载器对支持强 ETag 与 HTTP Range 的大文件使用四路分段下载，保留可续传片段，并在完成后核对长度与 SHA-256。不支持分段或身份不一致时安全回退到单连接；代理与 TLS 验证继续生效。实际速度取决于网络和上游限速。
+
+可选的 `Browser-Local` 包附带锁定的 CloakBrowser，适用于本机个人或内部使用；对外分发须遵守其独立许可，详见 [第三方声明](THIRD_PARTY_NOTICES.md)。创建方法见 [平台说明](docs/platforms.md)。Linux 仍需要相应系统运行库；系统包及 Termux/proot 管理器状态由各自工具管理。
+
+`setup --yes` 授权安装本次列出的系统依赖；Ubuntu/Debian 可能需要 sudo，Termux 会创建项目专属的 proot Ubuntu 24.04 容器。浏览器下载和运行目录默认均在程序旁的 `data/runtime/`。不会自动升级所有系统软件或切换镜像源。安装中断后可重跑；浏览器归档按固定摘要和大小验证。系统包的改变不属于浏览器回退范围。
 
 已有浏览器可以通过 `--browser PATH` 或配置文件指定；`doctor` 检查本地前提，不会把浏览器文件存在当作 Google 调用成功。
 

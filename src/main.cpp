@@ -289,7 +289,7 @@ json::object execute(Arguments args) {
         const bool initialized = fs::exists(marker);
         Store store(config.data_dir);
         if (!fs::exists(config.config_file))
-            atomic_write(config.config_file, json::serialize(config.to_json()), true);
+            atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
         json::object result{{"initialized", true},
                             {"config_file", path_utf8(config.config_file)},
                             {"data_dir", path_utf8(config.data_dir)}};

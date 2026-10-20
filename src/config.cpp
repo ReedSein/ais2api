@@ -5,6 +5,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/config.hpp"
+#include "ais2api/runtime.hpp"
+#include "ais2api/bundle.hpp"
 #include <cstdlib>
 #include <limits>
 
@@ -64,31 +66,28 @@ std::string env(const char *k) {
   return p ? p : "";
 #endif
 }
+fs::path absolute_path(const fs::path &path, const fs::path &base) {
+  return (path.is_absolute() ? path : base / path).lexically_normal();
+}
+std::string stored_path(const fs::path &path, const fs::path &config_file, bool portable) {
+  if (!portable || path.empty() || config_file.empty())
+    return path_text(path);
+  auto relative = fs::absolute(path).lexically_normal().lexically_relative(
+      fs::absolute(config_file).parent_path().lexically_normal());
+  if (!relative.empty() && *relative.begin() != "..")
+    return path_text(relative);
+  return path_text(path);
+}
 } // namespace
 fs::path Config::default_directory() {
-#ifdef _WIN32
-  auto root = env("LOCALAPPDATA");
-  if (root.empty())
-    root = env("USERPROFILE");
-#else
-  auto root = env("XDG_CONFIG_HOME");
-  if (root.empty()) {
-    root = env("HOME");
-    if (!root.empty())
-      root += "/.config";
-  }
-#endif
-  if (root.empty())
-    throw Error(500, "environment",
-                "Cannot determine user configuration directory");
-  return fs::u8path(root) / "ais2api";
+  return executable_path().parent_path();
 }
-json::object Config::to_json() const {
+json::object Config::to_json(bool portable_paths) const {
   return {{"version", version},
           {"bind", bind},
           {"port", port},
-          {"data_dir", path_text(data_dir)},
-          {"browser_executable", path_text(browser_executable)},
+          {"data_dir", stored_path(data_dir, config_file, portable_paths)},
+          {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
           {"proxy", proxy},
           {"headless", headless},
           {"limits",
@@ -106,13 +105,23 @@ json::object Config::to_json() const {
 }
 Config Config::load(const fs::path &file, const json::object &overrides) {
   Config c;
-  c.config_file = file.empty() ? default_directory() / "config.json" : file;
+  c.config_file = fs::absolute(file.empty() ? default_directory() / "config.json" : file).lexically_normal();
   c.data_dir = default_directory() / "data";
+  bool explicit_browser = false;
   auto o = c.to_json();
   if (fs::exists(c.config_file)) {
     auto v = json::parse(read_file(c.config_file));
     if (!v.is_object())
       throw Error(400, "invalid_config", "Configuration must be an object");
+    if (auto browser = v.as_object().if_contains("browser_executable"))
+      explicit_browser = !browser->is_string() || !browser->as_string().empty();
+    // File paths belong to the configuration directory, regardless of the
+    // shell's working directory or the detached service's startup location.
+    for (auto key : {"data_dir", "browser_executable"})
+      if (auto value = v.as_object().if_contains(key);
+          value && value->is_string() && !value->as_string().empty())
+        *value = path_text(absolute_path(fs::u8path(std::string(value->as_string())),
+                                        c.config_file.parent_path()));
     merge(o, v.as_object());
   }
   json::object e;
@@ -175,6 +184,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   }
   merge(o, e);
   merge(o, overrides);
+  explicit_browser = explicit_browser || e.contains("browser_executable") ||
+                     overrides.contains("browser_executable");
   fields(o, {"version", "bind", "port", "data_dir", "browser_executable",
              "proxy", "headless", "limits", "model_aliases",
              "configured_models", "model_defaults"});
@@ -192,6 +203,13 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   c.bind = text("bind");
   c.data_dir = fs::u8path(text("data_dir"));
   c.browser_executable = fs::u8path(text("browser_executable"));
+  // Explicit CLI/environment relative paths retain their normal shell meaning.
+  if (!c.data_dir.empty())
+    c.data_dir = fs::absolute(c.data_dir).lexically_normal();
+  if (!c.browser_executable.empty())
+    c.browser_executable = fs::absolute(c.browser_executable).lexically_normal();
+  else if (!explicit_browser)
+    c.browser_executable = bundled_browser(default_directory());
   c.proxy = text("proxy");
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");

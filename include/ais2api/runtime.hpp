@@ -35,6 +35,7 @@ int serve(Config config);
 class GenerationBackend;
 int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend);
 json::object setup_runtime(Config &config, bool approve_system_changes = false);
+std::vector<std::string> linux_runtime_packages(std::string_view os_release);
 json::object doctor(const Config &config);
 json::object rollback_runtime(Config &config);
 void download_verified(std::string_view url, const fs::path &destination, std::string_view digest,

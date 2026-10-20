@@ -16,7 +16,29 @@ ais2api stop --config ./config.json --data-dir ./data
 
 `init` writes the first configuration and initializes local storage. The first initialization creates an API key and prints its secret once. Re-running initialization does not issue another initial secret, including after keys are revoked. Create a new key explicitly when needed.
 
+Defaults are portable: `config.json` and `data/` live beside the executable.
+Downloads are `data/runtime/downloads/`, logs are `data/service.log`, and temporary
+browser profiles are `data/runtime/browser-*/`. No AppData/HOME/XDG fallback is
+used if this directory is not writable. Use a writable program folder or explicit
+path overrides. Persisted paths inside the configuration directory are relative,
+so the folder can move as a unit. File-relative paths resolve from the config
+directory; explicit CLI/environment relative paths resolve from the shell.
+Existing external absolute paths are retained; old state is not silently migrated.
+`doctor` reports the effective program, config, download, data and log paths.
+
+Local browser packages auto-detect `browser-runtime/PLATFORM/chrome[.exe]` beside
+the executable. `init`/`start` can use this browser without downloading it;
+`setup` verifies its full inventory and still prepares OS packages where needed.
+
 `serve` runs in the foreground; `start` launches a background process and waits up to five seconds for local control readiness. The service log is `data_dir/service.log`. `status` returning `running: true` means the process and local control are reachable. Readiness describes local prerequisites, not a successful Google generation. `stop` requests orderly shutdown; callers can poll `status` until `running: false`.
+
+If `start` times out, inspect `data/service.log`. HTTP listener errors include the
+operation, address, port and numeric OS error. On Windows, `os_error=10013` can
+mean the port falls in a system reservation; inspect with
+`netsh interface ipv4 show excludedportrange protocol=tcp`. Choose an available
+`port` in `config.json` or pass `--port PORT`, then restart. The service does not
+silently change its listening port. A listener failure happens before browser
+login and is independent of imported Cookie contents.
 
 `setup` prepares supported platform/browser dependencies; `--yes` authorizes required system package changes. Browser installation requires network access. `doctor` inspects the environment. `browser update` and `browser rollback` manage browser versions. Stop the service before setup, update or rollback; these commands take the same exclusive data-directory ownership lock as the service.
 
