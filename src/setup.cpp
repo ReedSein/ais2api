@@ -183,7 +183,7 @@ void extract_archive(const fs::path &input, const fs::path &destination) {
             name.find(':') != std::string::npos || archive_entry_symlink(entry) ||
             archive_entry_hardlink(entry))
             throw Error(400, "archive_path", "Unsafe archive entry");
-        for (auto &piece : relative) {
+        for (const auto &piece : relative) {
             if (piece == "..")
                 throw Error(400, "archive_path", "Archive entry escapes staging directory");
 #ifdef _WIN32
