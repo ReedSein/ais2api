@@ -187,12 +187,15 @@ Run the native build outside proot and keep the project in Termux private
 storage. The dependency-install flag explicitly changes shared Termux packages:
 
 ```sh
-sh scripts/build.sh termux --install-deps --jobs 1
+pkg install boost-headers
+CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps --build-dir build/termux-native --jobs 1
 ```
 
 Without `--install-deps`, the script uses already installed dependencies. The
 official package names are `clang`, `cmake`, `ninja`, `git`, `curl`, `pkg-config`,
-`boost`, `libcurl`, `openssl`, `libarchive` and `libsqlite`. These include the
+`boost`, `boost-headers`, `libcurl`, `openssl`, `libarchive` and `libsqlite`. Install
+`boost-headers` explicitly because the native script's dependency list does not
+include that split package. These include the
 headers needed for native CMake builds; do not substitute desktop `*-dev` package
 names. Official recipes: [Clang subpackage](https://github.com/termux/termux-packages/blob/master/packages/libllvm/clang.subpackage.sh),
 [Boost](https://github.com/termux/termux-packages/blob/master/packages/boost/build.sh),
@@ -204,6 +207,63 @@ Tests prepare Catch2 3.16.0 from its official source archive, verifying the same
 SHA-512 used by the pinned vcpkg port. Production-only builds can use
 `--skip-tests`. Catch2 preparation uses `build/deps`; no vcpkg Android cross-build
 is presented as a native Termux test. [Catch2 release](https://github.com/catchorg/Catch2/releases/tag/v3.16.0)
+
+The command above starts a new build tree so CMake reads `CXXFLAGS`. With the
+Termux Clang 21 toolchain, `std::osyncstream` requires
+`-fexperimental-library`, including the experimental static archive supplied by
+`ndk-sysroot`. For an existing configured tree, set
+`-DCMAKE_CXX_FLAGS=-fexperimental-library` through CMake instead; changing the
+environment alone does not replace cached flags.
+
+### GitHub Actions Termux backend artifact
+
+`.github/workflows/termux.yml` builds the current checked-out commit on
+`ubuntu-24.04-arm` inside the official Termux ARM64 container. The image is pinned
+by digest; its rolling apt dependencies are upgraded together and their actual
+versions are recorded. This is a recorded build environment, not a complete
+dependency snapshot. It reuses `scripts/build.sh termux` and the CMake install
+list. Desktop workflow definitions and business logic are shared unchanged.
+[Official Termux container](https://github.com/termux/termux-docker/blob/master/README.md)
+
+Like the desktop workflow, the Termux workflow runs on pushes and pull requests
+without branch or path filters. It builds the checked-out commit, including the
+merge preview used by pull-request jobs. Select **Termux ARM64** in Actions to
+run it manually for an intended branch. GitHub requires the workflow file to
+exist on the repository's default branch before manual dispatch is available.
+[Manual workflow dispatch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+
+The job runs CTest, bridge tests and isolated CLI/portable smoke checks without
+Google access. It uploads a `termux-aarch64-COMMIT` artifact containing a
+`.tar.gz` backend runtime and its `.sha256` sidecar, retained for seven days.
+Extract into a new directory in Termux private storage; Android shared storage
+is not an executable installation directory. Verify before using it:
+
+```sh
+sha256sum --check ais2api-termux-aarch64-COMMIT.tar.gz.sha256
+python scripts/check-package.py --target termux-aarch64 ais2api-termux-aarch64-COMMIT.tar.gz
+```
+
+The Python checker is a development tool from this source checkout. The archive
+contains `share/ais2api/termux-build.json` with the source commit, image digest,
+package versions, ELF loader and linked-library inventory. Dynamic libraries are
+provided separately by the Termux package manager; Android supplies its system
+libraries. Package versions describe the build, and do not certify every older
+runtime. The archive does not carry configuration, accounts, system libraries or
+a browser. Its dependency notices use
+`share/licenses/ais2api-dependencies/PACKAGE/copyright`, including LLVM's notice
+for the linked experimental static archive.
+
+Some split dynamic-library packages do not carry a copyright file. Their
+`dependency_notices` entry explicitly records `external-system-package`; this
+applies only to separately installed shared libraries. Notices for embedded
+Boost/libc++ code and the experimental static archive remain mandatory.
+
+The checker rejects a wrong CPU or loader, missing runtime files, unreported
+dependencies, missing applicable notices, bundled shared libraries and known
+private paths. Before replacing an existing installation, verify that the target
+device can load the program and exercise it with temporary configuration/data
+and a separate local port. A successful container job does not certify Google
+requests, the Android browser integration or background survival.
 
 The browser runs in Ubuntu userland while the C++ service remains on the Termux
 host. The current official proot-distro interface uses OCI images and named
@@ -242,6 +302,7 @@ runtime. The workflow has no path filter that could skip script-only changes.
 
 Workflow definitions are not successful remote runs. Real Google login, private
 RPC compatibility, browser downloads and Android process lifecycle remain
-separate acceptance checks; no Termux job or badge is fabricated here.
+separate acceptance checks. The separate Termux workflow provides container
+coverage; device acceptance and successful remote runs require their own results.
 The Debian container job is not a WSL installation test; local WSL results are
 recorded separately in the validation report.
