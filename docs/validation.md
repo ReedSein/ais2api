@@ -7,7 +7,8 @@
 | 范围 | 环境与结果 | 能证明的范围 |
 |---|---|---|
 | C++ 构建 | Windows x64、MSVC 14.51、C++20、Release、静态运行库，成功 | 本机编译及链接 |
-| C++ 自动测试 | Windows 105 用例、1,599 条断言全部通过 | 合成协议、解析器、存储、CLI 控制通道、HTTP、配置密钥与端口诊断、资源限制、下载与浏览器包 |
+| C++ 自动测试 | Windows 148 用例、2,243 条断言全部通过 | 合成协议、解析器、存储、CLI 控制通道、HTTP、配置密钥与端口诊断、资源限制、下载与浏览器包 |
+| Responses 兼容接口 | Windows 专项 14 用例、233 条断言通过；本次 CLI 冒烟 34 项通过 | JSON / 命名 SSE、usage、函数签名和完整历史、重复工具 ID、图片输入映射、schema、截断及失败状态、流式限额和 FIN/RST 取消；未运行真实账号或 SDK 集成 |
 | 网页桥接脚本 | Node 语法检查及 24 项测试通过 | 模拟页面下的捕获、快照、信用协议、取消、身份与错误分类 |
 | Cookie 导入与专用 userscript | Windows / Debian 离线 HTTP 测试及 Node VM 测试通过 | 原版推送格式、独立密钥、元数据转换、分区过滤、身份检查、事务更新、队列限额、超时、取消与保存前撤销检查；未使用真实 Cookie |
 | 原版 Cookie 头兼容修复 | Windows / Debian 真实浏览器离线回归通过 | 五项 Google 鉴权 Cookie 保持 JS 可读、HSID 保持 HttpOnly、无 textarea 时识别唯一账号；合成 Cookie 与拦截页面，不是 Google 登录或生成验收 |
@@ -31,6 +32,8 @@ Debian 13 的系统、命令、浏览器测试方式及保留的本机环境见 
 便携存储、下载对照及浏览器整合包的本次验证见 [便携与浏览器包报告](reports/portable-browser-2026-10-20.md)。
 
 C++ HTTP 测试使用真实 loopback TCP、HTTP 分块编码、SQLite 和本地 IPC；生成源是合成的 `GenerationBackend`。它们验证了多轮、Gemini 聚合、OpenAI SSE usage 块、正常结束、首内容后错误不重试、客户端断连取消。生产 CLI 始终使用 BrowserGateway，没有模拟生成开关。
+
+Responses 新增 `POST /v1/responses`，使用无状态完整历史模式，接口说明见 [Responses 使用说明](responses.md)。本次 MSVC Release 构建成功，完整 CTest 在正常用户执行环境中 31 秒通过。第一次受限环境的完整回归停滞后被终止，不计作通过；正常环境重跑的通过结果与 Responses 专项结果分别保留。当前未为这项新增能力重跑 Linux/Termux 或真实浏览器、真实账号测试，也未安装客户端 SDK；这些结果不能由本机合成 HTTP 测试替代。
 
 其他回归包括任意网络分块、UTF-8、XSSI、截断及对象限额；函数值与 schema、签名逐块保留、重复工具调用 ID 及扩展往返；账号隔离元数据、冷却与持久化；归档越界、重复文件、Windows 设备路径；32 个半请求头连接上限；累计媒体预算；超大及已完成下载残片处理。
 

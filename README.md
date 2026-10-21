@@ -2,7 +2,7 @@
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](LICENSE)
 
-面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini 与 OpenAI Chat Completions 数据接口，账号和运行状态可通过 CLI 或独立鉴权的管理 API 操作；支持可选的 userscript Cookie 导入，尚未内置 Web 管理页面。管理 API 提供实时完整日志，供前端管理面板开发使用。
+面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini、OpenAI Chat Completions 与 Responses 数据接口，账号和运行状态可通过 CLI 或独立鉴权的管理 API 操作；支持可选的 userscript Cookie 导入，尚未内置 Web 管理页面。管理 API 提供实时完整日志，供前端管理面板开发使用。
 
 **这是待真实账号验收的开发版本。** 离线协议测试、浏览器脚本测试和本机服务测试不代表 Google 网页适配、账号权限、生图或三端部署已经验证。具体结果与未完成门槛见 [验证记录](docs/validation.md)。
 
@@ -72,13 +72,13 @@ curl http://127.0.0.1:18451/v1/chat/completions \
   -d '{"model":"ACTUAL_MODEL_ID","messages":[{"role":"user","content":"hello"}],"stream":true}'
 ```
 
-Gemini 接口为 `/v1beta/models/MODEL:generateContent` 与 `:streamGenerateContent`；OpenAI 为 `/v1/chat/completions`。模型列表仅来自实时发现、缓存或显式配置，不内置声称可用的模型清单。高级内容通过 `ais2api` 命名空间无损往返，详见 [协议合同](docs/protocol.md) 和 [扩展 schema](schemas/protocol-extensions.schema.json)。
+Gemini 接口为 `/v1beta/models/MODEL:generateContent` 与 `:streamGenerateContent`；OpenAI 为 `/v1/chat/completions` 与 `/v1/responses`。Responses 支持文本、图片输入、完整历史、函数调用、JSON 返回及命名 SSE 事件，示例与边界见 [Responses 使用说明](docs/responses.md)。模型列表仅来自实时发现、缓存或显式配置，不内置声称可用的模型清单。高级内容通过 `ais2api` 命名空间往返，详见 [协议合同](docs/protocol.md) 和 [扩展 schema](schemas/protocol-extensions.schema.json)。
 
 支持完整历史的真 role 转发与客户端思考签名往返：保留连续同角色消息及原生部件，OpenAI 中途系统提示保留在原位置，工具签名通过 `call_gemini_...` 调用 ID 回传。使用方法与客户端限制见 [真 role 与签名](docs/true-role.md)。
 
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 
-不提供 Responses、Files、embeddings、独立图片/音频接口和网页控制台。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口。`fileData`、无可靠私有协议映射的参数、强制工具执行等请求会明确报错。
+Responses 使用无状态完整历史模式，不提供服务端响应存储、`previous_response_id` 续接及后台任务。不提供 Files、embeddings、独立图片/音频接口和网页控制台。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口。`fileData`、无可靠私有协议映射的参数、强制工具执行等请求会明确报错。
 
 ## 前端管理 API
 

@@ -10,6 +10,7 @@
 #include "ais2api/cookie_import.hpp"
 #include "ais2api/logs.hpp"
 #include "ais2api/log_sources.hpp"
+#include "ais2api/responses.hpp"
 #include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -36,9 +37,9 @@ struct ConnectionSlot {
 struct Work {
     Protocol protocol = Protocol::gemini;
     std::string model, principal, id = "chatcmpl-" + random_hex(12);
-    bool stream = false, include_usage = false;
+    bool stream = false, include_usage = false, responses = false;
     std::size_t input_bytes = 0;
-    json::object body;
+    json::object body, response_options;
     std::shared_ptr<EventPipe> pipe;
     std::shared_ptr<net::steady_timer> wakeup;
     Clock::time_point queued = Clock::now();
@@ -536,6 +537,10 @@ class Service {
             gateway_->reconfigure(cfg);
             if (Clock::now() - work->queued > std::chrono::seconds(cfg.limits.queue_seconds))
                 throw Error(504, "queue_timeout", "Queue wait exceeded limit");
+            if (work->responses) {
+                work->response_options = responses_options(work->body);
+                work->body = responses_to_chat(work->body);
+            }
             if (work->protocol == Protocol::openai)
                 prepare_media(work->body, cfg, token);
             auto request = work->protocol == Protocol::gemini
@@ -690,12 +695,16 @@ net::awaitable<void> send_json(beast::tcp_stream &stream, unsigned status,
     co_await http::async_write(stream, response, net::use_awaitable);
 }
 net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &object,
-                              std::size_t window) {
+                              std::size_t window, bool named = false) {
     auto write = [&](std::string_view part) -> net::awaitable<void> {
         stream.expires_after(30s);
         co_await net::async_write(stream, http::make_chunk(net::buffer(part.data(), part.size())),
                                   net::use_awaitable);
     };
+    if (named) {
+        const auto name = "event: " + string_or(object, "type") + "\n";
+        co_await write(name);
+    }
     co_await write("data: ");
     json::serializer serializer;
     serializer.reset(&object);
@@ -739,6 +748,7 @@ struct ConnectionState {
     bool audit = true;
     unsigned response_status = 200;
     std::string origin, category = "http";
+    std::unique_ptr<ResponsesStream> responses_stream;
 };
 std::map<std::string, std::string> query_parameters(std::string_view target) {
     std::map<std::string, std::string> result;
@@ -1100,9 +1110,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                   (path == "/v1/models" || path.starts_with("/v1/models/") ||
                    path == "/v1beta/models" || path.starts_with("/v1beta/models/"));
     bool openai = request.method() == http::verb::post && path == "/v1/chat/completions";
+    bool responses = request.method() == http::verb::post && path == "/v1/responses";
     bool gemini = request.method() == http::verb::post && path.starts_with("/v1beta/models/") &&
                   (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent"));
-    if (!models && !openai && !gemini)
+    if (!models && !openai && !responses && !gemini)
         throw Error(404, "route_not_found", "Route is not implemented");
     auto principal = service.authenticate_generation(token_from(request));
     if (!principal)
@@ -1190,13 +1201,15 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     std::string().swap(request.body());
     auto work = std::make_shared<Work>();
     work->input_bytes = input_bytes;
-    work->protocol = openai ? Protocol::openai : Protocol::gemini;
+    work->protocol = (openai || responses) ? Protocol::openai : Protocol::gemini;
+    work->responses = responses;
+    if (responses) work->id = "resp_" + random_hex(16);
     work->principal = *principal;
     work->body = std::move(value.as_object());
     work->stream =
-        openai ? bool_or(work->body, "stream") : path.ends_with(":streamGenerateContent");
+        (openai || responses) ? bool_or(work->body, "stream") : path.ends_with(":streamGenerateContent");
     work->model =
-        openai ? string_or(work->body, "model") : decode_url(path.substr(15, path.find(':') - 15));
+        (openai || responses) ? string_or(work->body, "model") : decode_url(path.substr(15, path.find(':') - 15));
     work->pipe = std::make_shared<EventPipe>(cfg.limits.object_bytes);
     auto executor = co_await net::this_coro::executor;
     work->wakeup = std::make_shared<net::steady_timer>(executor);
@@ -1233,7 +1246,9 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             merge_event(aggregate, *event, cfg.limits.object_bytes);
             work->pipe->acknowledge();
         }
-        auto output = openai ? openai_response(aggregate, work->model, work->id, &service.store(),
+        auto output = responses ? responses_response(aggregate, work->model, work->id,
+                                                     work->response_options, &service.store(), work->principal)
+                      : openai ? openai_response(aggregate, work->model, work->id, &service.store(),
                                                work->principal)
                              : aggregate;
         co_await send_json(stream, 200, output);
@@ -1242,6 +1257,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     auto event = co_await next_event(work, cfg.limits.queue_seconds);
     if (!event)
         throw Error(502, "empty_upstream", "Upstream returned no content");
+    if (responses)
+        state.responses_stream = std::make_unique<ResponsesStream>(
+            work->model, work->id, work->response_options, cfg.limits.object_bytes,
+            &service.store(), work->principal);
     http::response<http::empty_body> response(http::status::ok, 11);
     response.set(http::field::content_type, "text/event-stream");
     response.set(http::field::cache_control, "no-cache");
@@ -1252,6 +1271,20 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     stream.expires_after(15s);
     co_await http::async_write_header(stream, header, net::use_awaitable);
     state.committed = true;
+    if (responses) {
+        for (const auto &response_event : state.responses_stream->start())
+            co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
+        while (event) {
+            for (const auto &response_event : state.responses_stream->push(*event))
+                co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
+            work->pipe->acknowledge();
+            event = co_await next_event(work, cfg.limits.queue_seconds);
+        }
+        for (const auto &response_event : state.responses_stream->finish())
+            co_await json_sse(stream, response_event.as_object(), cfg.limits.relay_bytes, true);
+        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_return;
+    }
     const auto created = unix_seconds();
     std::optional<json::value> final_usage;
     std::set<std::int64_t> roles_sent;
@@ -1309,7 +1342,11 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
     if (error) {
         try {
             if (state.committed) {
-                co_await json_sse(stream, error_json(*error, state.openai), 16384);
+                if (state.responses_stream) {
+                    for (const auto &value : state.responses_stream->fail(*error))
+                        co_await json_sse(stream, value.as_object(), 16384, true);
+                } else
+                    co_await json_sse(stream, error_json(*error, state.openai), 16384);
                 co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
             } else if (error->status != 499)
                 co_await send_json(stream, static_cast<unsigned>(error->status),

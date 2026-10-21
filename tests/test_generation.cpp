@@ -10,6 +10,7 @@
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -85,11 +86,23 @@ public:
             emit(finish_event());
             return;
         }
+        if (request.model == "synthetic-responses-tools") {
+            auto calls = text_event("");
+            calls.at("candidates").as_array()[0].as_object().at("content").as_object()["parts"] =
+                json::array{json::object{{"functionCall", {{"name", "lookup"}, {"args", {{"q", "test"}}}}},
+                                         {"thoughtSignature", "synthetic-tool-signature"}}};
+            emit(calls);
+            emit(finish_event());
+            return;
+        }
         emit(text_event("hello "));
         if (request.model == "synthetic-after-content-error")
             throw Error(502, "synthetic_upstream_failure", "Synthetic failure after content");
         emit(text_event("world"));
-        emit(finish_event());
+        auto finished = finish_event();
+        if (request.model == "synthetic-length")
+            finished.at("candidates").as_array()[0].as_object()["finishReason"] = "MAX_TOKENS";
+        emit(finished);
     }
 
     json::array models(std::stop_token = {}) override { return {}; }
@@ -345,6 +358,174 @@ TEST_CASE("OpenAI SSE emits content usage and one final DONE over real HTTP", "[
     REQUIRE(usage_seen);
     REQUIRE(server.state->calls == 1);
     REQUIRE_FALSE(server.failed);
+}
+
+namespace {
+json::array response_events(std::string_view body) {
+    json::array events;
+    while (!body.empty()) {
+        auto end = body.find("\n\n");
+        if (end == std::string_view::npos) throw std::runtime_error("Truncated Responses SSE record");
+        auto record = body.substr(0, end);
+        auto split = record.find("\ndata: ");
+        if (!record.starts_with("event: ") || split == std::string_view::npos)
+            throw std::runtime_error("Responses SSE requires event and data fields");
+        auto event = json::parse(record.substr(split + 7)).as_object();
+        REQUIRE(record.substr(7, split - 7) == string_or(event, "type"));
+        REQUIRE(json::value_to<std::int64_t>(event.at("sequence_number")) ==
+                static_cast<std::int64_t>(events.size()));
+        events.push_back(std::move(event));
+        body.remove_prefix(end + 2);
+    }
+    return events;
+}
+}
+
+TEST_CASE("Responses JSON and named SSE expose consistent text and usage", "[generation][http][responses]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        auto response = server.call("/v1/responses", json::serialize(json::object{
+            {"model", "synthetic-stream"}, {"input", "question"},
+            {"instructions", "Be concise"}, {"stream", streaming}, {"store", false}}));
+        REQUIRE(response.result_int() == 200);
+        json::object result;
+        if (streaming) {
+            REQUIRE(response[http::field::content_type].starts_with("text/event-stream"));
+            auto events = response_events(response.body());
+            REQUIRE(events.front().as_object().at("type") == "response.created");
+            REQUIRE(events.back().as_object().at("type") == "response.completed");
+            result = events.back().as_object().at("response").as_object();
+            auto initial = events.front().as_object().at("response").as_object();
+            REQUIRE(initial.at("id") == result.at("id"));
+            REQUIRE(initial.at("created_at") == result.at("created_at"));
+            std::string text;
+            unsigned deltas = 0;
+            for (const auto &value : events) {
+                const auto &event = value.as_object();
+                if (string_or(event, "type") == "response.output_text.delta") {
+                    text += string_or(event, "delta");
+                    ++deltas;
+                }
+            }
+            REQUIRE(text == "hello world");
+            REQUIRE(deltas == 2);
+            REQUIRE(response.body().find("[DONE]") == std::string::npos);
+        } else result = json::parse(response.body()).as_object();
+        REQUIRE(result.at("object") == "response");
+        REQUIRE(string_or(result, "id").starts_with("resp_"));
+        REQUIRE(result.at("status") == "completed");
+        REQUIRE(result.at("store") == false);
+        const auto &message = result.at("output").as_array().back().as_object();
+        REQUIRE(message.at("type") == "message");
+        REQUIRE(message.at("role") == "assistant");
+        REQUIRE(message.at("content").as_array()[0].as_object().at("text") == "hello world");
+        REQUIRE(result.at("usage").as_object().at("input_tokens") == 4);
+        REQUIRE(result.at("usage").as_object().at("output_tokens") == 3);
+        REQUIRE(result.at("usage").as_object().at("total_tokens") == 7);
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->request.at("systemInstruction").as_object().at("parts")
+                    .as_array()[0].as_object().at("text") == "Be concise");
+    }
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Responses function output replays signed tool history through HTTP", "[generation][http][responses]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        auto response = server.call("/v1/responses", json::serialize(json::object{
+            {"model", "synthetic-responses-tools"}, {"input", "question"}, {"stream", streaming}}));
+        REQUIRE(response.result_int() == 200);
+        auto result = streaming ? response_events(response.body()).back().as_object().at("response").as_object()
+                                : json::parse(response.body()).as_object();
+        auto output = result.at("output").as_array();
+        auto call = std::find_if(output.begin(), output.end(), [](const json::value &value) {
+            return string_or(value.as_object(), "type") == "function_call";
+        });
+        REQUIRE(call != output.end());
+        REQUIRE(call->as_object().at("name") == "lookup");
+        REQUIRE(string_or(call->as_object(), "call_id").starts_with("call_gemini_"));
+        auto call_id = call->as_object().at("call_id");
+        output.push_back(json::object{{"type", "function_call_output"}, {"call_id", call_id}, {"output", "found"}});
+        auto next = server.call("/v1/responses", json::serialize(json::object{
+            {"model", "synthetic-stream"}, {"input", output}}));
+        REQUIRE(next.result_int() == 200);
+        std::lock_guard lock(server.state->mutex);
+        const auto &history = server.state->request.at("contents").as_array();
+        REQUIRE(history[0].as_object().at("parts").as_array()[0].as_object().at("thoughtSignature") ==
+                "synthetic-tool-signature");
+        REQUIRE(history.back().as_object().at("parts").as_array()[0].as_object()
+                    .at("functionResponse").as_object().at("name") == "lookup");
+    }
+}
+
+TEST_CASE("Responses terminal states distinguish token exhaustion and upstream failure", "[generation][http][responses]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        auto limited = server.call("/v1/responses", json::serialize(json::object{
+            {"model", "synthetic-length"}, {"input", "question"}, {"stream", streaming}}));
+        REQUIRE(limited.result_int() == 200);
+        auto result = streaming ? response_events(limited.body()).back().as_object().at("response").as_object()
+                                : json::parse(limited.body()).as_object();
+        REQUIRE(result.at("status") == "incomplete");
+        REQUIRE(result.at("incomplete_details").as_object().at("reason") == "max_output_tokens");
+        if (streaming)
+            REQUIRE(response_events(limited.body()).back().as_object().at("type") == "response.incomplete");
+    }
+    const auto before = server.state->calls.load();
+    auto failed = server.call("/v1/responses", R"({"model":"synthetic-after-content-error","input":"question","stream":true})");
+    REQUIRE(failed.result_int() == 200);
+    auto events = response_events(failed.body());
+    REQUIRE(events.back().as_object().at("type") == "response.failed");
+    auto result = events.back().as_object().at("response").as_object();
+    REQUIRE(result.at("status") == "failed");
+    REQUIRE(result.at("error").as_object().at("code") == "synthetic_upstream_failure");
+    REQUIRE(result.at("output").as_array()[0].as_object().at("status") == "incomplete");
+    REQUIRE(failed.body().find("response.completed") == std::string::npos);
+    REQUIRE(server.state->calls == before + 1);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Unsupported Responses state and tools fail before generation", "[generation][http][responses]") {
+    GenerationServer server;
+    for (const auto &extra : {R"("store":true)", R"("previous_response_id":"resp_other")",
+                              R"("background":true)", R"("tools":[{"type":"web_search"}])",
+                              R"("stream":"true")"}) {
+        auto response = server.call("/v1/responses", std::string(R"({"model":"synthetic-stream","input":"question",)") + extra + "}");
+        INFO(response.body());
+        REQUIRE(response.result_int() == 400);
+        REQUIRE(json::parse(response.body()).as_object().at("error").is_object());
+    }
+    REQUIRE(server.state->calls == 0);
+}
+
+TEST_CASE("Disconnecting Responses SSE cancels active generation", "[generation][http][responses]") {
+    GenerationServer server;
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+    receive_timeout(socket);
+    auto request = server.request("/v1/responses", R"({"model":"synthetic-cancel","input":"cancel me","stream":true})");
+    http::write(socket, request);
+    boost::beast::flat_buffer input;
+    http::response_parser<http::buffer_body> parser;
+    http::read_header(socket, input, parser);
+    REQUIRE(parser.get().result_int() == 200);
+    std::string received = boost::beast::buffers_to_string(input.data());
+    std::array<char, 1024> buffer{};
+    while (received.find("hello ") == std::string::npos && received.size() < 32768)
+        received.append(buffer.data(), socket.read_some(net::buffer(buffer)));
+    REQUIRE(received.find("hello ") != std::string::npos);
+    SECTION("orderly shutdown") {
+        boost::system::error_code ignored;
+        socket.shutdown(tcp::socket::shutdown_both, ignored);
+    }
+    SECTION("connection reset") { socket.set_option(net::socket_base::linger(true, 0)); }
+    socket.close();
+    const auto deadline = Clock::now() + 2s;
+    while (!server.state->cancelled && Clock::now() < deadline)
+        std::this_thread::sleep_for(10ms);
+    REQUIRE(server.state->cancelled);
+    REQUIRE(server.state->calls == 1);
 }
 
 TEST_CASE("OpenAI SSE omits standard usage when include_usage is not requested", "[generation][http]") {

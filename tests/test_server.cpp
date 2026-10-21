@@ -44,6 +44,13 @@ TEST_CASE("HTTP exposes data routes and enforces authentication without Google",
     REQUIRE(server.call(http::verb::get,"/ready").result_int()==503);
     REQUIRE(server.call(http::verb::get,"/v1/models").result_int()==401);
     REQUIRE(server.call(http::verb::get,"/v1beta/models",{},"invalid").result_int()==401);
+    REQUIRE(server.call(http::verb::post,"/v1/responses",R"({"model":"m","input":"hello"})").result_int()==401);
+    auto invalid_response=server.call(http::verb::post,"/v1/responses","{",server.key);
+    REQUIRE(invalid_response.result_int()==400);
+    REQUIRE(json::parse(invalid_response.body()).as_object().at("error").as_object().at("code")=="invalid_json");
+    auto missing_response=server.call(http::verb::post,"/v1/responses",R"({"model":"m","input":"hello"})",server.key);
+    REQUIRE(missing_response.result_int()==503);
+    REQUIRE(missing_response.body().find("no_account")!=std::string::npos);
     auto models=server.call(http::verb::get,"/v1/models",{},server.key);REQUIRE(models.result_int()==200);auto data=json::parse(models.body()).as_object().at("data").as_array();REQUIRE(data.size()==1);REQUIRE(string_or(data[0].as_object(),"id")=="test-explicit-model");
     REQUIRE(server.call(http::verb::get,"/v1/models/test-explicit-model",{},server.key).result_int()==200);
     REQUIRE(server.call(http::verb::get,"/v1beta/models/test-explicit-model",{},server.key).result_int()==200);
