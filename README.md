@@ -74,6 +74,8 @@ curl http://127.0.0.1:18451/v1/chat/completions \
 
 Gemini 接口为 `/v1beta/models/MODEL:generateContent` 与 `:streamGenerateContent`；OpenAI 为 `/v1/chat/completions`。模型列表仅来自实时发现、缓存或显式配置，不内置声称可用的模型清单。高级内容通过 `ais2api` 命名空间无损往返，详见 [协议合同](docs/protocol.md) 和 [扩展 schema](schemas/protocol-extensions.schema.json)。
 
+支持完整历史的真 role 转发与客户端思考签名往返：保留连续同角色消息及原生部件，OpenAI 中途系统提示保留在原位置，工具签名通过 `call_gemini_...` 调用 ID 回传。使用方法与客户端限制见 [真 role 与签名](docs/true-role.md)。
+
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 
 不提供 Responses、Files、embeddings、独立图片/音频接口和网页控制台。HTTP 增加可选的 userscript Cookie 导入入口，其他账号、配置及服务管理仍通过 CLI。`fileData`、无可靠私有协议映射的参数、强制工具执行等请求会明确报错。

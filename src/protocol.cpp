@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <openssl/evp.h>
 
 namespace ais2api {
 namespace {
@@ -202,7 +203,7 @@ json::array encode_part(const json::object &p) {
         auto language = string_or(x, "language", "PYTHON");
         if (language != "PYTHON" && language != "LANGUAGE_UNSPECIFIED")
             invalid("Unsupported executableCode language");
-        put(out, 8, json::array{language == "PYTHON" ? 1 : 0, required_string(x, "code")});
+        put(out, 7, json::array{language == "PYTHON" ? 1 : 0, required_string(x, "code")});
         ++payloads;
     }
     if (auto v = p.if_contains("codeExecutionResult")) {
@@ -218,7 +219,7 @@ json::array encode_part(const json::object &p) {
         auto outcome = outcomes.find(string_or(x, "outcome", "OUTCOME_UNSPECIFIED"));
         if (outcome == outcomes.end())
             invalid("Unsupported code execution outcome");
-        put(out, 9, json::array{outcome->second, *output});
+        put(out, 8, json::array{outcome->second, *output});
         ++payloads;
     }
     if (payloads != 1 && !(payloads == 0 && p.if_contains("thoughtSignature")))
@@ -244,12 +245,14 @@ json::array content_wire(const json::object &c, bool system = false) {
     auto &parts = array(*p, "content.parts");
     if (parts.empty())
         invalid("content.parts cannot be empty");
-    auto role = string_or(c, "role", system ? "system" : "user");
+    auto role = string_or(c, "role", "user");
     if (role != "user" && role != "model" && !(system && role == "system"))
         invalid("Invalid content role");
     json::array encoded;
     for (auto &part : parts) {
         auto p = object(part, "part");
+        if (system && !p.if_contains("text") && !p.if_contains("inlineData"))
+            invalid("systemInstruction supports text and inlineData parts only");
         json::array attachments;
         if (auto fr = p.if_contains("functionResponse"); fr && fr->is_object()) {
             if (auto extra = fr->as_object().if_contains("parts")) {
@@ -265,7 +268,7 @@ json::array content_wire(const json::object &c, bool system = false) {
             encoded.push_back(encode_part(sub));
         }
     }
-    return {encoded, role};
+    return {encoded, system ? "user" : role};
 }
 json::array schemas(const json::value &v, bool allow_null) {
     json::array out;
@@ -420,6 +423,12 @@ std::string finish_name(std::int64_t n) {
 }
 json::object decode_part(const json::array &a) {
     json::object p;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!a[i].is_null() && i != 0 && i != 1 && i != 2 && i != 3 && i != 4 &&
+            i != 7 && i != 8 && i != 10 && i != 11 && i != 12 && i != 14)
+            throw Error(502, "invalid_upstream", "Unsupported upstream part payload");
+    if (!at(a, 14).is_null() && !at(a, 14).is_string())
+        throw Error(502, "invalid_upstream", "Malformed thought signature");
     if (at(a, 1).is_string())
         p["text"] = a[1];
     bool thinking = (!at(a, 0).is_null() && (at(a, 0) == true || at(a, 0) == 1)) ||
@@ -433,8 +442,11 @@ json::object decode_part(const json::array &a) {
     }
     for (auto [key, primary, fallback] :
          {std::tuple{"functionCall", 3, 10}, std::tuple{"functionResponse", 4, 11}}) {
-        auto &v = at(a, primary).is_array() ? at(a, primary) : at(a, fallback);
-        if (v.is_array() && at(v.as_array(), 0).is_string()) {
+        auto &v = !at(a, primary).is_null() ? at(a, primary) : at(a, fallback);
+        const bool thought_marker = primary == 3 && at(a, primary).is_null() && v.is_bool();
+        if (!v.is_null() && !thought_marker) {
+            if (!v.is_array() || !at(v.as_array(), 0).is_string() || str(v.as_array()[0]).empty())
+                throw Error(502, "invalid_upstream", "Malformed function part");
             auto &x = v.as_array();
             json::object f{{"name", x[0]},
                            {primary == 3 ? "args" : "response",
@@ -444,20 +456,23 @@ json::object decode_part(const json::array &a) {
             p[key] = f;
         }
     }
-    if (at(a, 8).is_string())
-        p["executableCode"] = json::object{{"language", "PYTHON"}, {"code", a[8]}};
-    else if (at(a, 8).is_array()) {
-        auto &code = a[8].as_array();
-        if (at(code, 1).is_string())
-            p["executableCode"] = json::object{
-                {"language", number(at(code, 0)) == 1 ? "PYTHON" : "LANGUAGE_UNSPECIFIED"},
-                {"code", code[1]}};
+    if (!at(a, 7).is_null()) {
+        auto &v = at(a, 7);
+        if (!v.is_array() || !at(v.as_array(), 1).is_string() ||
+            (at(v.as_array(), 0) != 0 && at(v.as_array(), 0) != 1))
+            throw Error(502, "invalid_upstream", "Malformed executable code part");
+        auto &code = v.as_array();
+        p["executableCode"] = json::object{
+            {"language", number(code[0]) == 1 ? "PYTHON" : "LANGUAGE_UNSPECIFIED"},
+            {"code", code[1]}};
     }
-    if (at(a, 9).is_string())
-        p["codeExecutionResult"] =
-            json::object{{"outcome", "OUTCOME_UNSPECIFIED"}, {"output", a[9]}};
-    else if (at(a, 9).is_array()) {
-        auto &code = a[9].as_array();
+    if (!at(a, 8).is_null()) {
+        auto &v = at(a, 8);
+        if (!v.is_array() || !at(v.as_array(), 1).is_string() ||
+            !at(v.as_array(), 0).is_number() || number(v.as_array()[0], -1) < 0 ||
+            number(v.as_array()[0], -1) > 3)
+            throw Error(502, "invalid_upstream", "Malformed code execution result");
+        auto &code = v.as_array();
         static const char *outcomes[] = {"OUTCOME_UNSPECIFIED", "OUTCOME_OK", "OUTCOME_FAILED",
                                          "OUTCOME_DEADLINE_EXCEEDED"};
         auto n = number(at(code, 0));
@@ -467,6 +482,19 @@ json::object decode_part(const json::array &a) {
     }
     if (at(a, 14).is_string())
         p["thoughtSignature"] = a[14];
+    bool payload = false;
+    for (auto key : {"text", "inlineData", "functionCall", "functionResponse",
+                     "executableCode", "codeExecutionResult"})
+        payload = payload || p.if_contains(key);
+    if (!payload) {
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (!a[i].is_null() && i != 0 && i != 10 && i != 12 && i != 14)
+                throw Error(502, "invalid_upstream", "Unsupported upstream part payload");
+        if (!p.if_contains("thoughtSignature")) return {};
+    }
+    if (p.size() <= 2 && p.if_contains("text") && string_or(p, "text").empty() &&
+        !p.if_contains("thoughtSignature"))
+        return {};
     return p;
 }
 json::array tool_wire(const json::array &tools, const json::object *config) {
@@ -745,9 +773,8 @@ json::array encode_request(const Request &r, const json::array &base, std::strin
         invalid("contents is required");
     put(out, 1, encode_contents(array(*c, "contents")));
     put(out, 4, json::value(snapshot));
-    put(out, 7, json::value("models/" + r.model));
     put(out, 10, 1);
-    for (auto i : {2, 3, 5, 6, 11})
+    for (auto i : {2, 3, 5, 6, 7, 11})
         put(out, i, nullptr);
     if (auto p = r.gemini.if_contains("generationConfig"))
         put(out, 3, generation_wire(object(*p, "generationConfig")));
@@ -809,7 +836,8 @@ json::object decode_chunk(const json::value &wire) {
                             auto p = decode_part(part.as_array());
                             if (!p.empty())
                                 parts.push_back(p);
-                        }
+                        } else
+                            throw Error(502, "invalid_upstream", "Malformed upstream part");
                 candidate["content"] = json::object{
                     {"role", str(at(content, 1)).empty() ? "model" : str(at(content, 1))},
                     {"parts", parts}};
@@ -912,6 +940,7 @@ void merge_event(json::object &aggregate, const json::object &event, std::size_t
                             auto &a = parts.back().as_object();
                             auto &b = part.as_object();
                             if (a.if_contains("text") && b.if_contains("text") &&
+                                !a.if_contains("thoughtSignature") && !b.if_contains("thoughtSignature") &&
                                 bool_or(a, "thought") == bool_or(b, "thought") && a.size() <= 2 &&
                                 b.size() <= 2 && a.at("text").is_string() &&
                                 b.at("text").is_string()) {
@@ -1041,6 +1070,57 @@ std::string finish_openai(std::string reason, bool calls) {
         return "content_filter";
     return calls ? "tool_calls" : "stop";
 }
+struct ClientCall {
+    std::string id;
+    std::optional<std::string> signature;
+    bool encoded = false;
+};
+ClientCall client_call(std::string id) {
+    constexpr std::string_view prefix = "call_gemini_";
+    if (!id.starts_with(prefix))
+        return {std::move(id), {}};
+    auto encoded = id.substr(prefix.size());
+    if (encoded.empty() || encoded.size() > 4 * 1024 * 1024)
+        invalid("Malformed call_gemini_ tool id");
+    for (auto &c : encoded) {
+        if (c == '-') c = '+';
+        else if (c == '_') c = '/';
+        else if (!std::isalnum(static_cast<unsigned char>(c)) && c != '+' && c != '/' && c != '=')
+            invalid("Malformed call_gemini_ tool id");
+    }
+    while (encoded.size() % 4) encoded += '=';
+    std::string decoded(encoded.size(), '\0');
+    auto size = EVP_DecodeBlock(reinterpret_cast<unsigned char *>(decoded.data()),
+                                reinterpret_cast<const unsigned char *>(encoded.data()),
+                                static_cast<int>(encoded.size()));
+    if (size < 0) invalid("Malformed call_gemini_ tool id");
+    if (encoded.ends_with("==")) size -= 2;
+    else if (encoded.ends_with("=")) --size;
+    decoded.resize(static_cast<std::size_t>(size));
+    boost::system::error_code ec;
+    auto value = json::parse(decoded, ec);
+    if (ec || !value.is_array() || value.as_array().size() != 3)
+        invalid("Malformed call_gemini_ tool id");
+    auto &a = value.as_array();
+    if ((!a[0].is_null() && !a[0].is_string()) ||
+        (!a[1].is_null() && !a[1].is_string()) || !a[2].is_string())
+        invalid("Malformed call_gemini_ tool id");
+    return {str(a[0]), a[1].is_string() ? std::optional<std::string>(str(a[1])) : std::nullopt, true};
+}
+std::string signed_call_id(std::string_view id, const json::value &signature, std::string nonce) {
+    auto payload = json::serialize(json::array{id.empty() ? json::value(nullptr) : json::value(id),
+                                               signature, std::move(nonce)});
+    std::string encoded(4 * ((payload.size() + 2) / 3), '\0');
+    EVP_EncodeBlock(reinterpret_cast<unsigned char *>(encoded.data()),
+                    reinterpret_cast<const unsigned char *>(payload.data()),
+                    static_cast<int>(payload.size()));
+    for (auto &c : encoded) {
+        if (c == '+') c = '-';
+        else if (c == '/') c = '_';
+    }
+    while (encoded.ends_with('=')) encoded.pop_back();
+    return "call_gemini_" + encoded;
+}
 json::object openai_message(const json::object &content, Store *store, std::string_view principal,
                             std::string_view response_id, bool delta,
                             json::object *native_output = nullptr) {
@@ -1049,7 +1129,8 @@ json::object openai_message(const json::object &content, Store *store, std::stri
     std::string registry = "stream:" + std::string(response_id);
     json::object indices =
         store ? store->get_tool(principal, registry).value_or(json::object{}) : json::object{};
-    std::string text;
+    std::string text, reasoning;
+    std::optional<json::value> text_signature;
     json::array calls;
     auto p = content.if_contains("parts");
     bool rich = false;
@@ -1059,6 +1140,11 @@ json::object openai_message(const json::object &content, Store *store, std::stri
             auto &part = object(value, "response part");
             if (auto t = part.if_contains("text"); t && t->is_string() && !bool_or(part, "thought"))
                 text += str(*t);
+            if (auto t = part.if_contains("text"); t && t->is_string() && bool_or(part, "thought"))
+                reasoning += str(*t);
+            if (!part.if_contains("functionCall"))
+                if (auto sig = part.if_contains("thoughtSignature"))
+                    text_signature = *sig;
             if (part.if_contains("thoughtSignature") || bool_or(part, "thought") ||
                 part.if_contains("inlineData") || part.if_contains("executableCode") ||
                 part.if_contains("codeExecutionResult") || part.if_contains("functionResponse"))
@@ -1066,6 +1152,7 @@ json::object openai_message(const json::object &content, Store *store, std::stri
             if (auto f = part.if_contains("functionCall")) {
                 auto fn = object(*f, "functionCall");
                 auto id = string_or(fn, "id");
+                const auto upstream_id = id;
                 std::size_t index = calls.size();
                 if (id.empty()) {
                     const auto ordinal = store ? indices.size() : calls.size();
@@ -1090,13 +1177,18 @@ json::object openai_message(const json::object &content, Store *store, std::stri
                         store->put_tool(principal, registry, indices);
                     }
                     json::object metadata = store->get_tool(principal, id).value_or(json::object{});
+                    metadata.erase("thoughtSignature");
                     metadata["name"] = string_or(fn, "name");
                     metadata["response_id"] = response_id;
                     if (auto args = fn.if_contains("args"))
                         metadata["args"] = *args;
-                    if (auto sig = part.if_contains("thoughtSignature"))
-                        metadata["thoughtSignature"] = *sig;
                     store->put_tool(principal, id, metadata);
+                }
+                if (auto sig = part.if_contains("thoughtSignature"); sig || upstream_id.empty()) {
+                    id = signed_call_id(upstream_id, sig ? *sig : json::value(nullptr),
+                                        sha256(std::string(response_id) + ":" + id).substr(0, 16));
+                    native_content.at("parts").as_array()[part_index].as_object()
+                        .at("functionCall").as_object()["id"] = id;
                 }
                 json::object call{
                     {"id", id},
@@ -1119,6 +1211,10 @@ json::object openai_message(const json::object &content, Store *store, std::stri
         message["content"] = nullptr;
     if (!calls.empty())
         message["tool_calls"] = calls;
+    if (!reasoning.empty())
+        message["reasoning_content"] = reasoning;
+    if (text_signature)
+        message["thought_signature"] = *text_signature;
     if (rich && !delta)
         message["ais2api"] = json::object{{"gemini_content", native_content}};
     if (native_output)
@@ -1167,10 +1263,12 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
     if (auto v = input.if_contains("parallel_tool_calls"); v && !v->is_bool())
         invalid("parallel_tool_calls must be boolean");
     json::array contents, system;
+    bool conversation_started = false, previous_tool = false;
     std::map<std::string, std::string> call_names;
     for (auto &message : array(*m, "messages")) {
         auto &msg = object(message, "message");
-        keys(msg, {"role", "content", "name", "tool_calls", "tool_call_id", "refusal", "ais2api"},
+        keys(msg, {"role", "content", "name", "tool_calls", "tool_call_id", "refusal", "ais2api",
+                   "reasoning_content", "thought_signature", "signature"},
              "message");
         auto role = required_string(msg, "role");
         if (role != "system" && role != "developer" && role != "user" && role != "assistant" &&
@@ -1178,6 +1276,17 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
             invalid("Unsupported message role");
         auto c = msg.if_contains("content");
         auto parts = c ? message_parts(*c) : json::array{};
+        const auto reasoning = msg.if_contains("reasoning_content");
+        const auto signature = msg.if_contains("thought_signature");
+        const auto alias_signature = msg.if_contains("signature");
+        if ((reasoning || signature || alias_signature) && role != "assistant")
+            invalid("Reasoning and signature fields require assistant role");
+        for (auto field : {reasoning, signature, alias_signature})
+            if (field && !field->is_string())
+                invalid("Reasoning and signature fields must be strings");
+        if (signature && alias_signature && *signature != *alias_signature)
+            invalid("thought_signature conflicts with signature");
+        auto supplied_signature = signature ? signature : alias_signature;
         bool native = false;
         if (auto ext = msg.if_contains("ais2api")) {
             auto &e = object(*ext, "message.ais2api");
@@ -1203,6 +1312,7 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
                 if (string_or(call, "type") != "function")
                     invalid("Only function tools are supported");
                 auto id = required_string(call, "id");
+                const auto decoded = client_call(id);
                 auto &f = object(required_value(call, "function"), "tool function");
                 keys(f, {"name", "arguments"}, "tool function");
                 auto name = required_string(f, "name");
@@ -1211,9 +1321,11 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
                     invalid("Tool arguments are required");
                 auto args = args_json(*arg);
                 call_names[id] = name;
-                json::object part{
-                    {"functionCall", json::object{{"name", name}, {"args", args}, {"id", id}}}};
-                if (store)
+                json::object function{{"name", name}, {"args", args}};
+                if (!decoded.id.empty()) function["id"] = decoded.id;
+                json::object part{{"functionCall", function}};
+                if (decoded.signature) part["thoughtSignature"] = *decoded.signature;
+                if (store && !decoded.signature)
                     if (auto metadata = store->get_tool(principal, id)) {
                         if (auto old_name = metadata->if_contains("name");
                             old_name && str(*old_name) != name)
@@ -1221,8 +1333,6 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
                         if (auto old_args = metadata->if_contains("args");
                             old_args && *old_args != args)
                             invalid("tool_call_id conflicts with its recorded function arguments");
-                        if (auto sig = metadata->if_contains("thoughtSignature"))
-                            part["thoughtSignature"] = *sig;
                     }
                 if (native) {
                     bool match = false;
@@ -1250,8 +1360,40 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
             if (!c->is_string() || str(*c) != native_text)
                 invalid("gemini_content conflicts with standard content");
         }
+        if (native) {
+            std::string native_reasoning;
+            std::optional<json::value> native_signature;
+            for (auto &np : parts) {
+                auto &part = np.as_object();
+                if (bool_or(part, "thought")) native_reasoning += string_or(part, "text");
+                if (!part.if_contains("functionCall"))
+                    if (auto sig = part.if_contains("thoughtSignature")) native_signature = *sig;
+                if (auto fn = part.if_contains("functionCall")) {
+                    auto &f = fn->as_object();
+                    auto decoded = client_call(string_or(f, "id"));
+                    if (decoded.encoded) {
+                        if (auto sig = part.if_contains("thoughtSignature");
+                            sig && (!decoded.signature || str(*sig) != *decoded.signature))
+                            invalid("gemini_content conflicts with tool signature");
+                        if (decoded.signature) part["thoughtSignature"] = *decoded.signature;
+                        if (decoded.id.empty()) f.erase("id");
+                        else f["id"] = decoded.id;
+                    }
+                }
+            }
+            if (reasoning && str(*reasoning) != native_reasoning)
+                invalid("gemini_content conflicts with reasoning_content");
+            if (supplied_signature && (!native_signature || *native_signature != *supplied_signature))
+                invalid("gemini_content conflicts with thought_signature");
+        } else if (role == "assistant") {
+            if (reasoning && !reasoning->as_string().empty())
+                parts.insert(parts.begin(), json::object{{"text", *reasoning}, {"thought", true}});
+            if (supplied_signature)
+                parts.push_back(json::object{{"text", ""}, {"thoughtSignature", *supplied_signature}});
+        }
         if (role == "tool") {
             auto id = required_string(msg, "tool_call_id");
+            auto decoded = client_call(id);
             auto name = call_names[id];
             if (name.empty() && store)
                 if (auto metadata = store->get_tool(principal, id))
@@ -1264,19 +1406,25 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
             auto result = json::parse(c->as_string(), ec);
             if (ec || !result.is_object())
                 result = json::object{{"result", *c}};
-            parts = json::array{
-                json::object{{"functionResponse",
-                              json::object{{"name", name}, {"response", result}, {"id", id}}}}};
+            json::object response{{"name", name}, {"response", result}};
+            if (!decoded.id.empty()) response["id"] = decoded.id;
+            parts = json::array{json::object{{"functionResponse", response}}};
         }
-        if (role == "system" || role == "developer") {
+        if ((role == "system" || role == "developer") && !conversation_started) {
             for (auto &p : parts)
                 system.push_back(p);
             continue;
         }
         if (parts.empty())
             invalid("Message has no supported content");
+        conversation_started = true;
+        if (role == "tool" && previous_tool) {
+            auto &previous = contents.back().as_object().at("parts").as_array();
+            for (auto &part : parts) previous.push_back(part);
+        } else
         contents.push_back(
             json::object{{"role", role == "assistant" ? "model" : "user"}, {"parts", parts}});
+        previous_tool = role == "tool";
     }
     json::object body{{"contents", contents}}, gen;
     if (!system.empty())

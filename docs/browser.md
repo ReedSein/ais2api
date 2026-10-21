@@ -19,14 +19,18 @@ MakerSuite snapshot adapter, observes its real service argument, and captures a
 real GenerateContent request from the page. A small bootstrap prompt is inserted
 and Run is clicked. Captured bootstrap generation and prompt-save fetches receive
 empty local responses to avoid sending the bootstrap generation or saving chat
-history. The browser must expose the supported fetch path and snapshot adapter;
-XHR or changed application internals are reported as `browser_incompatible`.
+history. Bootstrap best-effort enables Temporary chat and stops/restores the
+draft when complete or failed. Both fetch and XHR capture are supported; changed
+application internals are reported as `browser_incompatible`.
 There is no invented request template or snapshot fallback.
 
 Before each request the bridge obtains a fresh page-service snapshot of the
 content hash. This anti-abuse ticket is separate from part-level thoughtSignature
 metadata handled by the wire codec. Request encoding uses the live captured
-template. Credentials and required request headers remain inside the page.
+template. Hashing uses the final encoded contents, including expanded tool-result
+attachments; code and tool parts contribute empty fields to the single-space
+join. Each send rebuilds SAPISIDHASH from the current page cookie and sets the
+verified account slot. Credentials and required headers remain inside the page.
 
 Streaming uses fetch's BYOB reader with a fresh 32 KiB buffer. Only one base64
 chunk can be pending. C++ decodes the chunk and incrementally parses depth-three

@@ -303,29 +303,30 @@ void pause(std::stop_token token, std::chrono::milliseconds duration) {
     const auto deadline = Clock::now() + duration;
     while (Clock::now() < deadline) { check_cancel(token); std::this_thread::sleep_for(20ms); }
 }
-std::string content_hash(const Request& request) {
-    std::vector<std::string> fields;
-    const auto contents = request.gemini.if_contains("contents");
-    if (contents && contents->is_array()) for (const auto& content : contents->as_array()) {
-        if (!content.is_object()) continue;
-        auto parts = content.as_object().if_contains("parts");
-        if (!parts || !parts->is_array()) continue;
-        for (const auto& part : parts->as_array()) {
-            if (!part.is_object()) continue;
-            const auto& p = part.as_object();
-            if (auto text = p.if_contains("text"); text && text->is_string()) fields.emplace_back(text->as_string());
-            else if (auto data = p.if_contains("inlineData"); data && data->is_object()) fields.push_back(string_or(data->as_object(), "data"));
-            else if (auto file = p.if_contains("fileData"); file && file->is_object()) fields.push_back(string_or(file->as_object(), "fileUri"));
-            else if (auto code = p.if_contains("executableCode"); code && code->is_object()) fields.push_back(string_or(code->as_object(), "code"));
-            else if (auto result = p.if_contains("codeExecutionResult"); result && result->is_object()) fields.push_back(string_or(result->as_object(), "output"));
-            else fields.emplace_back();
+std::string content_hash(const json::array& wire) {
+    std::string joined;
+    bool first = true;
+    if (wire.size() > 1 && wire[1].is_array()) for (const auto& content : wire[1].as_array()) {
+        if (!content.is_array() || content.as_array().empty() || !content.as_array()[0].is_array()) continue;
+        for (const auto& part : content.as_array()[0].as_array()) {
+            if (!first) joined += ' ';
+            first = false;
+            if (!part.is_array()) continue;
+            const auto& p = part.as_array();
+            if (p.size() > 1 && p[1].is_string()) joined += p[1].as_string();
+            else if (p.size() > 2 && p[2].is_array()) {
+                const auto& data = p[2].as_array();
+                if (data.size() > 1 && data[1].is_string()) joined += data[1].as_string();
+            }
+            // Function calls/results and executable code/results contribute an
+            // empty field, preserving the page's single-space join semantics.
         }
     }
-    std::string joined;
-    for (std::size_t i = 0; i < fields.size(); ++i) { if (i) joined += ' '; joined += fields[i]; }
     return sha256(joined);
 }
 } // namespace
+
+std::string browser_detail::wire_content_hash(const json::array& wire) { return content_hash(wire); }
 
 struct BrowserGateway::Impl {
     Config config;
@@ -479,28 +480,36 @@ struct BrowserGateway::Impl {
         if (!bootstrap || !base_template.empty()) return;
         auto prepared = eval("globalThis.__ais2bridge.bootstrap()", token);
         if (!prepared.is_bool() || !prepared.as_bool()) incompatible("Cannot prepare the real page bootstrap prompt");
-        pause(token, 350ms);
-        auto triggered = eval("globalThis.__ais2bridge.run()", token);
-        if (!triggered.is_bool() || !triggered.as_bool()) incompatible("Cannot identify a supported page Run button");
-        const auto deadline = Clock::now() + 45s;
         bool template_seen = false;
-        while (Clock::now() < deadline) {
-            identity(token);
-            auto capability = eval("globalThis.__ais2bridge.capability()", token);
-            if (capability.is_object()) {
-                auto t = capability.as_object().if_contains("template");
-                if (t && t->is_object()) {
-                    auto body = t->as_object().if_contains("body");
-                    if (body && body->is_array()) {
-                        template_seen = true;
-                        if (bool_or(capability.as_object(), "snapshot")) {
-                            base_template = body->as_array(); last_status = "gateway_ready"; return;
+        try {
+            pause(token, 350ms);
+            auto triggered = eval("globalThis.__ais2bridge.run()", token);
+            if (!triggered.is_bool() || !triggered.as_bool()) incompatible("Cannot identify a supported page Run button");
+            const auto deadline = Clock::now() + 45s;
+            while (Clock::now() < deadline) {
+                identity(token);
+                auto capability = eval("globalThis.__ais2bridge.capability()", token);
+                if (capability.is_object()) {
+                    auto t = capability.as_object().if_contains("template");
+                    if (t && t->is_object()) {
+                        auto body = t->as_object().if_contains("body");
+                        if (body && body->is_array()) {
+                            template_seen = true;
+                            if (bool_or(capability.as_object(), "snapshot")) {
+                                base_template = body->as_array();
+                                eval("globalThis.__ais2bridge.finishBootstrap()", token);
+                                last_status = "gateway_ready"; return;
+                            }
                         }
                     }
                 }
+                pause(token, 150ms);
             }
-            pause(token, 150ms);
+        } catch (...) {
+            try { eval("globalThis.__ais2bridge.finishBootstrap()", {}, 2s); } catch (...) {}
+            throw;
         }
+        try { eval("globalThis.__ais2bridge.finishBootstrap()", {}, 2s); } catch (...) {}
         last_status = template_seen ? "bootstrap_snapshot_missing" : "bootstrap_template_missing";
         incompatible(template_seen
             ? "Live GenerateContent was captured but its snapshot adapter could not be verified"
@@ -601,13 +610,14 @@ json::array BrowserGateway::models(std::stop_token cancel) {
 void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
-    auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(request)) + ")", cancel, 15s);
+    auto wire = encode_request(request, impl_->base_template, "");
+    auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(wire)) + ")", cancel, 15s);
     if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
-    const auto wire = encode_request(request, impl_->base_template, std::string_view(snapshot.as_string()));
+    wire[4] = snapshot;
     const auto body = json::serialize(wire);
     const auto chunk_bytes = std::min<std::size_t>(32768, impl_->config.limits.relay_bytes);
     if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
-    impl_->eval("globalThis.__ais2bridge.start({body:" + quote_js(body) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
+    impl_->eval("globalThis.__ais2bridge.start({body:" + quote_js(body) + ",authUser:" + quote_js(account.auth_user) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
     WireStreamParser parser(impl_->config.limits.object_bytes);
     const auto began = Clock::now();
     auto activity = began;

@@ -4,6 +4,19 @@
   "title": "ais2api protocol extensions version 1",
   "description": "Schemas for the ais2api property only. Standard Gemini/OpenAI properties remain defined by their respective protocols.",
   "$defs": {
+    "clientToolCallId": {
+      "type": "string",
+      "description": "Opaque OpenAI tool ID. call_gemini_ IDs carry base64url JSON [original ID or null, thought signature or null, nonce]; clients must return them unchanged. Decoded signatures are not authentication tokens."
+    },
+    "assistantCompatibilityFields": {
+      "type": "object",
+      "description": "Additional OpenAI assistant message/delta fields. Native gemini_content is authoritative when provided; compatibility fields must agree with it.",
+      "properties": {
+        "reasoning_content": {"type": "string"},
+        "thought_signature": {"type": "string"},
+        "signature": {"type": "string", "description": "Input alias for thought_signature; both must agree if present."}
+      }
+    },
     "part": {
       "type": "object",
       "properties": {

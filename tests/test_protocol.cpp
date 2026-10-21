@@ -293,14 +293,16 @@ TEST_CASE("OpenAI tools retain independent ids and native signatures through agg
     auto &msg = response.at("choices").as_array()[0].as_object().at("message").as_object();
     auto &calls = msg.at("tool_calls").as_array();
     REQUIRE(calls.size() == 2);
-    REQUIRE(calls[0].as_object().at("id") == "left-id");
-    REQUIRE(calls[1].as_object().at("id") == "right-id");
+    REQUIRE(string_or(calls[0].as_object(), "id").starts_with("call_gemini_"));
+    REQUIRE(string_or(calls[1].as_object(), "id").starts_with("call_gemini_"));
     auto roundtrip =
         normalize_openai(json::object{{"model", "m"}, {"messages", json::array{msg}}}, Config{});
     auto &parts = roundtrip.gemini.at("contents").as_array()[0].as_object().at("parts").as_array();
     REQUIRE(parts.size() == 2);
     REQUIRE(parts[0].as_object().at("thoughtSignature") == "left-signature");
     REQUIRE(parts[1].as_object().at("thoughtSignature") == "right-signature");
+    REQUIRE(parts[0].as_object().at("functionCall").as_object().at("id") == "left-id");
+    REQUIRE(parts[1].as_object().at("functionCall").as_object().at("id") == "right-id");
     auto delta = openai_delta(event, "m", "reply");
     auto &streamed = delta.at("choices")
                          .as_array()[0]
@@ -330,7 +332,7 @@ TEST_CASE("Finish and usage convert to standard OpenAI semantics", "[protocol]")
     REQUIRE(nullable[17].as_array().size() == 1);
 }
 
-TEST_CASE("Tool registry scopes signatures to principal and maintains stream call indices",
+TEST_CASE("Tool registry maintains stream indices while signatures roundtrip statelessly",
           "[protocol]") {
     struct Fixture {
         fs::path directory = fs::temp_directory_path() / ("ais2api-protocol-" + random_hex(10));
@@ -368,7 +370,8 @@ TEST_CASE("Tool registry scopes signatures to principal and maintains stream cal
     auto repeat =
         openai_delta(decode_chunk(response_wire(one(first))), "m", "response", &store, "key-one");
     REQUIRE(index(repeat) == 0);
-    REQUIRE(store.get_tool("key-one", "call-a")->at("thoughtSignature") == "sig-a");
+    REQUIRE(store.get_tool("key-one", "call-a").has_value());
+    REQUIRE_FALSE(store.get_tool("key-one", "call-a")->if_contains("thoughtSignature"));
     REQUIRE_FALSE(store.get_tool("key-two", "call-a").has_value());
     auto finish =
         openai_delta(decode_chunk(response_wire({}, 1)), "m", "response", &store, "key-one");
@@ -376,22 +379,21 @@ TEST_CASE("Tool registry scopes signatures to principal and maintains stream cal
     Config cfg;
     auto request = obj(
         R"({"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call-a","type":"function","function":{"name":"f","arguments":"{}"}}]}]})");
+    auto raw = normalize_openai(request, cfg, &store, "key-one");
+    REQUIRE_FALSE(raw.gemini.at("contents").as_array()[0].as_object().at("parts")
+                      .as_array()[0].as_object().if_contains("thoughtSignature"));
+    auto public_call = a.at("choices").as_array()[0].as_object().at("delta")
+                           .as_object().at("tool_calls").as_array()[0].as_object();
+    public_call.erase("index");
+    REQUIRE(string_or(public_call, "id").starts_with("call_gemini_"));
+    request.at("messages").as_array()[0].as_object()["tool_calls"] = json::array{public_call};
     auto restored = normalize_openai(request, cfg, &store, "key-one");
-    REQUIRE(restored.gemini.at("contents")
-                .as_array()[0]
-                .as_object()
-                .at("parts")
-                .as_array()[0]
-                .as_object()
-                .at("thoughtSignature") == "sig-a");
     auto isolated = normalize_openai(request, cfg, &store, "key-two");
-    REQUIRE_FALSE(isolated.gemini.at("contents")
-                      .as_array()[0]
-                      .as_object()
-                      .at("parts")
-                      .as_array()[0]
-                      .as_object()
-                      .if_contains("thoughtSignature"));
+    REQUIRE(restored.gemini == isolated.gemini);
+    auto &part = restored.gemini.at("contents").as_array()[0].as_object().at("parts")
+                     .as_array()[0].as_object();
+    REQUIRE(part.at("thoughtSignature") == "sig-a");
+    REQUIRE(part.at("functionCall").as_object().at("id") == "call-a");
 }
 
 TEST_CASE("Unverified controls fail instead of advertising forced execution", "[protocol]") {
@@ -436,8 +438,8 @@ TEST_CASE("Executable code enums and function-response media survive request enc
     REQUIRE(attached.size() == 3);
     REQUIRE(attached[2].as_array()[14] == "imgsig");
     auto &generated = encoded[1].as_array()[0].as_array();
-    REQUIRE(generated[0].as_array()[8] == json::array{1, "print(2)"});
-    REQUIRE(generated[1].as_array()[9] == json::array{2, "failure"});
+    REQUIRE(generated[0].as_array()[7] == json::array{1, "print(2)"});
+    REQUIRE(generated[1].as_array()[8] == json::array{2, "failure"});
     REQUIRE(generated[2].as_array()[12] == 1);
     auto decoded = decode_chunk(response_wire(generated));
     auto &result = decoded.at("candidates")
@@ -522,9 +524,13 @@ TEST_CASE("Repeated idless stream functions allocate independent calls and signa
     REQUIRE(first_id != second_id);
     REQUIRE(second_id != third_id);
     REQUIRE(first_id != third_id);
-    REQUIRE(store.get_tool("owner", first_id)->at("thoughtSignature") == "signature-a");
-    REQUIRE(store.get_tool("owner", second_id)->at("thoughtSignature") == "signature-b");
-    REQUIRE_FALSE(store.get_tool("owner", third_id)->if_contains("thoughtSignature"));
+    REQUIRE(first_id.starts_with("call_gemini_"));
+    REQUIRE(second_id.starts_with("call_gemini_"));
+    REQUIRE(third_id.starts_with("call_gemini_"));
+    REQUIRE_FALSE(store.get_tool("owner", first_id));
+    REQUIRE_FALSE(store.get_tool("owner", second_id));
+    REQUIRE_FALSE(store.get_tool("owner", third_id));
+    REQUIRE(json::serialize(*store.get_tool("owner", "stream:idless-stream")).find("signature-") == std::string::npos);
     REQUIRE_FALSE(store.get_tool("other-owner", first_id));
     auto &native = a.at("choices")
                        .as_array()[0]
@@ -564,12 +570,14 @@ TEST_CASE("Repeated idless stream functions allocate independent calls and signa
         {"messages", json::array{json::object{{"role", "assistant"},
                                               {"content", nullptr},
                                               {"tool_calls", json::array{first, second, third}}}}}};
-    auto restored = normalize_openai(request, Config{}, &store, "owner");
+    auto restored = normalize_openai(request, Config{}, &store, "other-owner");
     auto &parts = restored.gemini.at("contents").as_array()[0].as_object().at("parts").as_array();
     REQUIRE(parts.size() == 3);
     REQUIRE(parts[0].as_object().at("thoughtSignature") == "signature-a");
     REQUIRE(parts[1].as_object().at("thoughtSignature") == "signature-b");
     REQUIRE_FALSE(parts[2].as_object().if_contains("thoughtSignature"));
+    for (const auto &part : parts)
+        REQUIRE_FALSE(part.as_object().at("functionCall").as_object().if_contains("id"));
 }
 TEST_CASE("Upstream tool ids retain their stream index among idless calls",
           "[protocol][regression]") {
@@ -584,7 +592,7 @@ TEST_CASE("Upstream tool ids retain their stream index among idless calls",
     auto next =
         stream_tool(openai_delta(native_tool_event(), "m", "mixed-stream", &store, "owner"));
     REQUIRE(anonymous.at("index") == 0);
-    REQUIRE(named.at("id") == "upstream-id");
+    REQUIRE(string_or(named, "id").starts_with("call_gemini_"));
     REQUIRE(named.at("index") == 1);
     REQUIRE(repeat.at("id") == named.at("id"));
     REQUIRE(repeat.at("index") == named.at("index"));
@@ -616,18 +624,20 @@ TEST_CASE("Signed idless function output roundtrips standard and native messages
     auto roundtrip = normalize_openai(request, Config{});
     auto &contents = roundtrip.gemini.at("contents").as_array();
     auto &restored = contents[0].as_object().at("parts").as_array();
-    REQUIRE(restored == native);
+    auto expected_native = native;
+    expected_native[1].as_object().at("functionCall").as_object().erase("id");
+    expected_native[2].as_object().at("functionCall").as_object().erase("id");
+    REQUIRE(restored == expected_native);
+    REQUIRE_FALSE(restored[1].as_object().at("functionCall").as_object().if_contains("id"));
+    REQUIRE_FALSE(restored[2].as_object().at("functionCall").as_object().if_contains("id"));
     REQUIRE(restored[0].as_object().at("thoughtSignature") == "text-signature");
     REQUIRE(restored[1].as_object().at("thoughtSignature") == "left-signature");
     REQUIRE(restored[2].as_object().at("thoughtSignature") == "right-signature");
-    REQUIRE(contents[1]
-                .as_object()
-                .at("parts")
-                .as_array()[0]
-                .as_object()
-                .at("functionResponse")
-                .as_object()
-                .at("id") == json::value(left));
+    REQUIRE(contents.size() == 2);
+    auto &results = contents[1].as_object().at("parts").as_array();
+    REQUIRE(results.size() == 2);
+    REQUIRE_FALSE(results[0].as_object().at("functionResponse").as_object().if_contains("id"));
+    REQUIRE_FALSE(results[1].as_object().at("functionResponse").as_object().if_contains("id"));
     auto args_conflict = request;
     args_conflict.at("messages")
         .as_array()[0]

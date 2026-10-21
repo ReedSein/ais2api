@@ -221,10 +221,28 @@
     const pageReady = url.hostname === 'aistudio.google.com' && !login && document.readyState === 'complete';
     return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1 };
   }
+  let bootstrapInput = null;
+  function finishBootstrap() {
+    if (!bootstrapInput) return true;
+    const { input, value } = bootstrapInput;
+    bootstrapInput = null;
+    const stop = [...document.querySelectorAll('button')].find(el => !el.disabled && /^Stop(\s|$)/.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
+    if (stop) stop.click();
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
   function bootstrap() {
     install();
     const input = document.querySelector('textarea');
     if (!input) return false;
+    if (!bootstrapInput) bootstrapInput = { input, value: input.value };
+    // Temporary chat is optional; only activate an explicit inactive control.
+    const temporary = [...document.querySelectorAll('button')].find(el => !el.disabled &&
+      /^Temporary chat$/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()) &&
+      el.getAttribute('aria-pressed') === 'false');
+    if (temporary) { try { temporary.click(); } catch (_) {} }
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
     setter.call(input, 'Reply with the single digit 1.');
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -242,6 +260,29 @@
     if (typeof value !== 'string' || !value.length) fail('browser_incompatible: snapshot service returned no ticket');
     return value;
   }
+  async function authenticatedHeaders(captured, expectedAuthUser) {
+    if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser))
+      fail('browser_incompatible: invalid request auth_user');
+    const headers = {};
+    for (const [key, value] of Object.entries(captured.headers)) {
+      const lower = key.toLowerCase();
+      if (!['host', 'content-length', 'authorization', 'x-goog-authuser'].includes(lower)) headers[lower] = value;
+    }
+    const cookies = new Map(String(document.cookie || '').split(';').map(field => {
+      const equal = field.indexOf('=');
+      return equal < 0 ? ['', ''] : [field.slice(0, equal).trim(), field.slice(equal + 1).trim()];
+    }));
+    const sapisid = cookies.get('SAPISID') || cookies.get('__Secure-3PAPISID');
+    if (!sapisid) fail('browser_incompatible: current SAPISID cookie unavailable');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const origin = new URL(location.href).origin;
+    if (origin !== 'https://aistudio.google.com') fail('identity_mismatch: unexpected authentication origin');
+    const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(timestamp + ' ' + sapisid + ' ' + origin));
+    const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    headers.authorization = 'SAPISIDHASH ' + timestamp + '_' + hash;
+    headers['x-goog-authuser'] = expectedAuthUser;
+    return headers;
+  }
   async function discoverModels(expectedAuthUser) {
     if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser)) fail('browser_incompatible: invalid discovery auth_user');
     for (let attempt = 0; !state.discoveryRequest && attempt < 20; ++attempt)
@@ -255,11 +296,11 @@
     if ((headers['x-goog-authuser'] !== undefined && !sameUser(headers['x-goog-authuser'])) ||
         url.searchParams.getAll('authuser').some(value => !sameUser(value)))
       fail('identity_mismatch: captured ListModels auth_user differs from verified account');
-    headers['x-goog-authuser'] = expectedAuthUser;
+    const authenticated = await authenticatedHeaders(captured, expectedAuthUser);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      const response = await nativeFetch(url.href, { method: 'POST', headers, credentials: 'include', body: '[]', signal: controller.signal });
+      const response = await nativeFetch(url.href, { method: 'POST', headers: authenticated, credentials: 'include', body: '[]', signal: controller.signal });
       if (!response.ok) fail('ListModels_http_' + response.status);
       if (!response.body) fail('browser_incompatible: empty ListModels response');
       const reader = response.body.getReader();
@@ -304,7 +345,10 @@
     void (async () => {
       let reader;
       try {
-        const response = await nativeFetch(state.template.url, { method: 'POST', credentials: 'include', headers: state.template.headers, body: args.body, signal: t.controller.signal });
+        const authUser = args.authUser === undefined ? new URL(location.href).searchParams.get('authuser') || '0' : args.authUser;
+        const headers = await authenticatedHeaders(state.template, authUser);
+        if (t.controller.signal.aborted) fail('cancelled');
+        const response = await nativeFetch(state.template.url, { method: 'POST', credentials: 'include', headers, body: args.body, signal: t.controller.signal });
         t.status = response.status;
         const retry = response.headers.get('retry-after');
         if (retry) {
@@ -358,7 +402,7 @@
     return true;
   }
   globalThis.__ais2bridge = {
-    identity, bootstrap, run, snapshot, start, ack, abort, discoverModels,
+    identity, bootstrap, finishBootstrap, run, snapshot, start, ack, abort, discoverModels,
     poll: () => { const t = state.transfer; return t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter } : null; },
     capability: () => ({ template: state.template ? { body: state.template.body } : null, snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
     models: () => state.models,

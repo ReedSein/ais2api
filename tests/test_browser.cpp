@@ -216,3 +216,12 @@ TEST_CASE("generated tool arguments cannot masquerade as RPC errors") {
     json::array wire{json::value(json::array{json::value(candidate)})};
     CHECK_FALSE(browser_detail::rpc_error(wire));
 }
+
+TEST_CASE("snapshot hash follows encoded contents including expanded attachments") {
+    const auto wire = json::parse(R"([null,[[[[null,"thought",null,null,null,null,null,null,null,null,null,null,1],[null,""],[null,null,["image/png","YWJj"]],[null,null,null,null,null,null,null,[1,"ignored code"]],[null,null,null,null,null,null,null,null,[1,"ignored output"]],[null,null,null,null,null,null,null,null,null,null,["fn"]]],"model"]],null,null,null,[[[null,"excluded system"]],"user"]])").as_array();
+    REQUIRE(browser_detail::wire_content_hash(wire) == sha256("thought  YWJj   "));
+    Request request;
+    request.model = "test";
+    request.gemini = json::parse(R"({"contents":[{"role":"user","parts":[{"functionResponse":{"name":"fn","response":{},"parts":[{"text":"attached"},{"inlineData":{"mimeType":"image/png","data":"YWJj"}}]}}]}]})").as_object();
+    REQUIRE(browser_detail::wire_content_hash(encode_request(request, {}, "")) == sha256(" attached YWJj"));
+}

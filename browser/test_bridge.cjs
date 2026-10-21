@@ -22,11 +22,12 @@ function harness(options = {}) {
   const errorBytes = options.errorBody === undefined ? null : new TextEncoder().encode(options.errorBody);
   const length = errorBytes ? errorBytes.length : 70000;
   const context = vm.createContext({
+    crypto: require('node:crypto').webcrypto,
     Request, Response, URL, TextDecoder, TextEncoder, Blob, DOMException, Event, Uint8Array, AbortController, btoa, XMLHttpRequest: FakeXHR,
     setInterval: callback => { context.install = callback; return 1; }, clearInterval() {},
     setTimeout: (fn, ms) => setTimeout(fn, options.fastDiscoveryWait && ms === 100 ? 0 : options.fastDiscoveryTimeout && ms === 10000 ? 5 : ms), clearTimeout,
     location: { href: 'https://aistudio.google.com/prompts/new_chat?authuser=0', origin: 'https://aistudio.google.com', hostname: 'aistudio.google.com' },
-    document: { readyState: 'complete', querySelector: () => ({}), querySelectorAll: () => [] },
+    document: { cookie: 'SAPISID=synthetic-cookie', readyState: 'complete', querySelector: () => ({}), querySelectorAll: () => [] },
     default_MakerSuite: options.exports || { adapter(service, hash) { return service.snapshot(hash); } },
     fetch: async (input, init) => {
       ++fetches;
@@ -62,6 +63,20 @@ function harness(options = {}) {
   return { context, bridge, capture, fetches: () => fetches, reads: () => reads };
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+async function waitFor(predicate, description) {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, 'Timed out waiting for ' + description);
+    await tick();
+  }
+}
+async function waitPending(h) {
+  await waitFor(() => !!h.bridge.poll()?.pending || !!h.bridge.poll()?.done, 'relay pending chunk');
+  const state = h.bridge.poll();
+  assert.ok(state.pending, 'Relay finished before producing a chunk: ' + state.error);
+  return state.pending;
+}
+const waitDone = h => waitFor(() => !!h.bridge.poll()?.done, 'relay completion');
 const modelsUrl = 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels';
 function captureModelsXHR(h, headers = {}, url = modelsUrl) {
   const xhr = new h.context.XMLHttpRequest();
@@ -82,18 +97,19 @@ test('live capture, fresh snapshot service and secret-free capability report', a
 
 test('BYOB relay waits for consumer credit and caps chunks at 32 KiB', async () => {
   const h = harness(); await h.capture(); h.bridge.start({ body: '[]' });
-  await tick();
+  await waitPending(h);
   const first = h.bridge.poll().pending;
   assert.equal(first.sequence, 1); assert.equal(Buffer.from(first.bytes, 'base64').length, 32768);
   await tick(); assert.equal(h.bridge.poll().pending.sequence, 1); assert.equal(h.reads(), 1);
   assert.throws(() => h.bridge.ack(2), /invalid_credit/);
   const output = [];
   for (let sequence = 1; sequence <= 3; ++sequence) {
-    const pending = h.bridge.poll().pending;
+    const pending = await waitPending(h);
     assert.equal(pending.sequence, sequence);
     output.push(Buffer.from(pending.bytes, 'base64'));
-    h.bridge.ack(sequence); await tick();
+    h.bridge.ack(sequence);
   }
+  await waitDone(h);
   const all = Buffer.concat(output);
   assert.equal(all.length, 70000);
   for (let i = 0; i < all.length; ++i) assert.equal(all[i], i % 251);
@@ -101,8 +117,8 @@ test('BYOB relay waits for consumer credit and caps chunks at 32 KiB', async () 
 });
 
 test('abort releases pending credit without reading the remaining response', async () => {
-  const h = harness(); await h.capture(); h.bridge.start({ body: '[]' }); await tick();
-  h.bridge.abort(); await tick();
+  const h = harness(); await h.capture(); h.bridge.start({ body: '[]' }); await waitPending(h);
+  h.bridge.abort(); await waitDone(h);
   assert.equal(h.bridge.poll().done, true); assert.equal(h.bridge.poll().pending, null); assert.equal(h.reads(), 1); h.bridge.dispose();
 });
 
@@ -209,9 +225,9 @@ test('discovery request deadline actively aborts a stalled upstream fetch', asyn
 });
 
 test('configured relay credit can be smaller than 32 KiB', async () => {
-  const h = harness(); await h.capture(); h.bridge.start({ body: '[]', chunkBytes: 4096 }); await tick();
+  const h = harness(); await h.capture(); h.bridge.start({ body: '[]', chunkBytes: 4096 }); await waitPending(h);
   assert.equal(Buffer.from(h.bridge.poll().pending.bytes, 'base64').length, 4096);
-  assert.equal(h.reads(), 1); h.bridge.abort(); await tick(); h.bridge.dispose();
+  assert.equal(h.reads(), 1); h.bridge.abort(); await waitDone(h); h.bridge.dispose();
 });
 
 test('identity probe reports ambiguity and Google sign-in redirects', () => {
@@ -271,7 +287,7 @@ test('hidden account menu entries do not override a visible identity and ambigui
 
 test('non-200 metadata preserves Retry-After and bounds private error text', async () => {
   const h = harness({ httpStatus: 429, retryAfter: '75', errorBody: 'x'.repeat(20000) });
-  await h.capture(); h.bridge.start({ body: '[]' }); await tick();
+  await h.capture(); h.bridge.start({ body: '[]' }); await waitDone(h);
   const result = h.bridge.poll();
   assert.equal(result.status, 429); assert.equal(result.retryAfter, 75);
   assert.equal(result.errorBody.length, 8192); assert.equal(result.done, true);
@@ -281,11 +297,11 @@ test('non-200 metadata preserves Retry-After and bounds private error text', asy
 test('HTTP 200 RPC error body is relayed intact for native status classification', async () => {
   const wire = '[[[16,"authentication expired"]]]';
   const h = harness({ errorBody: wire, retryAfter: '30' });
-  await h.capture(); h.bridge.start({ body: '[]' }); await tick();
+  await h.capture(); h.bridge.start({ body: '[]' }); await waitPending(h);
   const result = h.bridge.poll();
   assert.equal(result.status, 200); assert.equal(result.retryAfter, 30);
   assert.equal(Buffer.from(result.pending.bytes, 'base64').toString(), wire);
-  h.bridge.abort(); await tick(); h.bridge.dispose();
+  h.bridge.abort(); await waitDone(h); h.bridge.dispose();
 });
 
 const generationUrl = modelsUrl.replace('/ListModels', '/GenerateContent');
@@ -310,7 +326,7 @@ test('XHR captures its live template and private headers without sending bootstr
   await h.context.default_MakerSuite.adapter({ snapshot: () => 'actual-ticket' }, 'a'.repeat(64));
   // Observe the replay parameters through the existing native-fetch test seam.
   h.context.fetch = () => { throw new Error('bridge must use its captured native transport'); };
-  h.bridge.start({ body: '[]' }); await tick();
+  h.bridge.start({ body: '[]' }); await waitPending(h);
   assert.equal(h.fetches(), 1);
   assert.equal(request.input, generationUrl);
   assert.equal(request.init.headers['x-test-page'], 'private-header');
@@ -413,5 +429,50 @@ test('snapshot observation cannot turn unusual return values into page failures'
   const failure = new Error('original failure');
   const service = Object.defineProperty({}, 'snapshot', { get() { throw failure; } });
   assert.throws(() => exports.adapter(service), error => error === failure);
+  h.bridge.dispose();
+});
+
+test('bootstrap restores the original editor and stops the probe', () => {
+  const h = harness();
+  class Textarea extends EventTarget { constructor() { super(); this.original = 'existing draft'; } }
+  Object.defineProperty(Textarea.prototype, 'value', { get() { return this.original; }, set(value) { this.original = value; } });
+  const input = new Textarea(); let stopped = 0, temporary = 0;
+  h.context.HTMLTextAreaElement = Textarea;
+  h.context.document.querySelector = () => input;
+  h.context.document.querySelectorAll = () => [
+    { disabled: false, innerText: 'Temporary chat', getAttribute: name => name === 'aria-pressed' ? 'false' : null, click() { ++temporary; } },
+    { disabled: false, innerText: 'Stop', getAttribute: () => null, click() { ++stopped; } }
+  ];
+  assert.equal(h.bridge.bootstrap(), true);
+  assert.equal(input.value, 'Reply with the single digit 1.');
+  assert.equal(temporary, 1);
+  assert.equal(h.bridge.finishBootstrap(), true);
+  assert.equal(input.value, 'existing draft');
+  assert.equal(stopped, 1);
+  h.bridge.finishBootstrap();
+  assert.equal(stopped, 1);
+  h.bridge.dispose();
+});
+
+test('generation recalculates authentication from current cookies and verified account', async () => {
+  let sent;
+  const h = harness({ observeFetch: (_url, init) => { sent = init; } });
+  await h.capture();
+  h.context.document.cookie = 'SAPISID=first-synthetic-cookie';
+  h.bridge.start({ body: '[]', authUser: '2' }); await waitPending(h);
+  const first = sent.headers.authorization;
+  assert.equal(sent.headers['x-goog-authuser'], '2');
+  const [timestamp, digest] = first.slice('SAPISIDHASH '.length).split('_');
+  assert.equal(digest, require('node:crypto').createHash('sha1').update(timestamp + ' first-synthetic-cookie https://aistudio.google.com').digest('hex'));
+  h.bridge.abort(); await waitDone(h);
+  h.context.document.cookie = 'SAPISID=second-synthetic-cookie';
+  h.bridge.start({ body: '[]', authUser: '2' }); await waitPending(h);
+  assert.notEqual(sent.headers.authorization, first);
+  h.bridge.abort(); await waitDone(h);
+  const count = h.fetches();
+  h.context.document.cookie = '';
+  h.bridge.start({ body: '[]', authUser: '2' }); await waitDone(h);
+  assert.equal(h.fetches(), count);
+  assert.match(h.bridge.poll().error, /current SAPISID cookie unavailable/);
   h.bridge.dispose();
 });

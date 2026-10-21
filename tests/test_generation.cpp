@@ -72,6 +72,19 @@ public:
             check_cancel(cancel);
             throw Error(504, "synthetic_cancel_timeout", "Cancellation did not reach backend");
         }
+        if (request.model == "synthetic-native-parts") {
+            auto thought = text_event("thinking");
+            thought.at("candidates").as_array()[0].as_object().at("content").as_object()
+                .at("parts").as_array()[0].as_object()["thought"] = true;
+            emit(thought);
+            emit(text_event("answer"));
+            auto signature = text_event("");
+            signature.at("candidates").as_array()[0].as_object().at("content").as_object()
+                .at("parts").as_array()[0].as_object()["thoughtSignature"] = "synthetic-original-signature";
+            emit(signature);
+            emit(finish_event());
+            return;
+        }
         emit(text_event("hello "));
         if (request.model == "synthetic-after-content-error")
             throw Error(502, "synthetic_upstream_failure", "Synthetic failure after content");
@@ -249,6 +262,56 @@ TEST_CASE("Gemini unary HTTP preserves multiple turns and aggregates synthetic e
         REQUIRE_FALSE(server.state->account_id.empty());
     }
     REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("HTTP signatures survive streaming aggregation and next turn history", "[generation][http][true-role]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        auto target = std::string("/v1beta/models/synthetic-native-parts:") +
+                      (streaming ? "streamGenerateContent" : "generateContent");
+        auto response = server.call(target, R"({"contents":[{"parts":[{"text":"question"}]}]})");
+        REQUIRE(response.result_int() == 200);
+        json::object result;
+        unsigned signatures = 0;
+        if (streaming) {
+            for (const auto &record : sse_records(response.body())) {
+                auto chunk = json::parse(record).as_object();
+                if (auto cs = chunk.if_contains("candidates"))
+                    for (auto &candidate : cs->as_array())
+                        if (auto content = candidate.as_object().if_contains("content"))
+                            for (auto &part : content->as_object().at("parts").as_array())
+                                if (part.as_object().if_contains("thoughtSignature")) ++signatures;
+                merge_event(result, chunk, 32768);
+            }
+            REQUIRE(signatures == 1);
+        } else result = json::parse(response.body()).as_object();
+        auto content = result.at("candidates").as_array()[0].as_object().at("content").as_object();
+        auto &parts = content.at("parts").as_array();
+        REQUIRE(parts.size() == 3);
+        REQUIRE(parts[0].as_object().at("thought") == true);
+        REQUIRE(parts[1].as_object().at("text") == "answer");
+        REQUIRE(parts[2].as_object().at("text") == "");
+        REQUIRE(parts[2].as_object().at("thoughtSignature") == "synthetic-original-signature");
+        auto next = json::parse(R"({"contents":[{}, {"role":"user","parts":[{"text":"continue"}]}]})").as_object();
+        next.at("contents").as_array()[0] = content;
+        REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent", json::serialize(next)).result_int() == 200);
+        std::lock_guard lock(server.state->mutex);
+        REQUIRE(server.state->request.at("contents").as_array()[0] == json::value(content));
+    }
+    auto response = server.call("/v1/chat/completions", R"({"model":"synthetic-native-parts","messages":[{"role":"user","content":"question"}]})");
+    REQUIRE(response.result_int() == 200);
+    auto result = json::parse(response.body()).as_object();
+    auto msg = result.at("choices").as_array()[0].as_object().at("message").as_object();
+    REQUIRE(msg.at("reasoning_content") == "thinking");
+    REQUIRE(msg.at("thought_signature") == "synthetic-original-signature");
+    REQUIRE(msg.at("content") == "answer");
+    msg.erase("ais2api");
+    json::object next{{"model", "synthetic-unary"}, {"messages", json::array{msg, json::object{{"role", "user"}, {"content", "continue"}}}}};
+    REQUIRE(server.call("/v1/chat/completions", json::serialize(next)).result_int() == 200);
+    std::lock_guard lock(server.state->mutex);
+    auto &restored = server.state->request.at("contents").as_array()[0].as_object().at("parts").as_array();
+    REQUIRE(restored.size() == 3);
+    REQUIRE(restored[2].as_object().at("thoughtSignature") == "synthetic-original-signature");
 }
 
 TEST_CASE("OpenAI SSE emits content usage and one final DONE over real HTTP", "[generation][http]") {
