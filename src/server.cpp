@@ -921,9 +921,11 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         for (auto& key : service.store().managed_keys()) {
             key.as_object()["source"] = "managed"; keys.push_back(std::move(key));
         }
+        // Adding object fields can relocate the keys value and invalidate this reference.
+        const bool configured = !keys.empty();
         result["source"] = "config_and_managed";
         result["config_key_configured"] = !cfg.api_key.empty();
-        result["configured"] = !keys.empty();
+        result["configured"] = configured;
     }
     else if (post && path == "/keys") {
         const auto body = admin_body(request);

@@ -316,6 +316,31 @@ TEST_CASE("managed API keys support CRUD independent of management and configure
     CHECK(server.call(http::verb::get, "/v1/models", {}, second_secret).result_int() == 401);
     CHECK(server.get("/status").result_int() == 200);
 }
+TEST_CASE("management key lists track configured and managed key availability", "[http][admin]") {
+    AdminServer server;
+    auto check_list = [&](bool config_key, std::size_t count) {
+        auto response = server.get("/keys");
+        REQUIRE(response.result_int() == 200);
+        const auto listed = object(response);
+        CHECK(string_or(listed, "source") == "config_and_managed");
+        CHECK(listed.at("config_key_configured").as_bool() == config_key);
+        CHECK(listed.at("configured").as_bool() == (count != 0));
+        CHECK(listed.at("keys").as_array().size() == count);
+        CHECK(response.body().find(server.api) == std::string::npos);
+        for (const auto& key : listed.at("keys").as_array())
+            CHECK_FALSE(key.as_object().contains("secret"));
+    };
+    check_list(true, 1);
+    auto created = server.send(http::verb::post, "/keys", {{"name", "Synthetic list regression"}});
+    REQUIRE(created.result_int() == 201);
+    auto id = string_or(object(created), "id");
+    REQUIRE_FALSE(id.empty());
+    check_list(true, 2);
+    REQUIRE(server.send(http::verb::delete_, "/keys/config").result_int() == 200);
+    check_list(false, 1);
+    REQUIRE(server.send(http::verb::delete_, "/keys/" + id).result_int() == 200);
+    check_list(false, 0);
+}
 TEST_CASE("management probe import enforces admin authentication and verified identity", "[http][admin]") {
     AdminServer server;
     const std::string body = R"({"cookies":"SID=synthetic-unverified","auth_user":"0"})";
