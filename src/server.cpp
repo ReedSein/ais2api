@@ -8,6 +8,9 @@
 #include "ais2api/flow.hpp"
 #include "ais2api/management.hpp"
 #include "ais2api/cookie_import.hpp"
+#include "ais2api/logs.hpp"
+#include "ais2api/log_sources.hpp"
+#include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <algorithm>
@@ -51,6 +54,7 @@ struct CookieImportJob {
     Clock::time_point queued = Clock::now(), started_at;
     std::stop_source cancellation;
     std::atomic<bool> started{false}, finished{false};
+    bool admin = false;
     std::promise<json::object> completion;
     std::future<json::object> result = completion.get_future();
     CookieImportJob(Config cfg, json::object body, std::string owner)
@@ -65,11 +69,11 @@ struct CookieImportJob {
 class Service {
   public:
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
-        : config_(std::move(config)), store_(config_.data_dir),
+        : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
           gateway_(backend ? std::move(backend)
                            : std::make_unique<BrowserGateway>(config_, store_)),
           worker_([this](std::stop_token token) { work_loop(token); }) {}
-    ~Service() { shutdown(); }
+    ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {
         stop();
         worker_.request_stop();
@@ -83,6 +87,26 @@ class Service {
         return config_;
     }
     Store &store() { return store_; }
+    std::optional<std::string> authenticate_generation(std::string_view token) {
+        if (auto principal = config().authenticate(token)) return principal;
+        return store_.authenticate_managed(token);
+    }
+    logs::Journal& journal() { return journal_; }
+    bool log_backlogged() const { return pending_logs_.load() >= 256; }
+    void log(json::object record) {
+        // Keep fsync and stderr backpressure off the single HTTP reactor.
+        // Admission pauses on backlog; all already admitted work keeps its logs.
+        pending_logs_.fetch_add(1);
+        net::post(log_writer_, [this, record = std::move(record)]() mutable {
+            try { journal_.append(std::move(record)); }
+            catch (...) { logging_healthy_ = false; }
+            pending_logs_.fetch_sub(1);
+        });
+    }
+    void forget_operation(const std::string& id) {
+        std::lock_guard lock(operations_mutex_);
+        operations_.erase(id);
+    }
     bool stopping() const { return stopping_; }
     void stop() {
         stopping_ = true;
@@ -137,10 +161,15 @@ class Service {
         if (action == "status") {
             std::lock_guard lock(queue_mutex_);
             return {{"running", true},
+                    {"version", "0.1.0"},
+                    {"logging_healthy", logging_healthy_.load()},
+                    {"pending_logs", pending_logs_.load()},
+                    {"uptime_seconds", std::chrono::duration_cast<std::chrono::seconds>(Clock::now()-started_).count()},
                     {"active", bool(active_)},
+                    {"active_generation_account_id", active_account_id_.empty() ? json::value(nullptr) : json::value(active_account_id_)},
                     {"queued", queue_.size()},
                     {"connections", live_connections.load()},
-                    {"ready", !config().api_key.empty() && store_.choose("readiness").has_value() &&
+                    {"ready", (!config().api_key.empty() || !store_.managed_keys().empty()) && store_.choose("readiness").has_value() &&
                                   fs::is_regular_file(config().browser_executable)},
                     {"verification", "not_a_generation_check"}};
         }
@@ -156,36 +185,79 @@ class Service {
             return it->second.result;
         }
         if (action == "config.reload") {
+            std::lock_guard update_lock(config_update_mutex_);
             auto previous = config();
             auto next = Config::load(previous.config_file);
-            if (next.bind != previous.bind || next.port != previous.port ||
-                next.data_dir != previous.data_dir ||
-                next.browser_executable != previous.browser_executable ||
-                next.proxy != previous.proxy || next.headless != previous.headless ||
-                next.limits.generation_seconds != previous.limits.generation_seconds ||
-                next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||
-                next.limits.object_bytes != previous.limits.object_bytes ||
-                next.limits.relay_bytes != previous.limits.relay_bytes)
+            if (restart_required(previous, next))
                 throw Error(
                     409, "restart_required",
                     "Browser, listener, storage and transport-limit changes require a restart");
             std::lock_guard lock(config_mutex_);
             config_ = std::move(next);
+            pending_config_.reset();
             return {{"status", "reloaded"}};
         }
+        if (action == "config.patch") {
+            std::lock_guard update_lock(config_update_mutex_);
+            auto value = command.if_contains("patch");
+            if (!value || !value->is_object())
+                throw Error(400, "invalid_config", "patch must be an object");
+            const auto previous = config();
+            const auto next = (pending_config_ ? *pending_config_ : previous).patched(value->as_object());
+            const bool restart = restart_required(previous, next);
+            atomic_write(previous.config_file, json::serialize(next.to_json(true)), true);
+            if (!restart) {
+                std::lock_guard lock(config_mutex_);
+                config_ = next;
+                pending_config_.reset();
+            } else {
+                pending_config_ = next;
+            }
+            log({{"event", "config_saved"}, {"restart_required", restart}});
+            return {{"saved", true}, {"applied", !restart}, {"restart_required", restart}};
+        }
+        if (action == "config.validate_patch") {
+            std::lock_guard update_lock(config_update_mutex_);
+            auto current = config();
+            auto patch = command.if_contains("patch");
+            if (!patch || !patch->is_object()) throw Error(400, "invalid_config", "patch must be an object");
+            auto next = (pending_config_ ? *pending_config_ : current).patched(patch->as_object());
+            return {{"valid", true}, {"restart_required", restart_required(current, next)}};
+        }
+        if (action == "config.show") {
+            std::lock_guard update_lock(config_update_mutex_);
+            auto current = config();
+            auto result = manage(store_, current, command);
+            result["restart_required"] = pending_config_.has_value();
+            if (pending_config_) {
+                auto pending = *pending_config_;
+                result["saved_config"] = manage(store_, pending, command).at("config");
+            }
+            return result;
+        }
+        if (action == "rotation.status") return store_.rotation_status();
+        if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
+            {"browser_prepared", false}};
+        if (action == "rotation.clear") {
+            store_.clear_cooldown(string_or(command, "id"), string_or(command, "model"));
+            return {{"ok", true}};
+        }
+        if (action == "stats.reset") { store_.reset_stats(); return {{"ok", true}}; }
         if (action == "models.list" || action == "accounts.probe")
             return maintenance(command);
-        // Never expose these mutations through HTTP. This is owner-only IPC.
+        // HTTP may reach only the explicitly allowlisted management routes,
+        // behind the separate admin credential. IPC remains owner-only.
         auto cfg = config();
         return manage(store_, cfg, command);
     }
 
     std::shared_ptr<CookieImportJob> enqueue_cookie_import(json::object input,
-                                                         std::string principal) {
+                                                         std::string principal, bool admin = false) {
         auto cfg = config();
-        if (cfg.authenticate_cookie_import(cfg.cookie_import_key) != principal)
+        if ((admin ? cfg.authenticate_admin(cfg.admin_key) : cfg.authenticate_cookie_import(cfg.cookie_import_key)) != principal)
             throw Error(401, "cookie_import_authentication", "A valid Cookie import key is required");
         auto job = std::make_shared<CookieImportJob>(std::move(cfg), std::move(input), std::move(principal));
+        job->admin = admin;
         auto weak = std::weak_ptr<CookieImportJob>(job);
         std::lock_guard lock(queue_mutex_);
         if (stopping_ || queue_.size() >= job->config.limits.queue_size)
@@ -209,26 +281,27 @@ class Service {
                     // Rotation cannot authorize a queued upload with a revoked
                     // import key, including the final credentials transaction.
                     std::lock_guard config_lock(config_mutex_);
-                    if (config_.cookie_import_key.empty())
+                    if ((job->admin ? config_.admin_key : config_.cookie_import_key).empty())
                         throw Error(403, "cookie_import_disabled", "Cookie import was disabled before verification completed");
-                    if (config_.authenticate_cookie_import(job->config.cookie_import_key) != job->principal)
+                    if ((job->admin ? config_.authenticate_admin(job->config.admin_key)
+                                   : config_.authenticate_cookie_import(job->config.cookie_import_key)) != job->principal)
                         throw Error(401, "cookie_import_authentication", "Cookie import key changed; submit again");
                     check_cancel(job->cancellation.get_token());
                     accounts = store_.merge_verified_accounts(verified.accounts);
                 }
                 try { gateway_->close(); } catch (...) {}
-                std::cerr << json::serialize(json::object{{"event", "cookie_import"},
+                log(json::object{{"event", "cookie_import"},
                     {"request_id", job->request_id}, {"imported_count", accounts.size()},
-                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}}) << '\n';
+                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}});
                 const auto count = accounts.size();
                 job->resolve({{"imported_count", count}, {"accounts", std::move(accounts)},
                               {"verification", "browser_identity_only"}, {"generation_verified", false},
                               {"details", std::move(verified.details)}});
             } catch (const Error &error) {
                 try { gateway_->close(); } catch (...) {}
-                std::cerr << json::serialize(json::object{{"event", "cookie_import_failed"},
+                log(json::object{{"event", "cookie_import_failed"},
                     {"request_id", job->request_id}, {"reason", error.code}, {"status", error.status},
-                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}}) << '\n';
+                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}});
                 job->reject(error);
             } catch (...) {
                 try { gateway_->close(); } catch (...) {}
@@ -250,13 +323,20 @@ class Service {
         Clock::time_point created;
     };
     Config config_;
-    std::mutex config_mutex_;
+    std::mutex config_mutex_, config_update_mutex_;
+    std::optional<Config> pending_config_;
+    logs::Journal journal_;
+    net::thread_pool log_writer_{1};
+    std::atomic<unsigned> pending_logs_{0};
+    std::atomic<bool> logging_healthy_{true};
     Store store_;
     std::unique_ptr<GenerationBackend> gateway_;
     std::mutex queue_mutex_, models_mutex_, operations_mutex_;
     std::condition_variable available_;
     std::deque<Task> queue_;
     std::shared_ptr<EventPipe> active_;
+    std::string active_account_id_;
+    Clock::time_point started_ = Clock::now();
     json::array models_;
     std::map<std::string, Operation> operations_;
     std::atomic<bool> stopping_{false};
@@ -308,8 +388,10 @@ class Service {
             throw Error(429, "queue_full", "Work queue is full");
         }
         queue_.push_back(
-            {[this, command, finish] {
+             {[this, command, finish, id] {
                  try {
+                     log({{"event", "maintenance_started"}, {"operation_id", id},
+                         {"action", string_or(command, "command")}});
                      json::object result;
                      gateway_->reconfigure(config());
                      if (string_or(command, "command") == "models.list") {
@@ -328,6 +410,9 @@ class Service {
                              check_cancel(shutdown_.get_token());
                              try {
                                  auto value = gateway_->probe(a, shutdown_.get_token());
+                                 const auto email = string_or(value, "email");
+                                 if (!email.empty() && bool_or(value, "ready") && !bool_or(value, "identityAmbiguous"))
+                                     store_.update_email(a.id, email);
                                  value["account_id"] = a.id;
                                  results.push_back(std::move(value));
                              } catch (const Error &e) {
@@ -346,7 +431,9 @@ class Service {
                          result = {{"accounts", std::move(results)}};
                      }
                      finish({{"status", "done"}, {"result", std::move(result)}});
+                     log({{"event", "maintenance_done"}, {"operation_id", id}});
                  } catch (const Error &e) {
+                     log({{"event", "maintenance_failed"}, {"operation_id", id}, {"code", e.code}});
                      finish({{"status", "failed"},
                              {"error",
                               {{"status", e.status}, {"code", e.code}, {"message", e.what()}}}});
@@ -407,6 +494,7 @@ class Service {
         auto token = work->pipe->cancellation.get_token();
         struct Trace {
             const Work &work;
+            Service& service;
             Clock::time_point start = Clock::now(), normalized = start;
             std::string error;
             unsigned attempts = 0;
@@ -416,7 +504,7 @@ class Service {
                         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin)
                             .count();
                     };
-                    std::cerr << json::serialize(json::object{
+                    service.log(json::object{
                                      {"event", "generation"},
                                      {"request_id", work.id},
                                      {"queue_ms", elapsed(work.queued, start)},
@@ -425,12 +513,11 @@ class Service {
                                      {"input_bytes", work.input_bytes},
                                      {"event_bytes", work.pipe->produced_bytes.load()},
                                      {"attempts", attempts},
-                                     {"error", error}})
-                              << '\n';
+                                     {"error", error}});
                 } catch (...) {
                 }
             }
-        } trace{*work};
+        } trace{*work, *this};
         {
             std::lock_guard lock(queue_mutex_);
             active_ = work->pipe;
@@ -440,6 +527,7 @@ class Service {
             ~Clear() {
                 std::lock_guard lock(s->queue_mutex_);
                 s->active_.reset();
+                s->active_account_id_.clear();
             }
         } clear{this};
         work->pipe->started = true;
@@ -473,6 +561,9 @@ class Service {
                                 "with the CLI");
                 }
                 json::object usage;
+                { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
+                log({{"event", "generation_attempt"}, {"request_id", work->id},
+                    {"account_id", account->id}, {"attempt", attempt+1}});
                 try {
                     bool received = false;
                     gateway_->generate(
@@ -510,6 +601,8 @@ class Service {
                         e.code == "unsupported_adapter" || e.code == "consumer_timeout")
                         throw;
                     store_.failure(account->id, request.model, kind, e.retry_after);
+                    log({{"event", "account_failure"}, {"request_id", work->id},
+                        {"account_id", account->id}, {"kind", kind}, {"code", e.code}});
                     previous = e;
                     excluded.push_back(account->id);
                     if (delivered || attempt + 1 == cfg.limits.max_attempts)
@@ -581,10 +674,15 @@ std::string token_from(const http::request<http::string_body> &request) {
     return {};
 }
 net::awaitable<void> send_json(beast::tcp_stream &stream, unsigned status,
-                               const json::object &object) {
+                               const json::object &object, std::string_view origin = {}) {
     http::response<http::string_body> response(static_cast<http::status>(status), 11);
     response.set(http::field::server, "ais2api");
     response.set(http::field::content_type, "application/json; charset=utf-8");
+    response.set(http::field::cache_control, "no-store");
+    if (!origin.empty()) {
+        response.set(http::field::access_control_allow_origin, origin);
+        response.set(http::field::vary, "Origin");
+    }
     response.keep_alive(false);
     response.body() = json::serialize(object);
     response.prepare_payload();
@@ -638,7 +736,52 @@ net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Wor
 struct ConnectionState {
     bool committed = false;
     bool openai = false;
+    bool audit = true;
+    unsigned response_status = 200;
+    std::string origin, category = "http";
 };
+std::map<std::string, std::string> query_parameters(std::string_view target) {
+    std::map<std::string, std::string> result;
+    auto begin = target.find('?');
+    if (begin == std::string_view::npos) return result;
+    auto tail = target.substr(begin + 1);
+    while (!tail.empty()) {
+        auto end = tail.find('&');
+        auto pair = tail.substr(0, end);
+        auto eq = pair.find('=');
+        auto name = decode_url(pair.substr(0, eq));
+        if (!result.emplace(name, eq == std::string_view::npos ? "" : decode_url(pair.substr(eq+1))).second)
+            throw Error(400, "bad_query", "Duplicate query parameter");
+        if (end == std::string_view::npos) break;
+        tail.remove_prefix(end+1);
+    }
+    return result;
+}
+json::object admin_body(const http::request<http::string_body>& request) {
+    if (request.body().empty()) return {};
+    auto type = std::string_view(request[http::field::content_type]);
+    if (type.substr(0, type.find(';')) != "application/json")
+        throw Error(415, "content_type", "Content-Type must be application/json");
+    boost::system::error_code ec;
+    auto parsed = json::parse(request.body(), ec);
+    if (ec || !parsed.is_object()) throw Error(400, "invalid_json", "Expected a JSON object");
+    return std::move(parsed.as_object());
+}
+std::string admin_token(const http::request<http::string_body>& request) {
+    auto value = request[http::field::authorization];
+    return value.starts_with("Bearer ") ? std::string(value.substr(7)) : "";
+}
+void admin_origin(const Config& config, const http::request<http::string_body>& request,
+                  ConnectionState& state) {
+    auto origin = std::string(request[http::field::origin]);
+    if (origin.empty()) return;
+    const auto host = std::string(request[http::field::host]);
+    bool allowed = origin == "http://" + host;
+    for (const auto& value : config.admin_origins)
+        allowed = allowed || (value.is_string() && value.as_string() == origin);
+    if (!allowed) throw Error(403, "admin_origin", "Management origin is not allowed");
+    state.origin = std::move(origin);
+}
 // Admission limits total live request bytes before reading bodies. Browser/JSON
 // objects have separate bounds, and the scheduler admits one generation at once.
 std::atomic<std::size_t> admitted_bytes{0};
@@ -655,6 +798,189 @@ struct Admission {
         return true;
     }
 };
+net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
+    ConnectionState& state, const http::request<http::string_body>& request, std::string path) {
+    state.category = "management";
+    const auto cfg = service.config();
+    if (cfg.admin_key.empty()) throw Error(403, "admin_disabled", "Set admin_key to enable management API");
+    admin_origin(cfg, request, state);
+    if (request.method() == http::verb::options) {
+        state.response_status = 204;
+        http::response<http::empty_body> response(http::status::no_content, 11);
+        if (!state.origin.empty()) response.set(http::field::access_control_allow_origin, state.origin);
+        response.set(http::field::vary, "Origin");
+        response.set(http::field::access_control_allow_methods, "GET, POST, PATCH, PUT, DELETE, OPTIONS");
+        response.set(http::field::access_control_allow_headers, "Authorization, Content-Type, Last-Event-ID");
+        response.set(http::field::cache_control, "no-store");
+        response.keep_alive(false);
+        co_await http::async_write(stream, response, net::use_awaitable);
+        co_return;
+    }
+    const auto token = admin_token(request);
+    if (!cfg.authenticate_admin(token)) throw Error(401, "admin_authentication", "A valid management Bearer key is required");
+    auto method = request.method();
+    const bool get = method == http::verb::get, post = method == http::verb::post;
+    auto query = query_parameters(std::string_view(request.target()));
+    auto parameter = [&](const char* key, std::string fallback = {}) {
+        auto it = query.find(key); return it == query.end() ? fallback : it->second;
+    };
+    auto limit_value = parameter("limit", "100");
+    std::size_t limit = 0;
+    auto parsed = std::from_chars(limit_value.data(), limit_value.data()+limit_value.size(), limit);
+    if (parsed.ec != std::errc{} || parsed.ptr != limit_value.data()+limit_value.size() || !limit || limit > 500)
+        throw Error(400, "invalid_limit", "limit must be 1..500");
+    json::object result, command;
+    unsigned status = 200;
+    if (get && (path == "/logs" || path == "/logs/stream")) {
+        state.audit = false; // Reading logs must never generate an endless stream of read logs.
+        auto cursor = parameter("cursor", "0");
+        if (!query.contains("cursor") && request.find("Last-Event-ID") != request.end())
+            cursor = std::string(request["Last-Event-ID"]);
+        auto source = parameter("source");
+        auto read = [&] { return source.empty() ? service.journal().read(cursor, limit)
+            : read_log_source(cfg.data_dir, source, cursor); };
+        auto batch = read(); // Validate cursor/source before committing SSE headers.
+        if (path == "/logs") {
+            co_await send_json(stream, 200, batch, state.origin);
+            co_return;
+        }
+        http::response<http::empty_body> response(http::status::ok, 11);
+        response.set(http::field::content_type, "text/event-stream; charset=utf-8");
+        response.set(http::field::cache_control, "no-store");
+        response.set("X-Accel-Buffering", "no");
+        if (!state.origin.empty()) response.set(http::field::access_control_allow_origin, state.origin);
+        response.set(http::field::vary, "Origin");
+        response.chunked(true); response.keep_alive(false);
+        http::response_serializer<http::empty_body> serializer(response);
+        stream.expires_after(15s);
+        co_await http::async_write_header(stream, serializer, net::use_awaitable);
+        state.committed = true;
+        auto executor = co_await net::this_coro::executor;
+        net::steady_timer timer(executor);
+        auto heartbeat = Clock::now();
+        while (!service.stopping()) {
+            if (!service.config().authenticate_admin(token)) break;
+            const auto next = string_or(batch, "next_cursor");
+            const bool data = next != cursor;
+            if (data || Clock::now()-heartbeat >= 5s) {
+                auto message = data ? "id: " + next + "\nevent: logs\ndata: " + json::serialize(batch) + "\n\n"
+                                    : ": heartbeat\n\n";
+                stream.expires_after(15s);
+                co_await net::async_write(stream, http::make_chunk(net::buffer(message)), net::use_awaitable);
+                heartbeat = Clock::now();
+            }
+            cursor = next;
+            if (!bool_or(batch, "has_more")) {
+                timer.expires_after(200ms);
+                co_await timer.async_wait(net::use_awaitable);
+            }
+            batch = read();
+        }
+        co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
+        co_return;
+    }
+    if (get && path == "/auth/check") result = {{"authenticated", true}, {"api_version", "v1"}};
+    else if (get && path == "/version") result = {{"version", "0.1.0"}, {"management_api", "v1"}};
+    else if (get && path == "/capabilities") result = {
+        {"api_version", "v1"}, {"accounts", true}, {"rotation", true}, {"stats", true},
+        {"config", true}, {"keys", "config_and_managed"}, {"diagnostics", true},
+        {"logs", json::object{{"history", true}, {"sse", true}, {"resume", true},
+            {"retention", "until_explicit_local_deletion"}, {"poll_ms", 200}}}};
+    else if (get && path == "/status") command = {{"command", "status"}};
+    else if (get && path == "/stats") command = {{"command", "stats"}};
+    else if (method == http::verb::delete_ && path == "/stats") command = {{"command", "stats.reset"}};
+    else if (get && path == "/accounts") command = {{"command", "accounts.list"}};
+    else if (get && path == "/accounts/active") {
+        result = service.control({{"command", "rotation.status"}});
+        result["active_generation_account_id"] = service.control({{"command", "status"}}).at("active_generation_account_id");
+    }
+    else if (get && path == "/rotation") command = {{"command", "rotation.status"}};
+    else if (post && path == "/rotation/next") command = {{"command", "rotation.next"}};
+    else if (post && path == "/rotation/clear-cooldown") {
+        command = admin_body(request); command["command"] = "rotation.clear";
+    }
+    else if (get && path == "/config") command = {{"command", "config.show"}};
+    else if (method == http::verb::patch && path == "/config") command = {{"command", "config.patch"}, {"patch", admin_body(request)}};
+    else if (post && path == "/config/validate") {
+        command = {{"command", "config.validate_patch"}, {"patch", admin_body(request)}};
+    }
+    else if (post && path == "/config/reload") command = {{"command", "config.reload"}};
+    else if (get && path == "/keys") {
+        result = service.control({{"command", "keys.list"}});
+        auto& keys = result.at("keys").as_array();
+        for (auto& key : service.store().managed_keys()) {
+            key.as_object()["source"] = "managed"; keys.push_back(std::move(key));
+        }
+        result["source"] = "config_and_managed";
+        result["config_key_configured"] = !cfg.api_key.empty();
+        result["configured"] = !keys.empty();
+    }
+    else if (post && path == "/keys") {
+        const auto body = admin_body(request);
+        if (body.size() != 1 || !body.contains("name") || !body.at("name").is_string())
+            throw Error(400, "invalid_key", "Expected a string name");
+        result = service.store().create_managed_key(string_or(body, "name")); status = 201;
+    }
+    else if ((method == http::verb::put || method == http::verb::delete_) && path == "/keys/config") {
+        auto body = method == http::verb::delete_ ? json::object{{"api_key", ""}} : admin_body(request);
+        if (body.size() != 1 || !body.contains("api_key")) throw Error(400, "invalid_key", "Expected only api_key");
+        command = {{"command", "config.patch"}, {"patch", body}};
+    }
+    else if (path.starts_with("/keys/") && (method == http::verb::patch || method == http::verb::delete_)) {
+        auto id = decode_url(path.substr(6));
+        if (method == http::verb::patch) {
+            const auto body = admin_body(request);
+            if (body.size()!=1 || !body.contains("name") || !body.at("name").is_string())
+                throw Error(400, "invalid_key", "Expected a string name");
+            service.store().rename_managed_key(id, string_or(body, "name"));
+        } else service.store().revoke_managed_key(id);
+        result = {{"ok", true}};
+    }
+    else if (get && path == "/models") result = {{"models", service.cached_models()}};
+    else if (post && path == "/models/refresh") command = {{"command", "models.list"}};
+    else if (post && path == "/accounts/probe") { command = {{"command", "accounts.probe"}}; }
+    else if (post && path == "/accounts/import") {
+        command = admin_body(request); command["command"] = "accounts.import";
+    }
+    else if (get && path.starts_with("/operations/")) command = {{"command", "operation.status"}, {"id", path.substr(12)}};
+    else if (method == http::verb::delete_ && path.starts_with("/operations/")) {
+        (void)service.control({{"command", "operation.status"}, {"id", path.substr(12)}});
+        service.forget_operation(path.substr(12)); result = {{"ok", true}};
+    }
+    else if (path.starts_with("/accounts/")) {
+        auto tail = path.substr(10); auto slash = tail.find('/');
+        auto id = decode_url(tail.substr(0, slash));
+        auto action = slash == std::string::npos ? "" : tail.substr(slash+1);
+        command = {{"id", id}};
+        if (method == http::verb::delete_ && action.empty()) command["command"] = "accounts.remove";
+        else if (method == http::verb::patch && action.empty()) {
+            command = admin_body(request); command["id"] = id; command["command"] = "accounts.update";
+        }
+        else if (post && action == "activate") command["command"] = "accounts.select";
+        else if (post && action == "reset") command["command"] = "accounts.reset";
+        else if (post && (action == "probe" || action == "detect-email")) command["command"] = "accounts.probe";
+        else throw Error(404, "route_not_found", "Unknown management route or method");
+    }
+    else if (get && path == "/logs/sources") { state.audit = false; result = log_sources(cfg.data_dir); }
+    else if ((get && path == "/diagnostics") || (post && path == "/diagnostics/export")) {
+        result = {{"version", "0.1.0"}, {"status", service.control({{"command", "status"}})},
+            {"config", service.control({{"command", "config.show"}})},
+            {"stats", service.control({{"command", "stats"}})},
+            {"logs", log_sources(cfg.data_dir)}, {"google_verified", false}};
+    }
+    else if (post && path == "/service/stop") {
+        state.response_status = 202;
+        co_await send_json(stream, 202, {{"status", "stopping"}}, state.origin);
+        service.stop(); co_return;
+    }
+    else throw Error(404, "route_not_found", "Unknown management route or method");
+    if (!command.empty()) {
+        result = service.control(command);
+        if (result.contains("operation_id")) status = 202;
+    }
+    state.response_status = status;
+    co_await send_json(stream, status, result, state.origin);
+}
 net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, ConnectionState &state) {
     auto cfg = service.config();
     beast::flat_buffer input(64 * 1024);
@@ -677,6 +1003,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     std::string target(request.target());
     auto path = target.substr(0, target.find('?'));
     state.openai = path.starts_with("/v1/");
+    if (path.starts_with("/api/admin/v1/") && path != "/api/admin/v1/accounts/probe-import") {
+        co_await handle_admin(stream, service, state, request, path.substr(13));
+        co_return;
+    }
     if (request.method() == http::verb::get && path == "/userscript/ais2api-cookie.user.js") {
         const auto script = Config::default_directory() / "userscript/ais2api-cookie.user.js";
         if (!fs::is_regular_file(script))
@@ -691,19 +1021,24 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         co_await http::async_write(stream, response, net::use_awaitable);
         co_return;
     }
-    if (request.method() == http::verb::post && path == "/api/accounts/probe-import") {
+    if (path == "/api/admin/v1/accounts/probe-import" && request.method() == http::verb::options) {
+        co_await handle_admin(stream, service, state, request, "/accounts/probe-import"); co_return;
+    }
+    if (request.method() == http::verb::post && (path == "/api/accounts/probe-import" || path == "/api/admin/v1/accounts/probe-import")) {
         auto import_cfg = service.config();
-        if (import_cfg.cookie_import_key.empty())
+        const bool admin = path.starts_with("/api/admin/");
+        if (admin) { admin_origin(import_cfg, request, state); state.category = "management"; }
+        if ((admin ? import_cfg.admin_key : import_cfg.cookie_import_key).empty())
             throw Error(403, "cookie_import_disabled", "Set cookie_import_key in config.json to enable userscript import");
         const auto authorization = request[http::field::authorization];
         std::string_view provided;
         if (authorization.starts_with("Bearer "))
             provided = {authorization.data() + 7, authorization.size() - 7};
-        const auto principal = import_cfg.authenticate_cookie_import(provided);
+        const auto principal = admin ? import_cfg.authenticate_admin(provided) : import_cfg.authenticate_cookie_import(provided);
         if (!principal)
             throw Error(401, "cookie_import_authentication", "A valid Cookie import key is required");
         const auto origin = request[http::field::origin];
-        if (!origin.empty() && origin != "https://aistudio.google.com")
+        if (!admin && !origin.empty() && origin != "https://aistudio.google.com")
             throw Error(403, "cookie_import_origin", "Cookie import requires the AI Studio userscript");
         auto content_type = std::string_view(request[http::field::content_type]);
         content_type = content_type.substr(0, content_type.find(';'));
@@ -717,7 +1052,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         if (parse_error || !value.is_object())
             throw Error(400, "invalid_json", "Cookie import body must be a JSON object");
         std::string().swap(request.body());
-        auto job = service.enqueue_cookie_import(std::move(value.as_object()), *principal);
+        auto job = service.enqueue_cookie_import(std::move(value.as_object()), *principal, admin);
         struct CancelImport {
             std::shared_ptr<CookieImportJob> job;
             ~CancelImport() { job->cancellation.request_stop(); }
@@ -745,7 +1080,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             co_await polling.async_wait(net::use_awaitable);
         }
         auto result = job->result.get();
-        co_await send_json(stream, 200, result);
+        co_await send_json(stream, 200, result, state.origin);
         co_return;
     }
     if (request.method() == http::verb::get && path == "/health") {
@@ -755,6 +1090,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (request.method() == http::verb::get && path == "/ready") {
         auto status = service.control({{"command", "status"}});
         bool ready = bool_or(status, "ready");
+        state.response_status = ready ? 200 : 503;
         co_await send_json(
             stream, ready ? 200 : 503,
             {{"ready", ready}, {"scope", "local_prerequisites"}, {"google_verified", false}});
@@ -768,12 +1104,16 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                   (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent"));
     if (!models && !openai && !gemini)
         throw Error(404, "route_not_found", "Route is not implemented");
-    auto principal = service.config().authenticate(token_from(request));
+    auto principal = service.authenticate_generation(token_from(request));
     if (!principal)
         throw Error(401, "authentication", "A valid API key is required");
     if (models) {
         auto operation = service.control({{"command", "models.list"}});
         auto operation_id = string_or(operation, "operation_id");
+        struct ReleaseOperation {
+            Service& service; std::string id;
+            ~ReleaseOperation() { service.forget_operation(id); }
+        } release{service, operation_id};
         auto executor = co_await net::this_coro::executor;
         net::steady_timer polling(executor);
         auto until = Clock::now() + 90s;
@@ -973,9 +1313,14 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
                 co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
             } else if (error->status != 499)
                 co_await send_json(stream, static_cast<unsigned>(error->status),
-                                   error_json(*error, state.openai));
+                                   error_json(*error, state.openai), state.origin);
         } catch (...) {
         }
+    }
+    if (state.audit) {
+        try { service.log({{"event", "http_request"}, {"category", state.category},
+            {"status", error ? error->status : static_cast<int>(state.response_status)}, {"error", error ? error->code : ""}}); }
+        catch (...) {}
     }
     boost::system::error_code ignored;
     stream.socket().cancel(ignored);
@@ -988,7 +1333,7 @@ net::awaitable<void> accept_loop(tcp::acceptor &acceptor, Service &service) {
         auto socket = co_await acceptor.async_accept(net::redirect_error(net::use_awaitable, ec));
         if (ec)
             co_return;
-        if (live_connections.fetch_add(1) >= 32) {
+        if (live_connections.fetch_add(1) >= 32 || service.log_backlogged()) {
             live_connections.fetch_sub(1);
             socket.close(ec);
             continue;
@@ -1053,12 +1398,11 @@ int serve_with_backend(Config config, std::unique_ptr<GenerationBackend> backend
         });
     };
     watch();
-    std::cerr << json::serialize(json::object{
-                     {"event", "listening"}, {"bind", config.bind}, {"port", config.port}})
-              << '\n';
+    service.log({{"event", "listening"}, {"bind", config.bind}, {"port", config.port}});
     net::co_spawn(io, accept_loop(acceptor, service), net::detached);
     io.run();
     service.shutdown();
+    service.log({{"event", "stopped"}});
     return 0;
 }
 } // namespace ais2api

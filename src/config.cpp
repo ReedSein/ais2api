@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <limits>
 #include <openssl/crypto.h>
+#include <boost/asio/ip/address.hpp>
+#include <cctype>
 
 namespace ais2api {
 namespace {
@@ -89,6 +91,8 @@ json::object Config::to_json(bool portable_paths) const {
           {"bind", bind},
           {"port", port},
           {"api_key", api_key},
+          {"admin_key", admin_key},
+          {"admin_origins", admin_origins},
           {"cookie_import_key", cookie_import_key},
           {"cookie_import_max_accounts", cookie_import_max_accounts},
           {"cookie_import_timeout_seconds", cookie_import_timeout_seconds},
@@ -109,6 +113,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"configured_models", configured_models},
           {"model_defaults", model_defaults}};
 }
+static Config parse_config(Config c, json::object o, bool explicit_browser);
 Config Config::load(const fs::path &file, const json::object &overrides) {
   Config c;
   c.config_file = fs::absolute(file.empty() ? default_directory() / "config.json" : file).lexically_normal();
@@ -131,7 +136,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
     merge(o, v.as_object());
   }
   json::object e;
-  for (auto pair : {std::pair{"AIS2API_BIND", "bind"},
+  for (auto pair : {std::pair{"AIS2API_ADMIN_KEY", "admin_key"},
+                    {"AIS2API_BIND", "bind"},
                     {"AIS2API_DATA_DIR", "data_dir"},
                     {"AIS2API_BROWSER_EXECUTABLE", "browser_executable"},
                     {"AIS2API_PROXY", "proxy"}}) {
@@ -150,7 +156,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
       }
     }
   }
-  for (auto pair : {std::pair{"AIS2API_LIMITS", "limits"},
+  for (auto pair : {std::pair{"AIS2API_ADMIN_ORIGINS", "admin_origins"},
+                    {"AIS2API_LIMITS", "limits"},
                     {"AIS2API_MODEL_ALIASES", "model_aliases"},
                     {"AIS2API_CONFIGURED_MODELS", "configured_models"},
                     {"AIS2API_MODEL_DEFAULTS", "model_defaults"}}) {
@@ -192,7 +199,10 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   merge(o, overrides);
   explicit_browser = explicit_browser || e.contains("browser_executable") ||
                      overrides.contains("browser_executable");
-  fields(o, {"version", "bind", "port", "api_key", "cookie_import_key",
+  return parse_config(std::move(c), std::move(o), explicit_browser);
+}
+static Config parse_config(Config c, json::object o, bool explicit_browser) {
+  fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "proxy", "headless", "limits", "model_aliases",
              "configured_models", "model_defaults"});
@@ -209,6 +219,10 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   c.port = static_cast<unsigned short>(port);
   c.bind = text("bind");
   c.api_key = text("api_key");
+  c.admin_key = text("admin_key");
+  if (!o.at("admin_origins").is_array())
+    throw Error(400, "invalid_config", "admin_origins must be an array");
+  c.admin_origins = o.at("admin_origins").as_array();
   c.cookie_import_key = text("cookie_import_key");
   auto import_accounts = number(o.at("cookie_import_max_accounts"));
   auto import_timeout = number(o.at("cookie_import_timeout_seconds"));
@@ -224,7 +238,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   if (!c.browser_executable.empty())
     c.browser_executable = fs::absolute(c.browser_executable).lexically_normal();
   else if (!explicit_browser)
-    c.browser_executable = bundled_browser(default_directory());
+    c.browser_executable = bundled_browser(Config::default_directory());
   c.proxy = text("proxy");
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");
@@ -257,7 +271,76 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   c.validate();
   return c;
 }
+
+Config Config::patched(const json::object& patch) const {
+  auto o = to_json();
+  for (const auto& entry : patch) {
+    if (entry.key() == "limits" && entry.value().is_object())
+      merge(o.at("limits").as_object(), entry.value().as_object());
+    else
+      o[entry.key()] = entry.value();
+  }
+  for (auto key : {"api_key", "admin_key", "cookie_import_key"})
+    if (auto value = patch.if_contains(key); value && value->is_string() && value->as_string() == "***")
+      throw Error(400, "invalid_config", "Redacted secrets cannot be saved");
+  // Only limits merge recursively. Model maps and arrays replace the old value.
+  return parse_config(*this, std::move(o), true);
+}
+bool restart_required(const Config& previous, const Config& next) {
+  return next.bind != previous.bind || next.port != previous.port ||
+    next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
+    next.proxy != previous.proxy || next.headless != previous.headless ||
+    next.limits.generation_seconds != previous.limits.generation_seconds ||
+    next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||
+    next.limits.object_bytes != previous.limits.object_bytes || next.limits.relay_bytes != previous.limits.relay_bytes;
+}
+static bool valid_admin_origin(std::string_view origin) {
+  auto start = origin.starts_with("https://") ? 8u : origin.starts_with("http://") ? 7u : 0u;
+  if (!start) return false;
+  auto authority = origin.substr(start);
+  if (authority.empty() || authority.find_first_of("/?#@*\\") != std::string_view::npos) return false;
+  for (unsigned char ch : authority) if (ch <= 32 || ch >= 127) return false;
+  std::string_view host, port;
+  if (authority.front() == '[') {
+    auto end = authority.find(']');
+    if (end == std::string_view::npos) return false;
+    host = authority.substr(1, end - 1);
+    boost::system::error_code ec;
+    auto address = boost::asio::ip::make_address(std::string(host), ec);
+    if (ec || !address.is_v6() || host.find('%') != std::string_view::npos) return false;
+    auto rest = authority.substr(end + 1);
+    if (!rest.empty()) { if (rest.front() != ':') return false; port = rest.substr(1); if (port.empty()) return false; }
+  } else {
+    auto colon = authority.find(':');
+    host = authority.substr(0, colon);
+    if (colon != std::string_view::npos) { port = authority.substr(colon + 1); if (port.empty()) return false; }
+    if (host.empty() || host.size() > 253) return false;
+    if (host.back() == '.') host.remove_suffix(1);
+    if (host.empty()) return false;
+    while (!host.empty()) {
+      auto dot = host.find('.'); auto label = host.substr(0, dot);
+      if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') return false;
+      for (unsigned char ch : label) if (!std::isalnum(ch) && ch != '-') return false;
+      if (dot == std::string_view::npos) break;
+      host.remove_prefix(dot + 1);
+    }
+  }
+  if (!port.empty()) {
+    unsigned value = 0;
+    for (unsigned char ch : port) { if (ch < '0' || ch > '9') return false; value = value * 10 + ch - '0'; if (value > 65535) return false; }
+    if (!value) return false;
+  }
+  return true;
+}
+
 void Config::validate() const {
+  if (admin_key == "***" || api_key == "***" || cookie_import_key == "***")
+    throw Error(400, "invalid_config", "Redacted secrets cannot be saved");
+  if (admin_key.size() > 4096 || std::any_of(admin_key.begin(), admin_key.end(), [](unsigned char ch) { return ch < 33 || ch > 126; }))
+    throw Error(400, "invalid_config", "admin_key must be empty or visible ASCII without whitespace");
+  for (const auto& origin : admin_origins)
+    if (!origin.is_string() || !valid_admin_origin(std::string_view(origin.as_string().data(), origin.as_string().size())))
+      throw Error(400, "invalid_config", "admin_origins must contain exact HTTP(S) origins");
   if (bind.empty() || data_dir.empty() || !port)
     throw Error(400, "invalid_config",
                 "Bind, data directory and port are required");
@@ -308,5 +391,12 @@ std::optional<std::string> Config::authenticate_cookie_import(std::string_view s
   if (CRYPTO_memcmp(expected.data(), presented.data(), expected.size()) != 0)
     return std::nullopt;
   return "cookie-import-key-" + expected;
+}
+std::optional<std::string> Config::authenticate_admin(std::string_view secret) const {
+  if (admin_key.empty() || secret.empty() || secret.size() > 4096) return std::nullopt;
+  const auto expected = sha256(admin_key);
+  const auto presented = sha256(secret);
+  if (CRYPTO_memcmp(expected.data(), presented.data(), expected.size()) != 0) return std::nullopt;
+  return "admin-key-" + expected;
 }
 } // namespace ais2api

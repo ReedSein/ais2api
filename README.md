@@ -2,7 +2,7 @@
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](LICENSE)
 
-面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini 与 OpenAI Chat Completions 数据接口，账号和运行状态通过 CLI 管理，密钥及策略写入配置；支持可选的 userscript Cookie 导入，没有 Web 管理页面。
+面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini 与 OpenAI Chat Completions 数据接口，账号和运行状态可通过 CLI 或独立鉴权的管理 API 操作；支持可选的 userscript Cookie 导入，尚未内置 Web 管理页面。管理 API 提供实时完整日志，供前端管理面板开发使用。
 
 **这是待真实账号验收的开发版本。** 离线协议测试、浏览器脚本测试和本机服务测试不代表 Google 网页适配、账号权限、生图或三端部署已经验证。具体结果与未完成门槛见 [验证记录](docs/validation.md)。
 
@@ -78,7 +78,15 @@ Gemini 接口为 `/v1beta/models/MODEL:generateContent` 与 `:streamGenerateCont
 
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 
-不提供 Responses、Files、embeddings、独立图片/音频接口和网页控制台。HTTP 增加可选的 userscript Cookie 导入入口，其他账号、配置及服务管理仍通过 CLI。`fileData`、无可靠私有协议映射的参数、强制工具执行等请求会明确报错。
+不提供 Responses、Files、embeddings、独立图片/音频接口和网页控制台。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口。`fileData`、无可靠私有协议映射的参数、强制工具执行等请求会明确报错。
+
+## 前端管理 API
+
+在 `config.json` 设置独立的 `admin_key` 后重启，或通过 CLI 执行 `config reload`。管理请求使用 `Authorization: Bearer ADMIN_KEY`，默认空密钥禁用。前端跨域开发需在 `admin_origins` 中列出精确的来源（例如 `http://localhost:5173`）。
+
+`/api/admin/v1/` 提供账号导入、启停、改名、切换、探测与删除，轮转及冷却管理，统计，模型发现，配置校验/保存，API 密钥管理及诊断。`GET /logs` 可分页读完整历史；`GET /logs/stream` 通过 SSE 补读后持续推送，支持游标断线续读。`GET /logs/sources` 列出服务及浏览器日志，也可从前端逐文件实时读取全部字节。日志不自动按最近 N 条截断。
+
+完整路由、配置热更新规则、日志客户端示例和参考项目功能对应见 [管理 API 文档](docs/management-api.md)，机器可读合同见 [OpenAPI](schemas/management.openapi.json)。
 
 ## 管理与配置
 
@@ -99,7 +107,7 @@ ais2api stop
 
 导入支持 Cookie 头、Netscape Cookie 文本、Cookie JSON、storage state 和已有凭据包。不会读取或覆盖旧项目目录。命令中的账号 ID 来自 `accounts list`；凭据不进入列表或统计。不要把真实凭据放入仓库。
 
-`api_key` 默认为空，此时受保护接口拒绝访问，`/health` 仍可用且 `/ready` 未就绪。密钥最长 4096 个可见 ASCII 字符，不含空白。编辑密钥后执行 `config reload` 或重启，后续请求使用新密钥，设为空可撤销访问。`config show` 隐藏密钥，配置文件保存原值，应按凭据保护。`keys list` 仅返回配置来源及配置状态等元数据；`keys create/revoke` 返回 `reason=keys_managed_in_config`，提示编辑配置。旧数据库密钥记录保留，但不再授权 HTTP。Windows 端口保留范围可能动态变化，必要时修改 `port` 或使用 `--port PORT`。
+`api_key` 默认为空，且没有有效的管理面板创建密钥时，受保护接口拒绝访问，`/health` 仍可用且 `/ready` 未就绪。密钥最长 4096 个可见 ASCII 字符，不含空白。编辑密钥后执行 `config reload` 或重启，后续请求使用新密钥，设为空可撤销该配置密钥；管理面板创建的其他密钥需分别撤销。`config show` 隐藏密钥，配置文件保存原值，应按凭据保护。`keys list` 仅返回配置来源及配置状态等元数据；`keys create/revoke` 返回 `reason=keys_managed_in_config`，提示编辑配置。旧数据库密钥记录保留，但不再授权 HTTP；管理 API 新建的密钥存于独立表，可创建、改名、撤销，创建时仅返回一次原始密钥。Windows 端口保留范围可能动态变化，必要时修改 `port` 或使用 `--port PORT`。
 
 配置优先级为默认值 → 配置文件 → `AIS2API_*` 环境变量 → CLI。`--config PATH` 和 `--data-dir PATH` 可用于完全隔离的安装。配置 schema 位于 [schemas/config.schema.json](schemas/config.schema.json)。启动端口、数据目录、浏览器和传输限额的变动需要重启；热更新会在校验完整配置后生效。
 

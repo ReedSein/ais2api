@@ -1,8 +1,8 @@
 # Command-line interface
 
-The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and service control are managed locally through the CLI. There is no Web frontend. The optional, separately authenticated userscript Cookie import endpoint is the only HTTP account mutation; see [userscript setup](userscript.md).
+The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and service control are available through the CLI and the optional, independently authenticated [management API](management-api.md). There is no built-in Web frontend. The userscript Cookie import endpoint has its own credential; see [userscript setup](userscript.md).
 
-`--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. API keys are configured in `config.json`; CLI output redacts them. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
+`--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. The configured API key is in `config.json`; the management API can create additional persisted generation keys. CLI output redacts secrets. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
 
 ## Initialization and service lifecycle
 
@@ -98,7 +98,7 @@ ais2api operations status OPERATION_ID
 
 The running process owns its database and accepts owner-only local IPC: a protected Windows named pipe or a protected Unix-domain socket. CLI commands first contact that process. Only `not_running` permits supported commands to open storage offline, after acquiring the exclusive instance lock. Timeouts or authorization failures do not trigger an offline database bypass.
 
-Inference/model clients authenticate with an API key in `Authorization: Bearer KEY`, `x-api-key`, or `x-goog-api-key`. `/health` is a public process-liveness check. With an empty `api_key`, protected generation/model routes reject authentication and `/ready` returns `ready: false`. The optional `POST /api/accounts/probe-import` requires its own Bearer `cookie_import_key`; a generation key alone does not authorize account import. `/ready` reports local prerequisites and explicitly does not verify Google. Configuration and browser control remain local operations. Edit both keys in the configuration file.
+Inference/model clients authenticate with an API key in `Authorization: Bearer KEY`, `x-api-key`, or `x-goog-api-key`. `/health` is a public process-liveness check. With an empty `api_key` and no managed generation keys, protected generation/model routes reject authentication and `/ready` returns `ready: false`. The optional `POST /api/accounts/probe-import` requires its own Bearer `cookie_import_key`; a generation key alone does not authorize account import. `/ready` reports local prerequisites and explicitly does not verify Google. Optional HTTP management uses a separate `admin_key` and `/api/admin/v1/`; see [management API](management-api.md). Browser runtime installation and updates remain local operations.
 
 ## Developer smoke check
 

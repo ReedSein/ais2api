@@ -1,6 +1,6 @@
 # 验证记录
 
-更新：2026-10-21。当前为开发实现，尚未达到完整版本的发布门槛。没有 Web 管理界面；HTTP 仅增加由独立密钥启用的 userscript Cookie 导入入口，其他管理操作仍通过 CLI。
+更新：2026-10-21。当前为开发实现，尚未达到完整版本的发布门槛。没有内置 Web 管理界面；HTTP 现提供独立鉴权的 [管理 API](management-api.md) 与完整实时日志，另保留独立密钥的 userscript Cookie 导入入口。管理 API 的验证记录见 [专项报告](reports/management-api-2026-10-21.md)。
 
 ## 已执行
 

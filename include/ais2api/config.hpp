@@ -22,6 +22,8 @@ struct Config {
     std::string bind = "127.0.0.1";
     unsigned short port = 18451;
     std::string api_key;
+    std::string admin_key;
+    json::array admin_origins;
     std::string cookie_import_key;
     unsigned cookie_import_max_accounts = 8;
     unsigned cookie_import_timeout_seconds = 180;
@@ -39,6 +41,9 @@ struct Config {
     json::object to_json(bool portable_paths = false) const;
     std::optional<std::string> authenticate(std::string_view secret) const;
     std::optional<std::string> authenticate_cookie_import(std::string_view secret) const;
+    Config patched(const json::object& patch) const;
+    std::optional<std::string> authenticate_admin(std::string_view secret) const;
     void validate() const;
 };
+bool restart_required(const Config& previous, const Config& next);
 }

@@ -328,7 +328,8 @@ struct Store::Impl {
                          "stats(account TEXT,model TEXT,ok INTEGER DEFAULT 0,failed INTEGER "
                          "DEFAULT 0,usage TEXT DEFAULT '{}',PRIMARY "
                          "KEY(account,model));CREATE TABLE IF NOT EXISTS keys(id TEXT "
-                         "PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE "
+                         "PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE TABLE IF NOT EXISTS "
+                         "managed_keys(id TEXT PRIMARY KEY,name TEXT,hash TEXT UNIQUE,created INTEGER);CREATE "
                          "TABLE IF NOT EXISTS tools(principal TEXT,call_id TEXT,metadata "
                          "TEXT,created INTEGER,touched INTEGER,PRIMARY "
                          "KEY(principal,call_id));CREATE INDEX IF NOT EXISTS tools_lru ON "
@@ -474,6 +475,32 @@ void Store::put_account(const Account &a) {
     copy.storage_state = state(copy.storage_state);
     impl_->run([&] { impl_->put(copy); });
 }
+void Store::update_email(std::string_view id, std::string_view email) {
+    if (email.size() > 320) throw Error(400, "invalid_account", "Email is too long");
+    impl_->run([&] {
+        Statement s(impl_->db, "UPDATE accounts SET email=? WHERE id=?");
+        s.text(1, email); s.text(2, id); s.row();
+        if (!sqlite3_changes(impl_->db)) throw Error(404, "account_not_found", "Account not found");
+    });
+}
+void Store::update_account_metadata(std::string_view id, const json::object& patch) {
+    for (const auto& item : patch) {
+        if (item.key() == "name") {
+            if (!item.value().is_string() || item.value().as_string().empty() || item.value().as_string().size() > 200)
+                throw Error(400, "invalid_account", "Name must contain 1 to 200 bytes");
+        } else if (item.key() == "disabled") {
+            if (!item.value().is_bool()) throw Error(400, "invalid_account", "Disabled must be boolean");
+        } else throw Error(400, "invalid_account", "Unknown account metadata field");
+    }
+    impl_->run([&] {
+        Statement s(impl_->db, "UPDATE accounts SET name=CASE WHEN ? THEN ? ELSE name END,disabled=CASE WHEN ? THEN ? ELSE disabled END WHERE id=?");
+        auto name = patch.if_contains("name"), disabled = patch.if_contains("disabled");
+        s.integer(1, name != nullptr); s.text(2, name ? std::string_view(name->as_string()) : std::string_view{});
+        s.integer(3, disabled != nullptr); s.integer(4, disabled && disabled->as_bool());
+        s.text(5, id); s.row();
+        if (!sqlite3_changes(impl_->db)) throw Error(404, "account_not_found", "Account not found");
+    });
+}
 json::array Store::import_accounts(const json::value &input, std::string name) {
     json::value v = input;
     if (v.is_string()) {
@@ -596,6 +623,62 @@ std::optional<Account> Store::choose(std::string_view model,
         }
         return {};
     });
+}
+json::object Store::rotation_status() {
+    auto result = impl_->run([&] {
+        json::object out{{"preferred_account_id", nullptr}, {"next_account_id", nullptr}};
+        Statement selected(impl_->db, "SELECT a.id FROM accounts a JOIN settings s ON s.v=a.id WHERE s.k='selected'");
+        if (selected.row()) out["preferred_account_id"] = selected.str(0);
+        Statement next(impl_->db,
+            "SELECT a.id FROM accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND f.model='*' AND f.until>?) ORDER BY (a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
+        next.integer(1, unix_seconds());
+        if (next.row()) out["next_account_id"] = next.str(0);
+        return out;
+    });
+    result["accounts"] = account_status();
+    return result;
+}
+std::string Store::rotate_account() {
+    return impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement next(impl_->db,
+                "SELECT a.id FROM accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND f.model='*' AND f.until>?) ORDER BY (a.rowid<=COALESCE((SELECT p.rowid FROM accounts p JOIN settings s ON s.v=p.id WHERE s.k='selected'),0)),a.rowid LIMIT 1");
+            next.integer(1, unix_seconds());
+            if (!next.row()) throw Error(503, "no_available_account", "No globally available account");
+            auto id = next.str(0);
+            Statement selected(impl_->db, "INSERT INTO settings(k,v) VALUES('selected',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v");
+            selected.text(1, id);
+            selected.row();
+            exec(impl_->db, "DELETE FROM sticky");
+            exec(impl_->db, "COMMIT");
+            return id;
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
+}
+void Store::clear_cooldown(std::string_view id, std::string_view model) {
+    impl_->run([&] {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement exists(impl_->db, "SELECT 1 FROM accounts WHERE id=?");
+            exists.text(1, id);
+            if (!exists.row()) throw Error(404, "account_not_found", "Account not found");
+            Statement clear(impl_->db, model.empty() ? "DELETE FROM failures WHERE account=?" : "DELETE FROM failures WHERE account=? AND model=?");
+            clear.text(1, id);
+            if (!model.empty()) clear.text(2, model);
+            clear.row();
+            exec(impl_->db, "COMMIT");
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
+}
+void Store::reset_stats() {
+    impl_->run([&] { exec(impl_->db, "DELETE FROM stats"); });
 }
 void Store::failure(std::string_view id, std::string_view model, std::string_view kind,
                     unsigned retry) {
@@ -746,6 +829,50 @@ std::optional<std::string> Store::authenticate(std::string_view secret) {
         s.text(1, sha256(secret));
         if (s.row())
             return s.str(0);
+        return {};
+    });
+}
+json::object Store::create_managed_key(std::string name) {
+    if (name.empty()) name = "API key";
+    if (name.size() > 200) throw Error(400, "invalid_key", "Key name must contain at most 200 bytes");
+    auto secret = "sk-ais2api-" + random_hex(32);
+    auto id = "managed_" + random_hex(8);
+    auto created = unix_seconds();
+    impl_->run([&] {
+        Statement s(impl_->db, "INSERT INTO managed_keys(id,name,hash,created) VALUES(?,?,?,?)");
+        s.text(1, id); s.text(2, name); s.text(3, sha256(secret)); s.integer(4, created); s.row();
+    });
+    return {{"id", id}, {"name", name}, {"secret", secret}, {"created", created}};
+}
+json::array Store::managed_keys() {
+    return impl_->run([&] {
+        json::array out;
+        Statement s(impl_->db, "SELECT id,name,created FROM managed_keys ORDER BY rowid");
+        while (s.row()) out.push_back(json::object{{"id", s.str(0)}, {"name", s.str(1)}, {"created", sqlite3_column_int64(s.p, 2)}});
+        return out;
+    });
+}
+void Store::rename_managed_key(std::string_view id, std::string name) {
+    if (name.empty() || name.size() > 200) throw Error(400, "invalid_key", "Key name must contain 1 to 200 bytes");
+    impl_->run([&] {
+        Statement s(impl_->db, "UPDATE managed_keys SET name=? WHERE id=?");
+        s.text(1, name); s.text(2, id); s.row();
+        if (!sqlite3_changes(impl_->db)) throw Error(404, "key_not_found", "Key not found");
+    });
+}
+void Store::revoke_managed_key(std::string_view id) {
+    impl_->run([&] {
+        Statement s(impl_->db, "DELETE FROM managed_keys WHERE id=?");
+        s.text(1, id); s.row();
+        if (!sqlite3_changes(impl_->db)) throw Error(404, "key_not_found", "Key not found");
+    });
+}
+std::optional<std::string> Store::authenticate_managed(std::string_view secret) {
+    if (secret.empty() || secret.size() > 4096) return {};
+    return impl_->run([&]() -> std::optional<std::string> {
+        Statement s(impl_->db, "SELECT id FROM managed_keys WHERE hash=?");
+        s.text(1, sha256(secret));
+        if (s.row()) return s.str(0);
         return {};
     });
 }

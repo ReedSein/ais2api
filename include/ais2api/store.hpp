@@ -26,9 +26,15 @@ public:
     static json::object normalize_storage_state(const json::value& input);
     json::array merge_verified_accounts(const std::vector<Account>& accounts);
     void put_account(const Account& account);
+    void update_email(std::string_view id, std::string_view email);
+    void update_account_metadata(std::string_view id, const json::object& patch);
     void remove_account(std::string_view id);
     void select_account(std::string_view id);
     void reset_account(std::string_view id);
+    json::object rotation_status();
+    std::string rotate_account();
+    void clear_cooldown(std::string_view id, std::string_view model = {});
+    void reset_stats();
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {});
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
     void success(std::string_view account, std::string_view model, const json::object& usage);
@@ -38,6 +44,11 @@ public:
     json::array keys();
     void revoke_key(std::string_view id);
     std::optional<std::string> authenticate(std::string_view secret);
+    json::object create_managed_key(std::string name);
+    json::array managed_keys();
+    void rename_managed_key(std::string_view id, std::string name);
+    void revoke_managed_key(std::string_view id);
+    std::optional<std::string> authenticate_managed(std::string_view secret);
     void put_tool(std::string_view principal, std::string_view call_id, const json::object& metadata);
     std::optional<json::object> get_tool(std::string_view principal, std::string_view call_id);
     void backup(const fs::path& target);

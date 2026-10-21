@@ -360,7 +360,11 @@ struct BrowserGateway::Impl {
         for (const auto& directory : {profile / "crash-dumps", profile / "disk-cache", profile / "logs"}) secure_directory(directory);
         args.push_back("--crash-dumps-dir=" + path_utf8(fs::absolute(profile / "crash-dumps")));
         args.push_back("--disk-cache-dir=" + path_utf8(fs::absolute(profile / "disk-cache")));
-        args.push_back("--log-file=" + path_utf8(fs::absolute(profile / "logs" / "browser.log")));
+        // Persist browser diagnostics beyond temporary profile cleanup.
+        secure_directory(config.data_dir / "logs");
+        args.push_back("--enable-logging");
+        args.push_back("--log-file=" + path_utf8(fs::absolute(config.data_dir / "logs" /
+            (path_utf8(profile.filename()) + ".log"))));
         if (config.headless) args.push_back("--headless=new");
 #if !defined(_WIN32) && !defined(__APPLE__)
         // proot's root user and Android cannot provide the Chromium sandbox.

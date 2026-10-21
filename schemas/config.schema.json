@@ -5,32 +5,154 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "version": { "const": 1 },
-    "bind": { "type": "string", "minLength": 1, "default": "127.0.0.1" },
-    "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18451 },
-    "api_key": { "type": "string", "default": "", "maxLength": 4096, "pattern": "^[!-~]*$", "description": "User-configured HTTP API key; empty disables protected HTTP access. Reload or restart after editing. Stored as plaintext here; CLI output redacts it." },
-    "cookie_import_key": { "type": "string", "default": "", "maxLength": 4096, "pattern": "^[!-~]*$", "description": "Separate Bearer secret for userscript Cookie import; empty disables import. Never grants generation access." },
-    "cookie_import_max_accounts": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
-    "cookie_import_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 240, "default": 180 },
-    "data_dir": { "type": "string", "minLength": 1, "description": "Defaults to data/ beside the executable. File-relative paths resolve from the configuration directory." },
-    "browser_executable": { "type": "string", "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable." },
-    "proxy": { "type": "string" },
-    "headless": { "type": "boolean", "default": true },
-    "model_aliases": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
-    "configured_models": { "type": "array", "items": { "oneOf": [{ "type": "string" }, { "type": "object" }] } },
-    "model_defaults": { "type": "object" },
-    "limits": {
-      "type": "object", "additionalProperties": false,
-      "properties": {
-        "request_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 33554432 },
-        "object_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 67108864 },
-        "relay_bytes": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 1048576 },
-        "queue_size": { "type": "integer", "minimum": 1, "maximum": 4096, "default": 8 },
-        "queue_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 30 },
-        "generation_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 240 },
-        "stream_idle_seconds": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 240 },
-        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 16, "default": 3 }
+    "version": {
+      "const": 1
+    },
+    "bind": {
+      "type": "string",
+      "minLength": 1,
+      "default": "127.0.0.1"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 18451
+    },
+    "api_key": {
+      "type": "string",
+      "default": "",
+      "maxLength": 4096,
+      "pattern": "^[!-~]*$",
+      "description": "User-configured HTTP API key; empty disables protected HTTP access. Reload or restart after editing. Stored as plaintext here; CLI output redacts it."
+    },
+    "cookie_import_key": {
+      "type": "string",
+      "default": "",
+      "maxLength": 4096,
+      "pattern": "^[!-~]*$",
+      "description": "Separate Bearer secret for userscript Cookie import; empty disables import. Never grants generation access."
+    },
+    "cookie_import_max_accounts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 8
+    },
+    "cookie_import_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 240,
+      "default": 180
+    },
+    "data_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Defaults to data/ beside the executable. File-relative paths resolve from the configuration directory."
+    },
+    "browser_executable": {
+      "type": "string",
+      "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable."
+    },
+    "proxy": {
+      "type": "string"
+    },
+    "headless": {
+      "type": "boolean",
+      "default": true
+    },
+    "model_aliases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
       }
+    },
+    "configured_models": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "model_defaults": {
+      "type": "object"
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 33554432
+        },
+        "object_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 67108864
+        },
+        "relay_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 1048576
+        },
+        "queue_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096,
+          "default": 8
+        },
+        "queue_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 30
+        },
+        "generation_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 240
+        },
+        "stream_idle_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 240
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 3
+        }
+      }
+    },
+    "admin_key": {
+      "type": "string",
+      "default": "",
+      "maxLength": 4096,
+      "pattern": "^[!-~]*$",
+      "description": "Independent management Bearer secret; empty disables HTTP management. Redacted in management output."
+    },
+    "admin_origins": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string",
+        "pattern": "^https?://(?:\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9.])?)(?::[0-9]{1,5})?$"
+      },
+      "description": "Exact HTTP(S) origins allowed for management; empty permits same-origin only. No paths, credentials or wildcards."
     }
   }
 }

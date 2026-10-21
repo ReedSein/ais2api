@@ -40,6 +40,7 @@ bool sensitive_key(std::string key) {
     if (key == "cookie_import_max_accounts" || key == "cookie_import_timeout_seconds") return false;
     std::transform(key.begin(), key.end(), key.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (key == "admin_key") return true;
     if (key == "token" || key.ends_with("_token") || key == "accesstoken" || key == "refreshtoken") return true;
     for (auto fragment : {"password", "secret", "cookie", "authorization", "api_key", "apikey", "thoughtsignature"})
         if (key.find(fragment) != std::string::npos) return true;
@@ -74,6 +75,23 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         json::array accounts;
         for (auto& item : imported) accounts.push_back(account_summary(item.as_object()));
         return {{"imported", accounts.size()}, {"accounts", accounts}};
+    }
+    if (name == "accounts.update") {
+        for (const auto& field : command)
+            if (field.key() != "command" && field.key() != "id" && field.key() != "name" && field.key() != "disabled")
+                throw Error(400, "invalid_command", "Unknown account update field");
+        auto id_value = command.if_contains("id");
+        if (!id_value || !id_value->is_string()) throw Error(400, "invalid_command", "Account id must be a string");
+        auto id = identifier(command);
+        auto name_value = command.if_contains("name");
+        auto disabled_value = command.if_contains("disabled");
+        if ((!name_value && !disabled_value) || (name_value && !name_value->is_string()) || (disabled_value && !disabled_value->is_bool()))
+            throw Error(400, "invalid_command", "Account update requires a string name or boolean disabled");
+        json::object patch;
+        if (name_value) patch["name"] = *name_value;
+        if (disabled_value) patch["disabled"] = *disabled_value;
+        store.update_account_metadata(id, patch);
+        return {{"ok", true}, {"id", id}};
     }
     if (name == "accounts.select" || name == "accounts.remove" || name == "accounts.reset") {
         auto id = identifier(command);

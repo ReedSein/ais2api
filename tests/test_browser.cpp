@@ -172,6 +172,10 @@ TEST_CASE("installed browser verifier releases its process and profile", "[.brow
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     for (const auto &entry : fs::directory_iterator(config.data_dir / "runtime"))
         CHECK_FALSE(entry.path().filename().string().starts_with("browser-"));
+    bool retained_log = false;
+    for (const auto &entry : fs::directory_iterator(config.data_dir / "logs"))
+        retained_log = retained_log || (entry.is_regular_file() && entry.path().extension() == ".log");
+    CHECK(retained_log);
 }
 
 TEST_CASE("model discovery distinguishes configured data from live Google data") {

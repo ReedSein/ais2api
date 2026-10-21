@@ -1,0 +1,2606 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ais2api Management API",
+    "version": "1.0.0",
+    "description": "Independent admin Bearer authentication. See docs/management-api.md for operational semantics and SSE examples."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:18451/api/admin/v1"
+    }
+  ],
+  "security": [
+    {
+      "adminBearer": []
+    }
+  ],
+  "paths": {
+    "/auth/check": {
+      "get": {
+        "operationId": "get_auth_check",
+        "summary": "Validate management credential",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "get_capabilities",
+        "summary": "Discover implemented capabilities",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "operationId": "get_version",
+        "summary": "Get gateway version",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "operationId": "get_status",
+        "summary": "Get live scheduler status",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "operationId": "get_stats",
+        "summary": "Get account and model counters",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_stats",
+        "summary": "Reset counters",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/accounts": {
+      "get": {
+        "operationId": "get_accounts",
+        "summary": "List credential-free account metadata",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/accounts/active": {
+      "get": {
+        "operationId": "get_accounts_active",
+        "summary": "Read preferred and active generation account IDs",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/accounts/import": {
+      "post": {
+        "operationId": "post_accounts_import",
+        "summary": "Import cookie text, storage state or credential bundles",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "input"
+                ],
+                "properties": {
+                  "input": {},
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/probe-import": {
+      "post": {
+        "operationId": "post_accounts_probe_import",
+        "summary": "Verify browser identity then merge cookies",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/probe": {
+      "post": {
+        "operationId": "post_accounts_probe",
+        "summary": "Queue all-account identity probes",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "202": {
+            "description": "Queued; poll /operations/{operation_id}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{id}": {
+      "patch": {
+        "operationId": "patch_accounts_id",
+        "summary": "Rename or enable/disable an account",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "disabled": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false,
+                "anyOf": [
+                  {
+                    "required": [
+                      "name"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "disabled"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_accounts_id",
+        "summary": "Remove an account",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/accounts/{id}/activate": {
+      "post": {
+        "operationId": "post_accounts_id_activate",
+        "summary": "Set preferred account for subsequent requests",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/accounts/{id}/reset": {
+      "post": {
+        "operationId": "post_accounts_id_reset",
+        "summary": "Reset failures, expiry and disabled state",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/accounts/{id}/probe": {
+      "post": {
+        "operationId": "post_accounts_id_probe",
+        "summary": "Queue account identity probe",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "202": {
+            "description": "Queued; poll /operations/{operation_id}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/accounts/{id}/detect-email": {
+      "post": {
+        "operationId": "post_accounts_id_detect_email",
+        "summary": "Probe and refresh verified email",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "202": {
+            "description": "Queued; poll /operations/{operation_id}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/rotation": {
+      "get": {
+        "operationId": "get_rotation",
+        "summary": "Get rotation state and cooldowns",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rotation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/rotation/next": {
+      "post": {
+        "operationId": "post_rotation_next",
+        "summary": "Choose next globally eligible preferred account",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/rotation/clear-cooldown": {
+      "post": {
+        "operationId": "post_rotation_clear_cooldown",
+        "summary": "Clear one account cooldowns, optionally by model",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/config": {
+      "get": {
+        "operationId": "get_config",
+        "summary": "Read redacted effective and pending configuration",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch_config",
+        "summary": "Validate and persist partial configuration; apply or report restart",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigSaved"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigPatch"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/config/validate": {
+      "post": {
+        "operationId": "post_config_validate",
+        "summary": "Validate a patch without saving",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigPatch"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/config/reload": {
+      "post": {
+        "operationId": "post_config_reload",
+        "summary": "Reload configuration from disk",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/keys": {
+      "get": {
+        "operationId": "get_keys",
+        "summary": "List configured and managed key metadata",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      },
+      "post": {
+        "operationId": "post_keys",
+        "summary": "Create managed key; secret returned once",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "201": {
+            "description": "Created; retain the one-time secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyCreated"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/keys/config": {
+      "put": {
+        "operationId": "put_keys_config",
+        "summary": "Rotate configured API key",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "api_key": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "api_key"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_keys_config",
+        "summary": "Revoke configured API key",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/keys/{id}": {
+      "patch": {
+        "operationId": "patch_keys_id",
+        "summary": "Rename managed key",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_keys_id",
+        "summary": "Revoke managed key",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "get_models",
+        "summary": "Get cached/configured models without browser startup",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/models/refresh": {
+      "post": {
+        "operationId": "post_models_refresh",
+        "summary": "Queue live model discovery",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "202": {
+            "description": "Queued; poll /operations/{operation_id}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/operations/{id}": {
+      "get": {
+        "operationId": "get_operations_id",
+        "summary": "Read queued maintenance result",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_operations_id",
+        "summary": "Release retained maintenance result",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Released"
+          },
+          "401": {
+            "description": "Invalid admin Bearer"
+          },
+          "404": {
+            "description": "Unknown operation"
+          }
+        }
+      }
+    },
+    "/diagnostics": {
+      "get": {
+        "operationId": "get_diagnostics",
+        "summary": "Get redacted diagnostic snapshot and log inventory",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/diagnostics/export": {
+      "post": {
+        "operationId": "post_diagnostics_export",
+        "summary": "Export redacted diagnostic JSON snapshot",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/logs/sources": {
+      "get": {
+        "operationId": "get_logs_sources",
+        "summary": "Enumerate all application log files",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogSources"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/logs": {
+      "get": {
+        "operationId": "get_logs",
+        "summary": "Read complete history from a byte cursor",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/LogPage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RawLogPage"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "default": "0"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omit for structured journal; otherwise use an ID from /logs/sources."
+          }
+        ]
+      }
+    },
+    "/logs/stream": {
+      "get": {
+        "operationId": "get_logs_stream",
+        "summary": "Replay history then follow logs in real time (SSE)",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "id: 123\nevent: logs\ndata: {\"entries\":[],\"next_cursor\":\"123\",\"has_more\":false}\n\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "default": "0"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omit for structured journal; otherwise use an ID from /logs/sources."
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resume cursor when query cursor is omitted."
+          }
+        ]
+      }
+    },
+    "/service/stop": {
+      "post": {
+        "operationId": "post_service_stop",
+        "summary": "Stop running service after acknowledging request",
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "adminBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "status",
+              "reason"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Account": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "auth_user": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "expired": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AccountList": {
+        "type": "object",
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          }
+        }
+      },
+      "Operation": {
+        "type": "object",
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "done",
+              "failed"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "LogPage": {
+        "type": "object",
+        "required": [
+          "entries",
+          "next_cursor",
+          "has_more"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cursor": {
+                  "type": "string"
+                },
+                "record": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RawLogPage": {
+        "type": "object",
+        "required": [
+          "source",
+          "next_cursor",
+          "has_more",
+          "encoding",
+          "data"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": "string"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "encoding": {
+            "const": "base64"
+          },
+          "data": {
+            "type": "string",
+            "contentEncoding": "base64"
+          }
+        }
+      },
+      "Key": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "Status": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "boolean"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "logging_healthy": {
+            "type": "boolean"
+          },
+          "queued": {
+            "type": "integer"
+          },
+          "connections": {
+            "type": "integer"
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          },
+          "pending_logs": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          },
+          "active_generation_account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "Stats": {
+        "type": "object",
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "account": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "success": {
+                  "type": "integer"
+                },
+                "failure": {
+                  "type": "integer"
+                },
+                "usage": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "required": []
+            }
+          }
+        },
+        "required": [
+          "records"
+        ]
+      },
+      "Rotation": {
+        "type": "object",
+        "properties": {
+          "preferred_account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_account_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          }
+        },
+        "required": []
+      },
+      "KeyList": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "config_key_configured": {
+            "type": "boolean"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Key"
+            }
+          }
+        },
+        "required": []
+      },
+      "KeyCreated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "secret",
+          "created"
+        ]
+      },
+      "ConfigView": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "saved_config": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "config_file": {
+            "type": "string"
+          },
+          "restart_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "config",
+          "config_file",
+          "restart_required"
+        ]
+      },
+      "ConfigSaved": {
+        "type": "object",
+        "properties": {
+          "saved": {
+            "type": "boolean"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "restart_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "saved",
+          "applied",
+          "restart_required"
+        ]
+      },
+      "ConfigPatch": {
+        "title": "ais2api configuration version 1",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "bind": {
+            "type": "string",
+            "minLength": 1,
+            "default": "127.0.0.1"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "default": 18451
+          },
+          "api_key": {
+            "type": "string",
+            "default": "",
+            "maxLength": 4096,
+            "pattern": "^[!-~]*$",
+            "description": "User-configured HTTP API key; empty disables protected HTTP access. Reload or restart after editing. Stored as plaintext here; CLI output redacts it."
+          },
+          "cookie_import_key": {
+            "type": "string",
+            "default": "",
+            "maxLength": 4096,
+            "pattern": "^[!-~]*$",
+            "description": "Separate Bearer secret for userscript Cookie import; empty disables import. Never grants generation access."
+          },
+          "cookie_import_max_accounts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 8
+          },
+          "cookie_import_timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 240,
+            "default": 180
+          },
+          "data_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Defaults to data/ beside the executable. File-relative paths resolve from the configuration directory."
+          },
+          "browser_executable": {
+            "type": "string",
+            "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable."
+          },
+          "proxy": {
+            "type": "string"
+          },
+          "headless": {
+            "type": "boolean",
+            "default": true
+          },
+          "model_aliases": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "configured_models": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "model_defaults": {
+            "type": "object"
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "request_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 33554432
+              },
+              "object_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 67108864
+              },
+              "relay_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 1048576
+              },
+              "queue_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4096,
+                "default": 8
+              },
+              "queue_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 30
+              },
+              "generation_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 240
+              },
+              "stream_idle_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295,
+                "default": 240
+              },
+              "max_attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16,
+                "default": 3
+              }
+            }
+          },
+          "admin_key": {
+            "type": "string",
+            "default": "",
+            "maxLength": 4096,
+            "pattern": "^[!-~]*$",
+            "description": "Independent management Bearer secret; empty disables HTTP management. Redacted in management output."
+          },
+          "admin_origins": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "string",
+              "pattern": "^https?://(?:\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9.])?)(?::[0-9]{1,5})?$"
+            },
+            "description": "Exact HTTP(S) origins allowed for management; empty permits same-origin only. No paths, credentials or wildcards."
+          }
+        }
+      },
+      "LogSources": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "bytes"
+              ]
+            }
+          }
+        },
+        "required": [
+          "sources"
+        ]
+      }
+    }
+  }
+}
