@@ -1,8 +1,8 @@
 # Command-line interface
 
-The executable is `ais2api` (`ais2api.exe` on Windows). Configuration, credentials and service control are managed locally through the CLI. There is no HTTP administration API or Web frontend.
+The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and service control are managed locally through the CLI. There is no Web frontend. The optional, separately authenticated userscript Cookie import endpoint is the only HTTP account mutation; see [userscript setup](userscript.md).
 
-`--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. API-key secrets appear only in the successful `init` or `keys create` result that creates them; keep that output private. `keys list` returns metadata, never the secret or its hash.
+`--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. API keys are configured in `config.json`; CLI output redacts them. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
 
 ## Initialization and service lifecycle
 
@@ -14,7 +14,9 @@ ais2api status --config ./config.json --data-dir ./data
 ais2api stop --config ./config.json --data-dir ./data
 ```
 
-`init` writes the first configuration and initializes local storage. The first initialization creates an API key and prints its secret once. Re-running initialization does not issue another initial secret, including after keys are revoked. Create a new key explicitly when needed.
+`init` writes the first configuration and initializes local storage. It never generates or prints an API key. Its result includes `api_key_configured` and `next_step`. Set `api_key` in `config.json` to your own key before starting; the default is empty. Re-running initialization preserves it. Keys allow at most 4096 visible ASCII characters without whitespace.
+
+The default listener is `127.0.0.1:18451`. Windows port reservations can change dynamically; use configuration `port` or `--port PORT` to override it.
 
 Defaults are portable: `config.json` and `data/` live beside the executable.
 Downloads are `data/runtime/downloads/`, logs are `data/service.log`, and temporary
@@ -68,10 +70,10 @@ ais2api accounts remove ACCOUNT_ID
 ais2api accounts reset ACCOUNT_ID
 ais2api accounts probe ACCOUNT_ID
 ais2api accounts probe all
-ais2api keys create "Client name"
 ais2api keys list
-ais2api keys revoke KEY_ID
 ```
+
+`keys list` returns `source: "config"`, `configured`, and metadata in `keys` (empty when unconfigured). `keys create` and `keys revoke` fail with `reason: "keys_managed_in_config"`; edit `api_key` then reload or restart instead. Existing database key records remain intact but no longer authorize HTTP.
 
 Append the appropriate global configuration/data-directory options to these examples. Import reads stdin only with explicit `--stdin`; it never consumes stdin implicitly. Inputs may be supported JSON cookie/storage-state objects, account bundles, or bare Cookie-header text. Avoid putting cookies in command arguments or shell history. Import/list results exclude cookie values and storage origins. Account metadata such as names and emails remains visible to the local owner.
 
@@ -88,7 +90,7 @@ ais2api models list
 ais2api operations status OPERATION_ID
 ```
 
-`config show` redacts proxy userinfo and recognized credential fields while retaining nonsecret settings such as limits. `config validate` checks configuration locally. `config reload` requires a running service and applies reloadable settings, including queue capacity; listener, storage, browser and transport changes can require a restart and produce `restart_required`. `stats` reports recorded counters.
+`config show` redacts `api_key`, proxy userinfo and recognized credential fields while retaining nonsecret settings such as limits. `config validate` checks configuration locally. `config reload` requires a running service and applies reloadable settings, including queue capacity and `api_key`; changing the key immediately rejects the old key and clearing it disables protected HTTP access; listener, storage, browser and transport changes can require a restart and produce `restart_required`. `stats` reports recorded counters.
 
 `models list` requests live discovery when the service is running and can prepare a browser. Without a running service it can report explicitly configured models; it cannot claim live discovery. Discovery and account probes run as queued operations so local status/stop control stays responsive. The CLI polls their operation IDs every 200 ms for up to 120 seconds. If the operation remains pending, it exits with `operation_pending`; use the reported ID with `operations status`. Completion returns the result; failure returns a structured error. Operations are retained temporarily and IDs can expire.
 
@@ -96,7 +98,7 @@ ais2api operations status OPERATION_ID
 
 The running process owns its database and accepts owner-only local IPC: a protected Windows named pipe or a protected Unix-domain socket. CLI commands first contact that process. Only `not_running` permits supported commands to open storage offline, after acquiring the exclusive instance lock. Timeouts or authorization failures do not trigger an offline database bypass.
 
-HTTP remains the inference/model API. Clients authenticate with an API key in `Authorization: Bearer KEY`, `x-api-key`, or `x-goog-api-key`. `/health` is a public process-liveness check. `/ready` reports local prerequisites and explicitly does not verify Google. Cookie import, key mutation, configuration and browser control remain local CLI operations.
+Inference/model clients authenticate with an API key in `Authorization: Bearer KEY`, `x-api-key`, or `x-goog-api-key`. `/health` is a public process-liveness check. With an empty `api_key`, protected generation/model routes reject authentication and `/ready` returns `ready: false`. The optional `POST /api/accounts/probe-import` requires its own Bearer `cookie_import_key`; a generation key alone does not authorize account import. `/ready` reports local prerequisites and explicitly does not verify Google. Configuration and browser control remain local operations. Edit both keys in the configuration file.
 
 ## Developer smoke check
 

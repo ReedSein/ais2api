@@ -118,7 +118,7 @@ void help() {
                  "  browser update | browser rollback\n"
                  "  accounts list | import (--file PATH | --stdin) [--name NAME]\n"
                  "  accounts select ID | remove ID | reset ID | probe (ID | all)\n"
-                 "  keys create [NAME] | list | revoke ID\n"
+                 "  keys list (edit api_key in config.json to set or rotate)\n"
                  "  stats | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"
                  "Global options: --config PATH --data-dir PATH --bind ADDRESS --port PORT\n"
@@ -127,7 +127,7 @@ void help() {
                  "  --queue-seconds N --generation-seconds N --stream-idle-seconds N\n"
                  "  --max-attempts N\n"
                  "setup/browser update accept --yes to approve required system package changes.\n"
-                 "All non-help results are JSON. API-key secrets are printed once when created.\n";
+                 "All non-help results are JSON. Set api_key in config.json; secrets are never printed.\n";
 }
 
 void require_offline(const Config &config) {
@@ -290,11 +290,27 @@ json::object execute(Arguments args) {
         Store store(config.data_dir);
         if (!fs::exists(config.config_file))
             atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
+        else {
+            auto stored = json::parse(read_file(config.config_file)).as_object();
+            bool changed = false;
+            const auto defaults = config.to_json(true);
+            for (auto key : {"api_key", "cookie_import_key", "cookie_import_max_accounts", "cookie_import_timeout_seconds"}) {
+                if (!stored.contains(key)) {
+                    stored[key] = defaults.at(key);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                atomic_write(config.config_file, json::serialize(stored), true);
+            }
+        }
         json::object result{{"initialized", true},
                             {"config_file", path_utf8(config.config_file)},
-                            {"data_dir", path_utf8(config.data_dir)}};
-        if (!initialized && store.keys().empty())
-            result["api_key"] = store.create_key("Initial key");
+                            {"data_dir", path_utf8(config.data_dir)},
+                            {"api_key_configured", !config.api_key.empty()},
+                            {"next_step", config.api_key.empty()
+                                ? "Set api_key in config.json before using generation or model endpoints"
+                                : "API key is configured in config.json"}};
         if (!initialized)
             atomic_write(marker, "{\"version\":1}", true);
         return result;

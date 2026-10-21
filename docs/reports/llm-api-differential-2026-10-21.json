@@ -1,0 +1,2210 @@
+{
+  "upstream_commit": "3e2eff888b21cc403168ceaaa1379a527d8b1a1c",
+  "cpp_probe_sha256": "4e9ab068a5c3fef46ee2062a58af3888d1c3c8788304d596d3fbe2363b6fd4e6",
+  "scope": "offline_synthetic_openai_request_normalization",
+  "generation_requests": 0,
+  "cases": [
+    {
+      "name": "text",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    },
+    {
+      "name": "leading_system",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Use short answers."
+          },
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "systemInstruction": {
+            "parts": [
+              {
+                "text": "Use short answers."
+              }
+            ]
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "systemInstruction": {
+            "parts": [
+              {
+                "text": "Use short answers."
+              }
+            ]
+          },
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    },
+    {
+      "name": "late_system",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": "Hi."
+          },
+          {
+            "role": "system",
+            "content": "Use short answers."
+          },
+          {
+            "role": "user",
+            "content": "Continue."
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "Hi."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "Continue."
+                }
+              ]
+            }
+          ],
+          "systemInstruction": {
+            "parts": [
+              {
+                "text": "Use short answers."
+              }
+            ]
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "Hi."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "Use short answers."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "Continue."
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/contents/length",
+        "/request/systemInstruction"
+      ]
+    },
+    {
+      "name": "message_name",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "name": "Alex",
+            "content": "hello"
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "[name: \"Alex\"]\n"
+                },
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/contents/0/parts/length"
+      ]
+    },
+    {
+      "name": "assistant_refusal",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "refusal": "No."
+          },
+          {
+            "role": "user",
+            "content": "Continue."
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "No."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "Continue."
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "sampling_stop",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "max_tokens": 100,
+        "stop": [
+          "END"
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.8,
+            "maxOutputTokens": 100,
+            "stopSequences": [
+              "END"
+            ]
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "stopSequences": [
+              "END"
+            ],
+            "temperature": 0.2,
+            "topP": 0.8,
+            "maxOutputTokens": 100
+          }
+        }
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    },
+    {
+      "name": "numeric_string",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "temperature": "0.2"
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 0.2
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "out_of_range_temperature",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "temperature": 4
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 4
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/generationConfig"
+      ]
+    },
+    {
+      "name": "dual_token_limits",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 80,
+        "max_completion_tokens": 90
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "maxOutputTokens": 90
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "multiple_candidates",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "n": 4
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "unknown_seed",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "seed": 123
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "json_object",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseMimeType": "application/json"
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseMimeType": "application/json"
+          }
+        }
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    },
+    {
+      "name": "json_schema",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "sample",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
+          }
+        }
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
+          }
+        }
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    },
+    {
+      "name": "strict_schema",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "sample",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            },
+            "strict": true
+          }
+        }
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "functions_auto",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto"
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "toolConfig": {
+            "functionCallingConfig": {
+              "mode": "AUTO"
+            }
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {},
+          "toolConfig": {
+            "functionCallingConfig": {
+              "mode": "AUTO",
+              "allowedFunctionNames": []
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/toolConfig/functionCallingConfig/allowedFunctionNames"
+      ]
+    },
+    {
+      "name": "legacy_functions",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "functions": [
+          {
+            "name": "lookup",
+            "description": "Look up a value.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag"
+              ]
+            }
+          }
+        ],
+        "function_call": "auto"
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {},
+          "toolConfig": {
+            "functionCallingConfig": {
+              "mode": "AUTO",
+              "allowedFunctionNames": []
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "required_function",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "required"
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {},
+          "toolConfig": {
+            "functionCallingConfig": {
+              "mode": "ANY",
+              "allowedFunctionNames": []
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "named_function",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup"
+          }
+        }
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {},
+          "toolConfig": {
+            "functionCallingConfig": {
+              "mode": "ANY",
+              "allowedFunctionNames": [
+                "lookup"
+              ]
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "reasoning_alias",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "reasoning": {
+          "effort": "low"
+        }
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "LOW"
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "reasoning_xhigh",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "reasoning_effort": "xhigh"
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "native_generation_root",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "generationConfig": {
+          "temperature": 0.3
+        }
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 0.3
+          }
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "ais2api_generation",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "ais2api": {
+          "gemini": {
+            "generationConfig": {
+              "temperature": 0.3
+            }
+          }
+        }
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 0.3
+          }
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/generationConfig"
+      ]
+    },
+    {
+      "name": "thinking_history",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer.",
+            "reasoning_content": "Consider."
+          },
+          {
+            "role": "user",
+            "content": "Continue."
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "text": "Consider.",
+                  "thought": true
+                },
+                {
+                  "text": "Answer."
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "Continue."
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "input_text_alias",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "inline_file",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "file",
+                "file": {
+                  "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "inlineData": {
+                    "mimeType": "application/pdf",
+                    "data": "JVBERi0xLjQKJSVFT0YK"
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "invalid_image_base64",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,%%%%"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "inlineData": {
+                    "mimeType": "image/png",
+                    "data": "%%%%"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": false,
+        "status": 400
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "wrong_image_magic",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,YWJj"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "inlineData": {
+                    "mimeType": "image/png",
+                    "data": "YWJj"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": false,
+        "status": 400
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "unanswered_tool_batch",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_a",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"A\"}"
+                }
+              },
+              {
+                "id": "call_b",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"B\"}"
+                }
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "A"
+                    },
+                    "id": "call_a"
+                  }
+                },
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "B"
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": false,
+        "status": 400
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "complete_tool_batch",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_a",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"A\"}"
+                }
+              },
+              {
+                "id": "call_b",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"B\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_a",
+            "content": "{\"value\":1}"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_b",
+            "content": "{\"value\":1}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "A"
+                    },
+                    "id": "call_a"
+                  }
+                },
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "B"
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_a"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "A"
+                    },
+                    "id": "call_a"
+                  }
+                },
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "B"
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_a"
+                  }
+                },
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          "generationConfig": {}
+        }
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/request/contents/length"
+      ]
+    },
+    {
+      "name": "duplicate_tool_result",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_a",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"A\"}"
+                }
+              },
+              {
+                "id": "call_b",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{\"tag\":\"B\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_a",
+            "content": "{\"value\":1}"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_b",
+            "content": "{\"value\":1}"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_a",
+            "content": "{\"value\":1}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "description": "Look up a value.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tag": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tag"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "cpp": {
+        "accepted": true,
+        "request": {
+          "contents": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "text": "hello"
+                }
+              ]
+            },
+            {
+              "role": "model",
+              "parts": [
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "A"
+                    },
+                    "id": "call_a"
+                  }
+                },
+                {
+                  "functionCall": {
+                    "name": "lookup",
+                    "args": {
+                      "tag": "B"
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_a"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_b"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "functionResponse": {
+                    "name": "lookup",
+                    "response": {
+                      "value": 1
+                    },
+                    "id": "call_a"
+                  }
+                }
+              ]
+            }
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {
+                  "name": "lookup",
+                  "description": "Look up a value.",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "tag": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "original": {
+        "accepted": false,
+        "status": 400
+      },
+      "normalized_equal": false,
+      "differing_paths": [
+        "/accepted",
+        "/request",
+        "/status"
+      ]
+    },
+    {
+      "name": "empty_messages",
+      "input": {
+        "model": "gemini-3.1-flash-lite",
+        "messages": []
+      },
+      "cpp": {
+        "accepted": false,
+        "status": 400
+      },
+      "original": {
+        "accepted": false,
+        "status": 400
+      },
+      "normalized_equal": true,
+      "differing_paths": []
+    }
+  ],
+  "case_count": 31,
+  "equal_count": 6,
+  "different_count": 25
+}

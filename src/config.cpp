@@ -7,8 +7,10 @@
 #include "ais2api/config.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/bundle.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <openssl/crypto.h>
 
 namespace ais2api {
 namespace {
@@ -86,6 +88,10 @@ json::object Config::to_json(bool portable_paths) const {
   return {{"version", version},
           {"bind", bind},
           {"port", port},
+          {"api_key", api_key},
+          {"cookie_import_key", cookie_import_key},
+          {"cookie_import_max_accounts", cookie_import_max_accounts},
+          {"cookie_import_timeout_seconds", cookie_import_timeout_seconds},
           {"data_dir", stored_path(data_dir, config_file, portable_paths)},
           {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
           {"proxy", proxy},
@@ -186,7 +192,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   merge(o, overrides);
   explicit_browser = explicit_browser || e.contains("browser_executable") ||
                      overrides.contains("browser_executable");
-  fields(o, {"version", "bind", "port", "data_dir", "browser_executable",
+  fields(o, {"version", "bind", "port", "api_key", "cookie_import_key",
+             "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
              "proxy", "headless", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
@@ -201,6 +208,14 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
     throw Error(400, "invalid_config", "Port outside 1..65535");
   c.port = static_cast<unsigned short>(port);
   c.bind = text("bind");
+  c.api_key = text("api_key");
+  c.cookie_import_key = text("cookie_import_key");
+  auto import_accounts = number(o.at("cookie_import_max_accounts"));
+  auto import_timeout = number(o.at("cookie_import_timeout_seconds"));
+  if (import_accounts < 1 || import_accounts > 32 || import_timeout < 1 || import_timeout > 240)
+    throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
+  c.cookie_import_max_accounts = static_cast<unsigned>(import_accounts);
+  c.cookie_import_timeout_seconds = static_cast<unsigned>(import_timeout);
   c.data_dir = fs::u8path(text("data_dir"));
   c.browser_executable = fs::u8path(text("browser_executable"));
   // Explicit CLI/environment relative paths retain their normal shell meaning.
@@ -246,6 +261,20 @@ void Config::validate() const {
   if (bind.empty() || data_dir.empty() || !port)
     throw Error(400, "invalid_config",
                 "Bind, data directory and port are required");
+  if (api_key.size() > 4096 ||
+      std::any_of(api_key.begin(), api_key.end(), [](unsigned char ch) {
+        return ch < 33 || ch > 126;
+      }))
+    throw Error(400, "invalid_config",
+                "api_key must be empty or at most 4096 visible ASCII characters without whitespace");
+  if (cookie_import_key.size() > 4096 ||
+      std::any_of(cookie_import_key.begin(), cookie_import_key.end(), [](unsigned char ch) {
+        return ch < 33 || ch > 126;
+      }))
+    throw Error(400, "invalid_config", "cookie_import_key must be empty or at most 4096 visible ASCII characters without whitespace");
+  if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
+      !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
+    throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");
   for (auto &p : model_aliases)
     if (!p.value().is_string() || p.value().as_string().empty())
       throw Error(400, "invalid_config",
@@ -259,5 +288,25 @@ void Config::validate() const {
       !limits.max_attempts || limits.max_attempts > 16 ||
       limits.queue_size > 4096 || limits.relay_bytes > limits.object_bytes)
     throw Error(400, "invalid_config", "Inconsistent resource limits");
+}
+std::optional<std::string> Config::authenticate(std::string_view secret) const {
+  if (api_key.empty() || secret.empty() || secret.size() > 4096)
+    return std::nullopt;
+  const auto expected = sha256(api_key);
+  const auto presented = sha256(secret);
+  if (CRYPTO_memcmp(expected.data(), presented.data(), expected.size()) != 0)
+    return std::nullopt;
+  // The same configured key keeps tool-signature state across restarts. A
+  // rotation gets its own principal, so an old caller cannot share that state.
+  return "config-key-" + expected;
+}
+std::optional<std::string> Config::authenticate_cookie_import(std::string_view secret) const {
+  if (cookie_import_key.empty() || secret.empty() || secret.size() > 4096)
+    return std::nullopt;
+  const auto expected = sha256(cookie_import_key);
+  const auto presented = sha256(secret);
+  if (CRYPTO_memcmp(expected.data(), presented.data(), expected.size()) != 0)
+    return std::nullopt;
+  return "cookie-import-key-" + expected;
 }
 } // namespace ais2api

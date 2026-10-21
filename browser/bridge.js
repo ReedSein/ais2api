@@ -8,49 +8,187 @@
 (() => {
   if (globalThis.__ais2bridge) return;
   const nativeFetch = globalThis.fetch.bind(globalThis);
-  const state = { template: null, snapshotCall: null, models: [], transfer: null, discoveryRequest: null };
+  const state = { template: null, snapshotCall: null, models: [], transfer: null, discoveryRequest: null, templateTransport: null, snapshotCandidates: 0, snapshotHooked: 0 };
   const fail = message => { throw new Error(message); };
+  const snapshotInvocations = new Map();
+  const snapshotWrappers = new WeakSet();
+  function selectSnapshotService() {
+    if (state.snapshotCall || !state.template) return;
+    const ticket = state.template.body[4];
+    if (typeof ticket !== 'string' || !ticket) return;
+    for (const invocation of snapshotInvocations.values()) {
+      if (invocation.ticket === ticket) {
+        state.snapshotCall = invocation.call;
+        snapshotInvocations.clear();
+        return;
+      }
+    }
+  }
+  const isDiscovery = url => url.protocol === 'https:' && url.hostname === 'alkalimakersuite-pa.clients6.google.com' &&
+    url.pathname === '/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels';
+  function captureDiscovery(url, headers, method) {
+    if (method.toUpperCase() !== 'POST' || !isDiscovery(new URL(url))) return;
+    state.discoveryRequest = { url, headers: { ...headers } };
+  }
+  const rpcKind = url => url.hostname === 'alkalimakersuite-pa.clients6.google.com' &&
+    /\/(GenerateContent|SavePrompt|CreatePrompt)$/.exec(url.pathname)?.[1];
+  function captureTemplate(url, headers, text, transport) {
+    let body;
+    try { body = JSON.parse(text); } catch (_) { fail('browser_incompatible: invalid live GenerateContent JSON'); }
+    if (!Array.isArray(body)) fail('browser_incompatible: invalid live GenerateContent array');
+    state.template = { url, headers: { ...headers }, body };
+    state.templateTransport = transport;
+    state.snapshotCall = null;
+    selectSnapshotService();
+  }
+  // AI Studio may use either transport. Capture requests at send time, after
+  // every application header has been set, without reading cookie values.
+  if (typeof XMLHttpRequest !== 'undefined') {
+    const requests = new WeakMap();
+    const { open, setRequestHeader, send, abort } = XMLHttpRequest.prototype;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      const previous = requests.get(this);
+      if (previous?.synthetic) previous.synthetic = false;
+      if (previous?.intercepted) for (const key of ['readyState', 'status', 'statusText', 'responseURL', 'response', 'responseText', 'responseXML', 'getResponseHeader', 'getAllResponseHeaders']) delete this[key];
+      const result = Reflect.apply(open, this, [method, url, ...rest]);
+      requests.set(this, { method: String(method), url: new URL(String(url), location.href).href, headers: {}, async: rest[0] !== false });
+      return result;
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      const result = Reflect.apply(setRequestHeader, this, [name, value]);
+      const request = requests.get(this);
+      if (request) {
+        const key = String(name).toLowerCase();
+        request.headers[key] = request.headers[key] ? request.headers[key] + ', ' + value : String(value);
+      }
+      return result;
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      const request = requests.get(this);
+      if (request) captureDiscovery(request.url, request.headers, request.method);
+      const kind = request && rpcKind(new URL(request.url));
+      if (!kind) return Reflect.apply(send, this, args);
+      if (kind === 'GenerateContent') {
+        if (typeof args[0] !== 'string') fail('browser_incompatible: unsupported live XHR request body');
+        captureTemplate(request.url, request.headers, args[0], 'xhr');
+      }
+      // Keep the native object and its listeners. Shadow the browser's read-only
+      // response views for this intercepted request; never send the probe or save.
+      let readyState = 1, status = 0, response = null, responseText = '';
+      request.synthetic = true;
+      request.intercepted = true;
+      const emit = type => {
+        this.dispatchEvent(new Event(type));
+      };
+      const views = {
+        readyState: () => readyState, status: () => status,
+        statusText: () => status ? 'OK' : '', responseURL: () => status ? request.url : '',
+        response: () => response,
+        responseText: () => {
+          if (this.responseType && this.responseType !== 'text') throw new DOMException('Response is not text', 'InvalidStateError');
+          return responseText;
+        },
+        responseXML: () => null
+      };
+      for (const [key, get] of Object.entries(views)) Object.defineProperty(this, key, { configurable: true, get });
+      Object.defineProperties(this, {
+        getResponseHeader: { configurable: true, value: name => status && String(name).toLowerCase() === 'content-type' ? 'application/json+protobuf' : null },
+        getAllResponseHeaders: { configurable: true, value: () => status ? 'content-type: application/json+protobuf\r\n' : '' }
+      });
+      request.cancelSynthetic = () => { readyState = 0; status = 0; response = null; responseText = ''; emit('readystatechange'); emit('abort'); emit('loadend'); };
+      const finish = () => {
+        if (!request.synthetic) return;
+        status = 200;
+        readyState = 2; emit('readystatechange');
+        if (!request.synthetic) return;
+        readyState = 3; emit('readystatechange');
+        if (!request.synthetic) return;
+        responseText = '[]';
+        switch (this.responseType) {
+          case 'json': response = []; break;
+          case 'arraybuffer': response = new TextEncoder().encode(responseText).buffer; break;
+          case 'blob': response = new Blob([responseText], { type: 'application/json+protobuf' }); break;
+          case 'document': response = null; break;
+          default: response = responseText;
+        }
+        readyState = 4; emit('readystatechange');
+        if (!request.synthetic) return;
+        request.synthetic = false;
+        emit('load'); emit('loadend');
+      };
+      emit('loadstart');
+      if (request.async) setTimeout(finish, 0); else finish();
+    };
+    if (abort) XMLHttpRequest.prototype.abort = function(...args) {
+      const request = requests.get(this);
+      if (!request?.synthetic) return Reflect.apply(abort, this, args);
+      request.synthetic = false;
+      request.cancelSynthetic();
+    };
+  }
   function install() {
     const exports = globalThis.default_MakerSuite;
     if (!exports) return false;
+    let candidates = 0, hooked = 0;
     for (const key of Object.keys(exports)) {
-      const fn = exports[key];
-      if (typeof fn !== 'function' || fn.__ais2wrapped) continue;
-      // Discover the exported service adapter by behavior visible in its source,
-      // then capture the actual service argument when the page invokes it.
-      if (!/\.snapshot\s*\(/.test(Function.prototype.toString.call(fn))) continue;
-      function wrapped(...args) {
-        const result = Reflect.apply(fn, this, args);
-        if (args[0]) {
-          state.snapshotCall = hash => Reflect.apply(fn, this, [args[0], hash]);
+      // Inspect descriptors rather than invoking arbitrary export getters.
+      const descriptor = Object.getOwnPropertyDescriptor(exports, key);
+      if (!descriptor || !('value' in descriptor)) continue;
+      const fn = descriptor.value;
+      if (typeof fn !== 'function') continue;
+      if (snapshotWrappers.has(fn)) { ++candidates; ++hooked; continue; }
+      const source = Function.prototype.toString.call(fn);
+      if (!/\.snapshot\s*(?:\(|\))/.test(source)) continue;
+      ++candidates;
+      if (!descriptor.writable && !descriptor.configurable) continue;
+      const wrapped = new Proxy(fn, {
+        apply(target, receiver, args) {
+          const result = Reflect.apply(target, receiver, args);
+          // Observe only ordinary calls. Default Proxy construction preserves
+          // class/static/prototype behavior of other snapshot-related exports.
+          try {
+            if (args[0]) {
+              const service = args[0], trailing = args.slice(2);
+              const observe = ticket => {
+                try {
+                  if (typeof ticket !== 'string' || !ticket) return;
+                  snapshotInvocations.set(wrapped, { ticket, call: hash => Reflect.apply(target, receiver, [service, hash, ...trailing]) });
+                  selectSnapshotService();
+                } catch (_) { /* Observation cannot change page behavior. */ }
+              };
+              const then = result && result.then;
+              if (typeof then === 'function') Reflect.apply(then, result, [observe, () => {}]);
+              else observe(result);
+            }
+          } catch (_) { /* Includes unusual then getters and thenables. */ }
+          return result;
         }
-        return result;
-      }
-      wrapped.__ais2wrapped = true;
-      try { exports[key] = wrapped; } catch (_) { /* immutable export */ }
+      });
+      snapshotWrappers.add(wrapped);
+      try {
+        Object.defineProperty(exports, key, { ...descriptor, value: wrapped });
+        ++hooked;
+      } catch (_) { /* Immutable export: report it without claiming a hook. */ }
     }
+    state.snapshotCandidates = candidates;
+    state.snapshotHooked = hooked;
     return true;
   }
   const installTimer = setInterval(install, 250);
   globalThis.fetch = async function(input, init) {
     const req = new Request(input, init);
     const url = new URL(req.url);
-    if (url.hostname === 'alkalimakersuite-pa.clients6.google.com' && /\/ListModels$/.test(url.pathname)) {
+    if (isDiscovery(url)) {
       const headers = {};
       req.headers.forEach((value, key) => { headers[key] = value; });
-      state.discoveryRequest = { url: req.url, headers };
+      captureDiscovery(req.url, headers, req.method);
     }
     if (url.hostname === 'alkalimakersuite-pa.clients6.google.com' && /\/GenerateContent$/.test(url.pathname)) {
-      const text = await req.clone().text();
-      let body;
-      try { body = JSON.parse(text); } catch (_) { return nativeFetch(req); }
-      if (Array.isArray(body)) {
-        const headers = {};
-        req.headers.forEach((v, k) => { headers[k] = v; });
-        state.template = { url: req.url, headers, body };
-        // Bootstrap only needs the real page-generated request, not its output.
-        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json+protobuf' } });
-      }
+      const headers = {};
+      req.headers.forEach((v, k) => { headers[k] = v; });
+      captureTemplate(req.url, headers, await req.clone().text(), 'fetch');
+      // Bootstrap only needs the real page-generated request, not its output.
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json+protobuf' } });
     }
     if (url.hostname === 'alkalimakersuite-pa.clients6.google.com' && /\/(SavePrompt|CreatePrompt)$/.test(url.pathname)) {
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json+protobuf' } });
@@ -60,13 +198,28 @@
   function identity() {
     const url = new URL(location.href);
     const login = url.hostname === 'accounts.google.com' || /\/signin|\/ServiceLogin/.test(url.pathname);
-    const candidates = [...document.querySelectorAll('[data-email], [aria-label*="@"], img[alt*="@"]')];
+    const visible = el => !el.hidden && el.getAttribute('aria-hidden') !== 'true' &&
+      !(typeof el.closest === 'function' && el.closest('[hidden], [aria-hidden="true"]')) &&
+      !(typeof el.getClientRects === 'function' && el.getClientRects().length === 0);
+    const accountLinks = [...document.querySelectorAll('a[href]')].filter(el => {
+      if (!visible(el)) return false;
+      try {
+        const target = new URL(el.getAttribute('href'), url.href);
+        return target.protocol === 'https:' && ['accounts.google.com', 'myaccount.google.com'].includes(target.hostname) &&
+          /@/.test([el.getAttribute('aria-label'), el.getAttribute('data-email')].filter(Boolean).join(' '));
+      } catch (_) { return false; }
+    });
+    // Prefer account controls to unrelated emails in content or hidden menus.
+    // Multiple visible account controls still fail closed as ambiguous.
+    const candidates = accountLinks.length ? accountLinks :
+      [...document.querySelectorAll('[data-email], [aria-label*="@"], img[alt*="@"]')].filter(visible);
     const emails = new Set();
     for (const el of candidates) {
       const label = [el.getAttribute('data-email'), el.getAttribute('aria-label'), el.getAttribute('alt')].filter(Boolean).join(' ');
       for (const match of label.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig)) emails.add(match[0].toLowerCase());
     }
-    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: document.readyState === 'complete' && !!document.querySelector('textarea'), email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1 };
+    const pageReady = url.hostname === 'aistudio.google.com' && !login && document.readyState === 'complete';
+    return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1 };
   }
   function bootstrap() {
     install();
@@ -89,17 +242,26 @@
     if (typeof value !== 'string' || !value.length) fail('browser_incompatible: snapshot service returned no ticket');
     return value;
   }
-  async function discoverModels() {
-    const captured = state.discoveryRequest || state.template;
-    if (!captured) fail('browser_incompatible: no live RPC credentials captured');
+  async function discoverModels(expectedAuthUser) {
+    if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser)) fail('browser_incompatible: invalid discovery auth_user');
+    for (let attempt = 0; !state.discoveryRequest && attempt < 20; ++attempt)
+      await new Promise(resolve => setTimeout(resolve, 100));
+    const captured = state.discoveryRequest;
+    if (!captured) fail('browser_incompatible: no live ListModels request captured');
     const url = new URL(captured.url);
-    url.pathname = url.pathname.replace(/\/(GenerateContent|ListModels)$/, '/ListModels');
-    if (url.hostname !== 'alkalimakersuite-pa.clients6.google.com' || !/\/ListModels$/.test(url.pathname)) fail('browser_incompatible: invalid discovery endpoint');
+    if (!isDiscovery(url)) fail('browser_incompatible: invalid discovery endpoint');
+    const headers = { ...captured.headers };
+    const sameUser = value => /^\d+$/.test(value) && BigInt(value) === BigInt(expectedAuthUser);
+    if ((headers['x-goog-authuser'] !== undefined && !sameUser(headers['x-goog-authuser'])) ||
+        url.searchParams.getAll('authuser').some(value => !sameUser(value)))
+      fail('identity_mismatch: captured ListModels auth_user differs from verified account');
+    headers['x-goog-authuser'] = expectedAuthUser;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      const response = await nativeFetch(url.href, { method: 'POST', headers: captured.headers, credentials: 'include', body: '[]', signal: controller.signal });
+      const response = await nativeFetch(url.href, { method: 'POST', headers, credentials: 'include', body: '[]', signal: controller.signal });
       if (!response.ok) fail('ListModels_http_' + response.status);
+      if (!response.body) fail('browser_incompatible: empty ListModels response');
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let text = '', size = 0;
@@ -113,13 +275,18 @@
         }
         text += decoder.decode();
       } finally { await reader.cancel(); }
-      const raw = JSON.parse(text);
+      let raw;
+      try { raw = JSON.parse(text); } catch (_) { fail('browser_incompatible: invalid ListModels JSON'); }
       if (!Array.isArray(raw) || !Array.isArray(raw[0])) fail('browser_incompatible: unknown ListModels wire shape');
       state.models = raw[0].flatMap(row => {
         if (!Array.isArray(row) || typeof row[0] !== 'string' || !row[0].startsWith('models/')) return [];
         return [{ id: row[0].slice(7), name: row[0], displayName: typeof row[3] === 'string' ? row[3] : row[0].slice(7), description: typeof row[4] === 'string' ? row[4] : '', inputTokenLimit: Number.isFinite(row[5]) ? row[5] : 0, outputTokenLimit: Number.isFinite(row[6]) ? row[6] : 0, supportedGenerationMethods: Array.isArray(row[7]) ? row[7] : [], source: 'live' }];
       });
       return state.models;
+    } catch (error) {
+      if (error.name === 'AbortError') fail('ListModels_timeout');
+      if (error instanceof TypeError) fail('ListModels_network_error');
+      throw error;
     } finally { clearTimeout(timer); }
   }
   function abort() {
@@ -193,7 +360,7 @@
   globalThis.__ais2bridge = {
     identity, bootstrap, run, snapshot, start, ack, abort, discoverModels,
     poll: () => { const t = state.transfer; return t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter } : null; },
-    capability: () => ({ template: state.template ? { body: state.template.body } : null, snapshot: !!state.snapshotCall }),
+    capability: () => ({ template: state.template ? { body: state.template.body } : null, snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
     models: () => state.models,
     dispose: () => { abort(); clearInterval(installTimer); }
   };

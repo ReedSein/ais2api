@@ -26,7 +26,10 @@ jobs:
         run: |
           sh -n scripts/build.sh
           node --check browser/bridge.js
+          node --check browser/test_cookie_runtime.cjs
           node --test browser/test_bridge.cjs
+          node --check userscript/ais2api-cookie.user.js
+          node userscript/test_cookie_helper.cjs
   linux:
     name: Ubuntu 24.04 / ${{ matrix.compiler }} / sanitizers ${{ matrix.sanitize }}
     runs-on: ubuntu-24.04

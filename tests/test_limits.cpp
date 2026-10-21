@@ -40,11 +40,9 @@ struct LimitsServer {
         config.limits.request_bytes = 4096;
         config.limits.object_bytes = 8192;
         config.limits.relay_bytes = 1024;
+        key = "limits-test-" + random_hex(24);
+        config.api_key = key;
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
-        {
-            Store store(config.data_dir);
-            key = string_or(store.create_key("limits regression"), "secret");
-        }
         running = std::async(std::launch::async, [this] { return serve(config); });
         for (unsigned i = 0; i < 100; ++i) {
             if (running.wait_for(0ms) == std::future_status::ready) {

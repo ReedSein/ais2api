@@ -20,7 +20,11 @@ struct Limits {
 struct Config {
     int version = 1;
     std::string bind = "127.0.0.1";
-    unsigned short port = 11451;
+    unsigned short port = 18451;
+    std::string api_key;
+    std::string cookie_import_key;
+    unsigned cookie_import_max_accounts = 8;
+    unsigned cookie_import_timeout_seconds = 180;
     fs::path data_dir;
     fs::path config_file;
     fs::path browser_executable;
@@ -33,6 +37,8 @@ struct Config {
     static fs::path default_directory();
     static Config load(const fs::path& file, const json::object& overrides = {});
     json::object to_json(bool portable_paths = false) const;
+    std::optional<std::string> authenticate(std::string_view secret) const;
+    std::optional<std::string> authenticate_cookie_import(std::string_view secret) const;
     void validate() const;
 };
 }

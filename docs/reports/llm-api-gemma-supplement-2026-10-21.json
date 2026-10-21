@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-21",
+  "upstream_commit": "3e2eff888b21cc403168ceaaa1379a527d8b1a1c",
+  "started_utc": "2026-10-21T01:28:59.783547+00:00",
+  "binary_sha256": "d8afa160925bedb975d93e8b29521d4544856020b13678c80aae6a2118b28af3",
+  "generation_limit": 5,
+  "automatic_attempt_limit": 1,
+  "cases": [
+    {
+      "name": "gemma_sse_sufficient_thinking_allowance",
+      "model": "gemma-4-26b-a4b-it",
+      "http": 200,
+      "max_tokens": 512,
+      "content_matches": true,
+      "passed": true,
+      "chunks": 7,
+      "usage": true,
+      "finish": true,
+      "done": true,
+      "stable_id": true,
+      "stable_created": true,
+      "finish_reasons": [
+        "stop"
+      ],
+      "token_counts": {
+        "prompt_tokens": 6,
+        "completion_tokens": 72,
+        "total_tokens": 78,
+        "completion_tokens_details": {
+          "reasoning_tokens": 71
+        }
+      },
+      "visible_characters": 2,
+      "seconds": 11.517
+    }
+  ],
+  "stage": "effective_configuration",
+  "new_generation_requests": 1,
+  "prior_goal_requests": 4,
+  "total_goal_requests": 5,
+  "backend_generation_attempts": 1,
+  "attempt_trace_count": 1,
+  "prior_running_state_restored": true
+}

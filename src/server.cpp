@@ -7,6 +7,7 @@
 #include "ais2api/browser.hpp"
 #include "ais2api/flow.hpp"
 #include "ais2api/management.hpp"
+#include "ais2api/cookie_import.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <algorithm>
@@ -42,6 +43,24 @@ struct Work {
 struct Task {
     std::function<void()> execute;
     std::function<void()> cancel;
+};
+struct CookieImportJob {
+    Config config;
+    json::object input;
+    std::string principal, request_id = "cookie-" + random_hex(12);
+    Clock::time_point queued = Clock::now(), started_at;
+    std::stop_source cancellation;
+    std::atomic<bool> started{false}, finished{false};
+    std::promise<json::object> completion;
+    std::future<json::object> result = completion.get_future();
+    CookieImportJob(Config cfg, json::object body, std::string owner)
+        : config(std::move(cfg)), input(std::move(body)), principal(std::move(owner)) {}
+    void resolve(json::object value) {
+        if (!finished.exchange(true)) completion.set_value(std::move(value));
+    }
+    void reject(const Error &error) {
+        if (!finished.exchange(true)) completion.set_exception(std::make_exception_ptr(error));
+    }
 };
 class Service {
   public:
@@ -121,7 +140,7 @@ class Service {
                     {"active", bool(active_)},
                     {"queued", queue_.size()},
                     {"connections", live_connections.load()},
-                    {"ready", store_.choose("readiness").has_value() &&
+                    {"ready", !config().api_key.empty() && store_.choose("readiness").has_value() &&
                                   fs::is_regular_file(config().browser_executable)},
                     {"verification", "not_a_generation_check"}};
         }
@@ -159,6 +178,70 @@ class Service {
         // Never expose these mutations through HTTP. This is owner-only IPC.
         auto cfg = config();
         return manage(store_, cfg, command);
+    }
+
+    std::shared_ptr<CookieImportJob> enqueue_cookie_import(json::object input,
+                                                         std::string principal) {
+        auto cfg = config();
+        if (cfg.authenticate_cookie_import(cfg.cookie_import_key) != principal)
+            throw Error(401, "cookie_import_authentication", "A valid Cookie import key is required");
+        auto job = std::make_shared<CookieImportJob>(std::move(cfg), std::move(input), std::move(principal));
+        auto weak = std::weak_ptr<CookieImportJob>(job);
+        std::lock_guard lock(queue_mutex_);
+        if (stopping_ || queue_.size() >= job->config.limits.queue_size)
+            throw Error(429, "queue_full", "Work queue is full");
+        queue_.push_back({[this, weak] {
+            auto job = weak.lock();
+            if (!job) return;
+            job->started_at = Clock::now();
+            job->started.store(true, std::memory_order_release);
+            std::stop_callback shutdown(shutdown_.get_token(), [&] { job->cancellation.request_stop(); });
+            try {
+                check_cancel(job->cancellation.get_token());
+                if (job->started_at - job->queued > std::chrono::seconds(job->config.limits.queue_seconds))
+                    throw Error(504, "queue_timeout", "Cookie import queue wait exceeded limit");
+                gateway_->reconfigure(job->config);
+                auto verified = probe_cookie_import(job->input, job->config.cookie_import_max_accounts,
+                                                    *gateway_, job->cancellation.get_token());
+                check_cancel(job->cancellation.get_token());
+                json::array accounts;
+                {
+                    // Rotation cannot authorize a queued upload with a revoked
+                    // import key, including the final credentials transaction.
+                    std::lock_guard config_lock(config_mutex_);
+                    if (config_.cookie_import_key.empty())
+                        throw Error(403, "cookie_import_disabled", "Cookie import was disabled before verification completed");
+                    if (config_.authenticate_cookie_import(job->config.cookie_import_key) != job->principal)
+                        throw Error(401, "cookie_import_authentication", "Cookie import key changed; submit again");
+                    check_cancel(job->cancellation.get_token());
+                    accounts = store_.merge_verified_accounts(verified.accounts);
+                }
+                try { gateway_->close(); } catch (...) {}
+                std::cerr << json::serialize(json::object{{"event", "cookie_import"},
+                    {"request_id", job->request_id}, {"imported_count", accounts.size()},
+                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}}) << '\n';
+                const auto count = accounts.size();
+                job->resolve({{"imported_count", count}, {"accounts", std::move(accounts)},
+                              {"verification", "browser_identity_only"}, {"generation_verified", false},
+                              {"details", std::move(verified.details)}});
+            } catch (const Error &error) {
+                try { gateway_->close(); } catch (...) {}
+                std::cerr << json::serialize(json::object{{"event", "cookie_import_failed"},
+                    {"request_id", job->request_id}, {"reason", error.code}, {"status", error.status},
+                    {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-job->queued).count()}}) << '\n';
+                job->reject(error);
+            } catch (...) {
+                try { gateway_->close(); } catch (...) {}
+                job->reject(Error(500, "cookie_import_failed", "Cookie import failed internally"));
+            }
+        }, [weak] {
+            if (auto job = weak.lock()) {
+                job->cancellation.request_stop();
+                job->reject(Error(503, "stopping", "Service stopped"));
+            }
+        }});
+        available_.notify_one();
+        return job;
     }
 
   private:
@@ -594,6 +677,77 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     std::string target(request.target());
     auto path = target.substr(0, target.find('?'));
     state.openai = path.starts_with("/v1/");
+    if (request.method() == http::verb::get && path == "/userscript/ais2api-cookie.user.js") {
+        const auto script = Config::default_directory() / "userscript/ais2api-cookie.user.js";
+        if (!fs::is_regular_file(script))
+            throw Error(404, "userscript_missing", "Userscript asset is missing; reinstall the runtime package");
+        http::response<http::string_body> response(http::status::ok, 11);
+        response.set(http::field::content_type, "application/javascript; charset=utf-8");
+        response.set(http::field::cache_control, "no-store");
+        response.keep_alive(false);
+        response.body() = read_file(script, 1024 * 1024);
+        response.prepare_payload();
+        stream.expires_after(15s);
+        co_await http::async_write(stream, response, net::use_awaitable);
+        co_return;
+    }
+    if (request.method() == http::verb::post && path == "/api/accounts/probe-import") {
+        auto import_cfg = service.config();
+        if (import_cfg.cookie_import_key.empty())
+            throw Error(403, "cookie_import_disabled", "Set cookie_import_key in config.json to enable userscript import");
+        const auto authorization = request[http::field::authorization];
+        std::string_view provided;
+        if (authorization.starts_with("Bearer "))
+            provided = {authorization.data() + 7, authorization.size() - 7};
+        const auto principal = import_cfg.authenticate_cookie_import(provided);
+        if (!principal)
+            throw Error(401, "cookie_import_authentication", "A valid Cookie import key is required");
+        const auto origin = request[http::field::origin];
+        if (!origin.empty() && origin != "https://aistudio.google.com")
+            throw Error(403, "cookie_import_origin", "Cookie import requires the AI Studio userscript");
+        auto content_type = std::string_view(request[http::field::content_type]);
+        content_type = content_type.substr(0, content_type.find(';'));
+        while (!content_type.empty() && content_type.back() == ' ') content_type.remove_suffix(1);
+        if (content_type != "application/json")
+            throw Error(415, "content_type", "Content-Type must be application/json");
+        if (request.body().size() > 1024 * 1024)
+            throw Error(413, "cookie_import_limit", "Cookie import exceeds one MiB");
+        boost::system::error_code parse_error;
+        auto value = json::parse(request.body(), parse_error);
+        if (parse_error || !value.is_object())
+            throw Error(400, "invalid_json", "Cookie import body must be a JSON object");
+        std::string().swap(request.body());
+        auto job = service.enqueue_cookie_import(std::move(value.as_object()), *principal);
+        struct CancelImport {
+            std::shared_ptr<CookieImportJob> job;
+            ~CancelImport() { job->cancellation.request_stop(); }
+        } release{job};
+        stream.expires_never();
+        stream.socket().async_wait(tcp::socket::wait_read,
+            [weak = std::weak_ptr<CookieImportJob>(job)](boost::system::error_code error) {
+                if (error != net::error::operation_aborted)
+                    if (auto pending = weak.lock()) pending->cancellation.request_stop();
+            });
+        auto executor = co_await net::this_coro::executor;
+        net::steady_timer polling(executor);
+        while (job->result.wait_for(0ms) != std::future_status::ready) {
+            check_cancel(job->cancellation.get_token());
+            const auto started = job->started.load(std::memory_order_acquire);
+            const auto limit = started
+                ? job->started_at + std::chrono::seconds(job->config.cookie_import_timeout_seconds)
+                : job->queued + std::chrono::seconds(job->config.limits.queue_seconds);
+            if (Clock::now() >= limit) {
+                job->cancellation.request_stop();
+                throw Error(504, started ? "cookie_import_timeout" : "queue_timeout",
+                            started ? "Cookie identity verification timed out" : "Cookie import queue wait exceeded limit");
+            }
+            polling.expires_after(50ms);
+            co_await polling.async_wait(net::use_awaitable);
+        }
+        auto result = job->result.get();
+        co_await send_json(stream, 200, result);
+        co_return;
+    }
     if (request.method() == http::verb::get && path == "/health") {
         co_await send_json(stream, 200, {{"status", "alive"}});
         co_return;
@@ -614,7 +768,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                   (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent"));
     if (!models && !openai && !gemini)
         throw Error(404, "route_not_found", "Route is not implemented");
-    auto principal = service.store().authenticate(token_from(request));
+    auto principal = service.config().authenticate(token_from(request));
     if (!principal)
         throw Error(401, "authentication", "A valid API key is required");
     if (models) {

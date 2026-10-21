@@ -85,9 +85,69 @@ TEST_CASE("unconfigured browser probe fails without claiming account readiness")
     Account account; account.id = "test-account";
     try { gateway.probe(account); FAIL("Expected missing browser configuration"); }
     catch (const Error& error) { CHECK(error.code == "browser_not_configured"); }
+    try { gateway.probe_import(account); FAIL("Expected missing browser configuration"); }
+    catch (const Error& error) { CHECK(error.code == "browser_not_configured"); }
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "templateCaptured"));
     gateway.close(); gateway.close();
+}
+TEST_CASE("account verification distinguishes delayed identity from a different Google account") {
+    using browser_detail::IdentityVerdict;
+    using browser_detail::identity_verdict;
+    json::object identity{{"ready", true}, {"identityReady", false}, {"email", ""}};
+    CHECK(identity_verdict(identity, "expected@example.com") == IdentityVerdict::pending);
+    identity["email"] = "expected@example.com";
+    CHECK(identity_verdict(identity, "expected@example.com") == IdentityVerdict::pending);
+    identity["identityReady"] = true;
+    CHECK(identity_verdict(identity, "EXPECTED@example.com") == IdentityVerdict::verified);
+    CHECK(identity_verdict(identity, " expected@example.com\r\n") == IdentityVerdict::verified);
+    CHECK(identity_verdict(identity, "other@example.com") == IdentityVerdict::mismatch);
+    identity["identityAmbiguous"] = true;
+    CHECK(identity_verdict(identity, "expected@example.com") == IdentityVerdict::ambiguous);
+    identity["identityAmbiguous"] = false; identity["email"] = "";
+    CHECK(identity_verdict(identity, "expected@example.com") == IdentityVerdict::pending);
+    identity["email"] = "one@example.com";
+    CHECK(identity_verdict(identity, "") == IdentityVerdict::verified);
+}
+
+TEST_CASE("import cookie refresh retains only supported Google cookie fields") {
+    json::array input{
+        json::object{{"name", "SID"}, {"value", "test-only"}, {"domain", ".google.com"}, {"path", "/"}, {"secure", true}, {"httpOnly", true}, {"sameSite", "Lax"}, {"expires", 123456789.0}, {"priority", "High"}},
+        json::object{{"name", "session"}, {"value", ""}, {"domain", "accounts.google.com"}, {"expires", -1}, {"sameSite", "invalid"}},
+        json::object{{"name", "bad"}, {"value", "private"}, {"domain", "evilgoogle.com"}},
+        json::object{{"name", "bad"}, {"value", "private"}, {"domain", "google.com.example.com"}},
+        json::object{{"name", "bad"}, {"domain", "google.com"}},
+        json::object{{"name", ""}, {"value", "private"}, {"domain", "google.com"}}
+    };
+    auto cookies = browser_detail::import_cookies(input);
+    REQUIRE(cookies.size() == 2);
+    const auto& persistent = cookies[0].as_object();
+    CHECK(persistent.size() == 8);
+    CHECK_FALSE(persistent.contains("priority"));
+    CHECK_FALSE(persistent.contains("partitionKey"));
+    CHECK(string_or(persistent, "domain") == ".google.com");
+    const auto& session = cookies[1].as_object();
+    CHECK_FALSE(session.contains("expires"));
+    CHECK_FALSE(session.contains("sameSite"));
+    CHECK(string_or(session, "value").empty());
+}
+
+TEST_CASE("import cookie refresh never downgrades partitioned cookies") {
+    json::array input{
+        json::object{{"name", "partitioned"}, {"value", "test-only"}, {"domain", ".google.com"}, {"partitionKey", json::object{{"topLevelSite", "https://google.com"}}}},
+        json::object{{"name", "opaque"}, {"value", "test-only"}, {"domain", "accounts.google.com"}, {"partitionKeyOpaque", true}},
+        json::object{{"name", "unknown-key"}, {"value", "test-only"}, {"domain", ".google.com"}, {"partitionKey", nullptr}},
+        json::object{{"name", "__Host-test"}, {"value", "test-only"}, {"domain", "accounts.google.com"}, {"path", "/"}, {"secure", true}, {"partitionKeyOpaque", false}}
+    };
+    std::size_t skipped = 99;
+    auto cookies = browser_detail::import_cookies(input, &skipped);
+    REQUIRE(cookies.size() == 1);
+    CHECK(skipped == 3);
+    CHECK(string_or(cookies[0].as_object(), "name") == "__Host-test");
+    CHECK(string_or(cookies[0].as_object(), "domain") == "accounts.google.com");
+    CHECK(bool_or(cookies[0].as_object(), "secure"));
+    browser_detail::import_cookies({}, &skipped);
+    CHECK(skipped == 0);
 }
 
 // Hidden by default: explicitly select this test with a prepared executable.

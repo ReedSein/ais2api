@@ -14,11 +14,13 @@ with an intentionally unsupported Content-Type, before generation is enqueued.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -76,7 +78,7 @@ class Smoke:
         if any(value and value in text for value in values):
             raise SmokeFailure("credential_redaction")
 
-    def cli(self, *arguments: str, stdin: str | None = None) -> dict:
+    def cli(self, *arguments: str, stdin: str | None = None, expected_failure: bool = False) -> dict:
         # Capture everything in memory. Never include child output in an error.
         process = subprocess.Popen(
             [str(self.executable), "--config", str(self.config),
@@ -99,11 +101,11 @@ class Smoke:
             process.wait(timeout=5)
             raise
         self.no_leak(stderr)
-        if process.returncode:
-            raise SmokeFailure(self.current)
         self.no_leak(stdout)
+        if bool(process.returncode) != expected_failure:
+            raise SmokeFailure(self.current)
         try:
-            result = json.loads(stdout)
+            result = json.loads(stderr if expected_failure else stdout)
         except (ValueError, TypeError):
             raise SmokeFailure("machine_readable_cli") from None
         if not isinstance(result, dict):
@@ -136,15 +138,20 @@ class Smoke:
         return self.http("/v1/chat/completions", key, post=True)[0]
 
     def run(self) -> None:
-        self.current = "initial_key_once"
+        self.current = "initial_configuration"
         first = self.cli("init")
-        initial = first.get("api_key", {}).get("secret")
-        self.check("initial_key_created", isinstance(initial, str) and initial.startswith("sk-ais2api-"))
-        self.secrets.append(initial)
-        second = self.cli("init")
-        self.check("initial_key_not_reissued", "api_key" not in second)
-
+        self.check("init_has_no_key", "api_key" not in first and first.get("api_key_configured") is False)
+        self.check("init_has_configuration_guidance", isinstance(first.get("next_step"), str) and bool(first["next_step"]))
+        database_uri = (self.data / "state.sqlite3").resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as database:
+            stored_keys = database.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
+        self.check("init_has_no_database_keys", stored_keys == 0)
         configuration = json.loads(self.config.read_text(encoding="utf-8"))
+        self.check("default_port", configuration.get("port") == 18451)
+        self.check("initial_config_key_empty", configuration.get("api_key") == "")
+        initial = "synthetic-config-key-first-not-a-real-credential"
+        rotated = "synthetic-config-key-rotated-not-a-real-credential"
+        self.secrets.extend([initial, rotated])
         configured_port = free_port()
         self.port = free_port()
         while self.port == configured_port:
@@ -176,24 +183,43 @@ class Smoke:
 
         self.current = "http_authentication"
         self.check("missing_key_rejected", self.auth_probe(None) == 401)
-        self.check("initial_key_accepted_before_generation", self.auth_probe(initial) == 415)
-        created = self.cli("keys", "create", "Synthetic smoke key")
-        secret, key_id = created.get("secret"), created.get("id")
-        self.check("online_key_create", isinstance(secret, str) and isinstance(key_id, str))
-        self.secrets.append(secret)
-        self.check("new_key_accepted_before_generation", self.auth_probe(secret) == 415)
-        keys = self.cli("keys", "list").get("keys", [])
-        self.check("key_list_has_metadata_only", any(key.get("id") == key_id for key in keys)
-                   and all("secret" not in key and "hash" not in key for key in keys))
-        self.cli("keys", "revoke", key_id)
-        self.check("revoked_key_rejected", self.auth_probe(secret) == 401)
-        remaining = self.cli("keys", "list").get("keys", [])
-        self.check("revoked_key_removed_from_list", all(key.get("id") != key_id for key in remaining))
-        self.check("initial_key_remains_accepted", self.auth_probe(initial) == 415)
+        self.check("unconfigured_key_rejected", self.auth_probe(initial) == 401)
+        code, ready = self.http("/ready")
+        self.check("unconfigured_key_not_ready", code == 503 and ready.get("ready") is False)
+        keys = self.cli("keys", "list")
+        self.check("key_list_unconfigured", keys.get("source") == "config" and keys.get("configured") is False)
+        for command in (("keys", "create", "Synthetic smoke key"), ("keys", "revoke", "synthetic-id")):
+            error = self.cli(*command, expected_failure=True)
+            self.check("key_" + command[1] + "_requires_config", "keys_managed_in_config" in json.dumps(error))
+        # The listener override was verified above. Persist that effective port
+        # before testing reloads, which deliberately refuse listener changes.
+        configuration["port"] = self.port
+        configuration["api_key"] = initial
+        self.config.write_text(json.dumps(configuration), encoding="utf-8")
+        self.cli("config", "reload")
+        self.check("configured_key_accepted_before_generation", self.auth_probe(initial) == 415)
+        keys = self.cli("keys", "list")
+        self.check("key_list_has_config_metadata_only", keys.get("source") == "config" and keys.get("configured") is True
+                   and all(field not in json.dumps(keys).lower() for field in ('"secret"', '"hash"', '"digest"')))
+        configuration["api_key"] = rotated
+        self.config.write_text(json.dumps(configuration), encoding="utf-8")
+        self.cli("config", "reload")
+        self.check("previous_key_rejected_after_reload", self.auth_probe(initial) == 401)
+        self.check("rotated_key_accepted_before_generation", self.auth_probe(rotated) == 415)
+        configuration["api_key"] = ""
+        self.config.write_text(json.dumps(configuration), encoding="utf-8")
+        self.cli("config", "reload")
+        self.check("cleared_key_rejected", self.auth_probe(rotated) == 401)
+        code, ready = self.http("/ready")
+        self.check("cleared_key_not_ready", code == 503 and ready.get("ready") is False)
+        configuration["api_key"] = rotated
+        self.config.write_text(json.dumps(configuration), encoding="utf-8")
+        self.cli("config", "reload")
 
         self.current = "configuration_redaction_reload"
         shown = self.cli("config", "show")
         self.no_leak(json.dumps(shown), proxy=True)
+        self.check("config_api_key_redacted", shown.get("config", {}).get("api_key") != rotated)
         self.check("proxy_userinfo_redacted", "***@127.0.0.1:9" in shown.get("config", {}).get("proxy", ""))
         configuration["limits"]["queue_size"] = 2
         self.config.write_text(json.dumps(configuration), encoding="utf-8")
@@ -214,6 +240,17 @@ class Smoke:
         self.wait_offline()
         self.check("stop_reports_offline", self.cli("status").get("running") is False)
         self.started = False
+        repeated = self.cli("init")
+        self.check("init_existing_key_not_output", "api_key" not in repeated and repeated.get("api_key_configured") is True)
+        self.check("init_preserves_configured_key", json.loads(self.config.read_text(encoding="utf-8")).get("api_key") == rotated)
+        legacy = json.loads(self.config.read_text(encoding="utf-8"))
+        legacy.pop("api_key")
+        self.config.write_text(json.dumps(legacy), encoding="utf-8")
+        migrated = self.cli("init")
+        saved = json.loads(self.config.read_text(encoding="utf-8"))
+        self.check("legacy_config_gets_empty_key_without_generation",
+                   migrated.get("api_key_configured") is False and "api_key" not in migrated
+                   and saved.get("api_key") == "" and saved.get("port") == self.port)
 
     def wait_offline(self) -> None:
         deadline = time.monotonic() + 15

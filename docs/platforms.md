@@ -58,7 +58,8 @@ build/linux/install/bin/ais2api setup --yes --headless=true
 build/linux/install/bin/ais2api doctor
 ```
 
-Keep the API key printed by `init` private. Run the service as the regular Linux
+Set `api_key` in the generated `config.json`; `init` does not generate or print a
+key. Run the service as the regular Linux
 user; `setup --yes` invokes `sudo` for the listed system packages. It requires a
 working sudo authentication session or an interactive terminal. Debian 13 and
 Ubuntu 24.04 use the `t64` browser library package names; other distribution IDs

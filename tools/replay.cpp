@@ -215,10 +215,11 @@ struct Fixture {
         config.limits.generation_seconds = 10;
         config.limits.stream_idle_seconds = 10;
         fs::create_directories(directory);
+        key = "offline-replay-" + random_hex(24);
+        config.api_key = key;
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
         {
             Store store(config.data_dir);
-            key = string_or(store.create_key("Ephemeral offline replay"), "secret");
             store.import_accounts(json::value("SAPISID=synthetic-offline-replay-cookie"));
         }
         auto backend = std::make_unique<ReplayBackend>(measurements);

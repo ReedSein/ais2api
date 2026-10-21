@@ -1,0 +1,79 @@
+{
+  "date": "2026-10-21",
+  "upstream_commit": "3e2eff888b21cc403168ceaaa1379a527d8b1a1c",
+  "started_utc": "2026-10-21T01:15:03.645336+00:00",
+  "binary_sha256": "d8afa160925bedb975d93e8b29521d4544856020b13678c80aae6a2118b28af3",
+  "generation_limit": 5,
+  "automatic_attempt_limit": 1,
+  "cases": [
+    {
+      "name": "routes_models_auth",
+      "model_endpoints": 4,
+      "catalog_count": 41,
+      "invalid_key_http": 401,
+      "passed": true,
+      "seconds": 0.091
+    },
+    {
+      "name": "flash_lite_system_history_schema_image",
+      "model": "gemini-3.1-flash-lite",
+      "http": 200,
+      "checks": {
+        "system": true,
+        "history": true,
+        "image": true,
+        "json_schema": true,
+        "usage": true,
+        "finish_stop": true
+      },
+      "parameter_scope": "sampling_and_limit_accepted_not_statistically_proven",
+      "passed": true,
+      "seconds": 9.423
+    },
+    {
+      "name": "gemma_openai_sse",
+      "passed": false,
+      "reason": "gemma_content_mismatch",
+      "seconds": 10.524
+    },
+    {
+      "name": "flash_lite_tool_call_auto",
+      "passed": false,
+      "http": 403,
+      "reason": "permission_denied",
+      "seconds": 7.538
+    },
+    {
+      "name": "flash_lite_standard_tool_result_sse",
+      "passed": false,
+      "reason": "tool_call_prerequisite_failed",
+      "seconds": 0.0
+    },
+    {
+      "name": "flash_lite_gemini_sse_audio_stop",
+      "model": "gemini-3.1-flash-lite",
+      "http": 200,
+      "tone_identified": true,
+      "stop_marker_and_suffix_absent": true,
+      "chunks": 3,
+      "usage": true,
+      "finish": true,
+      "done": false,
+      "stable_id": true,
+      "stable_created": null,
+      "passed": true,
+      "seconds": 10.328
+    }
+  ],
+  "stage": "test_cases",
+  "models": {
+    "flash_lite": "gemini-3.1-flash-lite",
+    "gemma": "gemma-4-26b-a4b-it",
+    "catalog_count": 41
+  },
+  "client_generation_requests": 4,
+  "backend_generation_attempts": 4,
+  "attempt_trace_count": 4,
+  "all_cases_passed": false,
+  "prior_running_state_restored": true
+}

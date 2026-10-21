@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-21",
+  "upstream_commit": "3e2eff888b21cc403168ceaaa1379a527d8b1a1c",
+  "started_utc": "2026-10-21T01:04:09.547014+00:00",
+  "binary_sha256": "d8afa160925bedb975d93e8b29521d4544856020b13678c80aae6a2118b28af3",
+  "generation_limit": 5,
+  "automatic_attempt_limit": 1,
+  "cases": [],
+  "stage": "model_discovery",
+  "fatal": "http_preflight_failed",
+  "http": 401,
+  "reason": "session_expired",
+  "restore_failed": true,
+  "client_generation_requests": 0,
+  "manual_postcheck": {
+    "service_stopped": true,
+    "installed_bridge_matches_source": true,
+    "isolated_browser_identity_samples": 6,
+    "samples_all_on_google_signin": true,
+    "generation_requests_sent": 0
+  }
+}

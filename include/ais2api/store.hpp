@@ -23,6 +23,8 @@ public:
     std::vector<Account> accounts();
     Account account(std::string_view id);
     json::array import_accounts(const json::value& input, std::string name = {});
+    static json::object normalize_storage_state(const json::value& input);
+    json::array merge_verified_accounts(const std::vector<Account>& accounts);
     void put_account(const Account& account);
     void remove_account(std::string_view id);
     void select_account(std::string_view id);

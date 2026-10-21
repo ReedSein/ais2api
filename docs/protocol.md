@@ -4,6 +4,8 @@ The implementation is new C++ code. The reference project's `docs/WIRE_SPECIFICA
 
 ## Request and response representation
 
+Model discovery is independent of generation bootstrap. It waits for the selected account identity, captures the page's real ListModels request through fetch or XHR, and checks the account slot before replay. It does not require a prompt editor, Run button, generation template or snapshot service. Cached results remain scoped to the verified browser context; explicit configured models retain their source marker. Missing or ambiguous page identity is distinct from a confirmed different account and never authorizes cross-account reuse.
+
 Both API adapters normalize to a standard Gemini request object. The browser transport receives a newly encoded JSPB request based on the captured live template. Known generation fields, contents, model, signature, system instruction, tools and cached-content fields are replaced or cleared for every request. Unknown template fields are retained for upstream compatibility. Model aliases resolve before encoding.
 
 Supported Gemini content payloads are text, inlineData, functionCall, functionResponse, executableCode and codeExecutionResult. Parts retain their individual thought flag and thoughtSignature. Request FunctionCall/Response use upstream slots 10/11; response slots 3/4 are read first, with 10/11 fallbacks. Function values use typed protobuf Struct/Value encoding, including null, nested objects, booleans, empty lists and single-item lists. fileData and the Files API are explicitly unsupported.

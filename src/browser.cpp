@@ -34,6 +34,46 @@ extern char **environ;
 #endif
 
 namespace ais2api {
+browser_detail::IdentityVerdict browser_detail::identity_verdict(const json::object& identity, std::string_view expected_email) {
+    if (bool_or(identity, "identityAmbiguous")) return IdentityVerdict::ambiguous;
+    auto normalized = [](std::string value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::string{};
+        value = value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+    const auto email = normalized(string_or(identity, "email"));
+    if (!bool_or(identity, "identityReady") || email.empty()) return IdentityVerdict::pending;
+    const auto expected = normalized(std::string(expected_email));
+    return expected.empty() || expected == email ? IdentityVerdict::verified : IdentityVerdict::mismatch;
+}
+json::array browser_detail::import_cookies(const json::array& cookies, std::size_t* skipped_partition_cookies) {
+    json::array result;
+    if (skipped_partition_cookies) *skipped_partition_cookies = 0;
+    for (const auto& value : cookies) {
+        if (!value.is_object()) continue;
+        const auto& source = value.as_object();
+        if (source.contains("partitionKey") || bool_or(source, "partitionKeyOpaque")) {
+            if (skipped_partition_cookies) ++*skipped_partition_cookies;
+            continue;
+        }
+        auto domain = string_or(source, "domain");
+        std::transform(domain.begin(), domain.end(), domain.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (!domain.empty() && domain.front() == '.') domain.erase(0, 1);
+        if (domain != "google.com" && !domain.ends_with(".google.com")) continue;
+        const auto name = source.if_contains("name"), content = source.if_contains("value");
+        if (!name || !name->is_string() || name->as_string().empty() || !content || !content->is_string()) continue;
+        json::object cookie{{"name", *name}, {"value", *content}, {"domain", source.at("domain")}};
+        if (auto p = source.if_contains("path"); p && p->is_string()) cookie["path"] = *p;
+        for (auto key : {"secure", "httpOnly"}) if (auto p = source.if_contains(key); p && p->is_bool()) cookie[key] = *p;
+        if (auto p = source.if_contains("sameSite"); p && p->is_string() && (p->as_string() == "Strict" || p->as_string() == "Lax" || p->as_string() == "None")) cookie["sameSite"] = *p;
+        if (auto p = source.if_contains("expires"); p && p->is_number() && json::value_to<double>(*p) > 0) cookie["expires"] = *p;
+        result.push_back(std::move(cookie));
+    }
+    return result;
+}
 namespace {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -44,10 +84,6 @@ using namespace std::chrono_literals;
 
 [[noreturn]] void incompatible(std::string message) { throw Error(502, "browser_incompatible", std::move(message)); }
 std::string quote_js(std::string_view s) { return json::serialize(json::value(s)); }
-std::string lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
 std::string decode64(std::string_view encoded) {
     constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     if (encoded.size() > 4 * ((32768 + 2) / 3) || encoded.size() % 4) incompatible("Invalid browser relay chunk");
@@ -348,17 +384,61 @@ struct BrowserGateway::Impl {
         if (!context.empty()) cdp->call("Target.disposeBrowserContext", {{"browserContextId", context}}, {}, token);
         context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear();
     }
-    json::object identity(std::stop_token token) {
-        auto value = eval("globalThis.__ais2bridge.identity()", token);
+    json::object identity(std::stop_token token, bool allow_login = false, std::chrono::seconds timeout = 30s) {
+        auto value = eval("globalThis.__ais2bridge.identity()", token, timeout);
         if (!value.is_object()) incompatible("Page identity probe unavailable");
         auto object = value.as_object();
-        if (bool_or(object, "login")) throw Error(401, "session_expired", "Google redirected the account to sign-in");
+        if (bool_or(object, "login") && !allow_login) throw Error(401, "session_expired", "Google redirected the account to sign-in");
         if (bool_or(object, "regionBlocked")) throw Error(403, "region_blocked", "AI Studio is unavailable in the browser region");
         return object;
     }
-    void ensure_account(const Account& account, std::stop_token token, bool bootstrap) {
+    void await_account_identity(const Account& account, std::stop_token token, bool require_editor) {
+        const auto deadline = Clock::now() + 60s;
+        std::optional<Clock::time_point> login_since, mismatch_since;
+        auto last = browser_detail::IdentityVerdict::pending;
+        while (Clock::now() < deadline) {
+            check_cancel(token);
+            try {
+                auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
+                if (remaining < 1s) break;
+                auto exists = eval("!!globalThis.__ais2bridge", token, std::min(5s, remaining));
+                if (exists.is_bool() && exists.as_bool()) {
+                    remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
+                    if (remaining < 1s) break;
+                    const auto info = identity(token, true, std::min(5s, remaining));
+                    if (bool_or(info, "login")) {
+                        mismatch_since.reset();
+                        if (!login_since) login_since = Clock::now();
+                        if (Clock::now() - *login_since >= 10s)
+                            throw Error(401, "session_expired", "Google remained on sign-in after the navigation grace period");
+                    } else {
+                        login_since.reset();
+                        last = browser_detail::identity_verdict(info, account.email);
+                        if (last == browser_detail::IdentityVerdict::verified && (!require_editor || bool_or(info, "ready"))) return;
+                        if (last == browser_detail::IdentityVerdict::mismatch) {
+                            if (!mismatch_since) mismatch_since = Clock::now();
+                            if (Clock::now() - *mismatch_since >= 2s)
+                                throw Error(401, "identity_mismatch", "The verified Google account differs from the selected account");
+                        } else mismatch_since.reset();
+                    }
+                } else { login_since.reset(); mismatch_since.reset(); last = browser_detail::IdentityVerdict::pending; }
+            } catch (const Error& error) {
+                // Redirects can replace an execution context while the account
+                // badge is loading. Missing identity is never a proven mismatch.
+                if (error.code != "browser_incompatible") throw;
+                login_since.reset(); mismatch_since.reset(); last = browser_detail::IdentityVerdict::pending;
+            }
+            pause(token, 250ms);
+        }
+        if (last == browser_detail::IdentityVerdict::verified)
+            incompatible("AI Studio page did not expose a supported ready prompt editor");
+        throw Error(409, "identity_unverified", last == browser_detail::IdentityVerdict::ambiguous
+            ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
+    }
+    void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
         ensure_browser(token);
         auto fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
+        bool verified_session = false;
         if (account.id != account_id || fingerprint != account_fingerprint || session.empty()) {
             // Dispose before create: never keep two account contexts resident.
             dispose_context(token);
@@ -390,28 +470,12 @@ struct BrowserGateway::Impl {
                 }
                 if (account.auth_user.empty() || !std::all_of(account.auth_user.begin(), account.auth_user.end(), [](unsigned char c) { return std::isdigit(c); })) throw Error(400, "invalid_auth_user", "auth_user must be a nonnegative integer");
                 cdp->call("Page.navigate", {{"url", "https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user}}, session, token);
-                const auto deadline = Clock::now() + 60s;
-                bool ready = false;
-                while (Clock::now() < deadline) {
-                    try {
-                        auto exists = eval("!!globalThis.__ais2bridge", token);
-                        if (exists.is_bool() && exists.as_bool()) { auto info = identity(token); if (bool_or(info, "ready")) { ready = true; break; } }
-                    } catch (const Error& error) {
-                        // Navigation may replace the main execution context.
-                        // Only retry an evaluation/context compatibility error;
-                        // cancellation, authentication and transport failures win.
-                        if (error.code != "browser_incompatible") throw;
-                    }
-                    pause(token, 250ms);
-                }
-                if (!ready) incompatible("AI Studio page did not expose a supported ready prompt editor");
-                auto info = identity(token);
-                const auto email = string_or(info, "email");
-                if (!account.email.empty() && (email.empty() || lower(account.email) != email)) throw Error(401, "identity_mismatch", "Could not verify the expected Google account identity");
+                await_account_identity(account, token, !identity_only);
                 account_id = account.id; account_fingerprint = std::move(fingerprint); last_status = "account_ready";
+                verified_session = true;
             } catch (...) { try { dispose_context({}); } catch (...) { close(); } throw; }
         }
-        identity(token);
+        if (!verified_session) await_account_identity(account, token, !identity_only);
         if (!bootstrap || !base_template.empty()) return;
         auto prepared = eval("globalThis.__ais2bridge.bootstrap()", token);
         if (!prepared.is_bool() || !prepared.as_bool()) incompatible("Cannot prepare the real page bootstrap prompt");
@@ -419,19 +483,28 @@ struct BrowserGateway::Impl {
         auto triggered = eval("globalThis.__ais2bridge.run()", token);
         if (!triggered.is_bool() || !triggered.as_bool()) incompatible("Cannot identify a supported page Run button");
         const auto deadline = Clock::now() + 45s;
+        bool template_seen = false;
         while (Clock::now() < deadline) {
             identity(token);
             auto capability = eval("globalThis.__ais2bridge.capability()", token);
-            if (capability.is_object() && bool_or(capability.as_object(), "snapshot")) {
+            if (capability.is_object()) {
                 auto t = capability.as_object().if_contains("template");
                 if (t && t->is_object()) {
                     auto body = t->as_object().if_contains("body");
-                    if (body && body->is_array()) { base_template = body->as_array(); last_status = "gateway_ready"; return; }
+                    if (body && body->is_array()) {
+                        template_seen = true;
+                        if (bool_or(capability.as_object(), "snapshot")) {
+                            base_template = body->as_array(); last_status = "gateway_ready"; return;
+                        }
+                    }
                 }
             }
             pause(token, 150ms);
         }
-        incompatible("Live GenerateContent template and snapshot service were not captured; no synthetic fallback is allowed");
+        last_status = template_seen ? "bootstrap_snapshot_missing" : "bootstrap_template_missing";
+        incompatible(template_seen
+            ? "Live GenerateContent was captured but its snapshot adapter could not be verified"
+            : "The page did not expose a supported fetch/XHR GenerateContent request during bootstrap");
     }
 };
 
@@ -464,11 +537,30 @@ json::object BrowserGateway::diagnostics() {
 }
 json::object BrowserGateway::probe(const Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
-    impl_->ensure_account(account, cancel, false);
+    impl_->ensure_account(account, cancel, false, true);
     auto result = impl_->identity(cancel); result["accountId"] = account.id;
+    result["ready"] = bool_or(result, "identityReady");
     result["status"] = string_or(result, "email").empty() ? "identity_unverified" : "ready";
     result["generationVerified"] = false;
     return result;
+}
+json::object BrowserGateway::probe_import(Account& account, std::stop_token cancel) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ensure_account(account, cancel, false, true);
+    const auto info = impl_->identity(cancel);
+    const auto email = string_or(info, "email");
+    if (!bool_or(info, "identityReady") || bool_or(info, "identityAmbiguous") || email.empty())
+        throw Error(409, "identity_unverified", "Import requires a ready AI Studio page with one verified Google identity");
+    auto state = impl_->cdp->call("Storage.getCookies", {{"browserContextId", impl_->context}}, {}, cancel);
+    auto cookies = state.if_contains("cookies");
+    if (!cookies || !cookies->is_array()) incompatible("Browser did not return context cookies");
+    std::size_t skipped_partition_cookies = 0;
+    auto refreshed = browser_detail::import_cookies(cookies->as_array(), &skipped_partition_cookies);
+    if (refreshed.empty()) throw Error(401, "missing_cookies", "Verified browser context has no Google cookies");
+    check_cancel(cancel);
+    account.storage_state["cookies"] = std::move(refreshed);
+    impl_->account_fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
+    return {{"accountId", account.id}, {"email", email}, {"ready", true}, {"login", false}, {"identityAmbiguous", false}, {"status", "ready"}, {"generationVerified", false}, {"skippedPartitionCookies", skipped_partition_cookies}};
 }
 json::array BrowserGateway::models(std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
@@ -485,17 +577,17 @@ json::array BrowserGateway::models(std::stop_token cancel) {
         return result;
     };
     try {
-        if (impl_->session.empty() || impl_->base_template.empty()) {
-            auto account = impl_->account_id.empty() ? impl_->store.choose("model_discovery") : std::optional<Account>(impl_->store.account(impl_->account_id));
-            if (!account) return configured();
-            impl_->ensure_account(*account, cancel, true);
-        }
+        const auto account = impl_->store.choose("model_discovery");
+        if (!account) return configured();
+        // Listing models needs a verified account, never a generation request,
+        // prompt editor, Run button or snapshot service. Recheck before cache.
+        impl_->ensure_account(*account, cancel, false, true);
         if (!impl_->cached_models.empty() && Clock::now() - impl_->models_at < 600s) {
             auto cached = impl_->cached_models;
             for (auto& item : cached) item.as_object()["source"] = "cache";
             return cached;
         }
-        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels()", cancel, 15s);
+        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + ")", cancel, 15s);
         if (!result.is_array()) incompatible("ListModels returned an unsupported response");
         impl_->cached_models = result.as_array(); impl_->models_at = Clock::now();
         return impl_->cached_models.empty() ? configured() : impl_->cached_models;

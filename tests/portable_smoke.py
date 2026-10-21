@@ -97,7 +97,7 @@ class PortableSmoke:
         if any(secret and secret in value for secret in self.secrets):
             raise Failure("secret_redaction")
 
-    def cli(self, *arguments: str, initial: bool = False) -> dict:
+    def cli(self, *arguments: str) -> dict:
         # There are intentionally no --config or --data-dir flags here.
         process = subprocess.Popen(
             [str(self.program / self.executable_name), *arguments],
@@ -112,8 +112,7 @@ class PortableSmoke:
             process.wait(timeout=5)
             raise Failure("cli_timeout") from None
         self.no_secret(stderr)
-        if not initial:
-            self.no_secret(stdout)
+        self.no_secret(stdout)
         if process.returncode:
             raise Failure(self.current)
         try:
@@ -194,18 +193,24 @@ class PortableSmoke:
 
     def run(self) -> None:
         self.current = "portable_init"
-        first = self.cli("init", initial=True)
-        secret = first.get("api_key", {}).get("secret")
-        self.check("initial_secret_created", isinstance(secret, str) and secret.startswith("sk-ais2api-"))
+        first = self.cli("init")
+        self.check("init_has_no_secret", "api_key" not in first and first.get("api_key_configured") is False)
+        secret = "synthetic-portable-config-key-not-a-real-credential"
         self.secrets.append(secret)
         self.check("config_next_to_executable", (self.program / "config.json").is_file())
         self.check("data_next_to_executable", (self.program / "data").is_dir())
         configuration = json.loads((self.program / "config.json").read_text(encoding="utf-8"))
+        self.check("default_port", configuration.get("port") == 18451)
+        self.check("initial_config_key_empty", configuration.get("api_key") == "")
+        configuration["api_key"] = secret
+        (self.program / "config.json").write_text(json.dumps(configuration), encoding="utf-8")
         self.check("persisted_data_directory_relative", configuration.get("data_dir") == "data")
         if self.has_bundle:
             browser = configuration.get("browser_executable", "")
             self.check("persisted_bundled_browser_relative", bool(browser) and not Path(browser).is_absolute())
-        self.check("initial_secret_not_reissued", "api_key" not in self.cli("init"))
+        repeated = self.cli("init")
+        self.check("init_does_not_output_configured_key", "api_key" not in repeated and repeated.get("api_key_configured") is True)
+        self.check("init_preserves_configured_key", json.loads((self.program / "config.json").read_text(encoding="utf-8")).get("api_key") == secret)
         keys = self.cli("keys", "list")
         self.cycle("original")
         old_program = self.program
@@ -215,6 +220,7 @@ class PortableSmoke:
         self.check("whole_program_moved", not old_program.exists() and relocated.is_dir())
         self.check("relocated_key_metadata_unchanged", self.cli("keys", "list") == keys)
         persisted = (self.program / "config.json").read_text(encoding="utf-8")
+        self.check("relocated_config_key_preserved", json.loads(persisted).get("api_key") == secret)
         self.check("relocated_config_has_no_original_absolute_path", str(old_program) not in persisted)
         self.cycle("relocated")
         self.check("key_metadata_preserved_after_restarts", self.cli("keys", "list") == keys)

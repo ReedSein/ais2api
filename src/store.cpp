@@ -422,6 +422,51 @@ Account Store::account(std::string_view id) {
         return decode(s);
     });
 }
+json::object Store::normalize_storage_state(const json::value &input) { return state(input); }
+json::array Store::merge_verified_accounts(const std::vector<Account> &input) {
+    auto parsed = input;
+    for (auto &a : parsed) {
+        if (a.email.empty() || a.email.size() > 320 || a.id.empty() ||
+            a.email.find_first_of(" \t\r\n") != std::string::npos ||
+            a.auth_user.empty() || a.auth_user.size() > 10 ||
+            a.auth_user.find_first_not_of("0123456789") != std::string::npos)
+            throw Error(400, "invalid_account", "Verified account identity required");
+        a.storage_state = state(a.storage_state);
+        a.disabled = false;
+    }
+    return impl_->run([&] {
+        json::array out;
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            for (auto a : parsed) {
+                Statement existing(impl_->db, "SELECT id,name FROM accounts WHERE email=? COLLATE NOCASE ORDER BY rowid LIMIT 1");
+                existing.text(1, a.email);
+                if (existing.row()) {
+                    a.id = existing.str(0);
+                    a.name = existing.str(1);
+                } else {
+                    // Candidate IDs must never overwrite an unrelated stored identity.
+                    Statement collision(impl_->db, "SELECT 1 FROM accounts WHERE id=?");
+                    collision.text(1, a.id);
+                    if (collision.row())
+                        a.id = "acc_" + random_hex(16);
+                }
+                impl_->put(a);
+                Statement reset(impl_->db, "UPDATE accounts SET expired=0 WHERE id=?");
+                reset.text(1, a.id); reset.row();
+                // '*' is the rate-limit cooldown and must survive credential refresh.
+                Statement failures(impl_->db, "DELETE FROM failures WHERE account=? AND model<>'*'");
+                failures.text(1, a.id); failures.row();
+                out.push_back(summary(a));
+            }
+            exec(impl_->db, "COMMIT");
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+        return out;
+    });
+}
 void Store::put_account(const Account &a) {
     auto copy = a;
     if (copy.id.empty())

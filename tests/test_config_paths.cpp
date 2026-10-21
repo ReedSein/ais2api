@@ -16,6 +16,55 @@ struct Directory {
 }
 TEST_CASE("default storage belongs to the executable directory", "[config][paths]") {
     CHECK(Config::default_directory() == executable_path().parent_path());
+    CHECK(Config{}.port == 18451);
+    CHECK(Config{}.api_key.empty());
+}
+TEST_CASE("configured keys survive reloads and scope tool principals", "[config][auth]") {
+    Directory directory;
+    const auto file = directory.path / "config.json";
+    auto blank = Config::load(file);
+    CHECK_FALSE(blank.authenticate(""));
+    CHECK_FALSE(blank.authenticate("unconfigured"));
+    CHECK(blank.to_json().at("api_key") == "");
+    const std::string key = "synthetic-config-key-" + random_hex(24);
+    atomic_write(file, json::serialize(json::object{{"api_key", key}}), true);
+    auto configured = Config::load(file);
+    REQUIRE(configured.authenticate(key));
+    CHECK_FALSE(configured.authenticate(""));
+    CHECK_FALSE(configured.authenticate(key + "wrong"));
+    CHECK(configured.authenticate(key)->find(key) == std::string::npos);
+    atomic_write(file, json::serialize(configured.to_json(true)), true);
+    CHECK(Config::load(file).authenticate(key) == configured.authenticate(key));
+    auto rotated = configured;
+    rotated.api_key += "-rotated";
+    CHECK(rotated.authenticate(rotated.api_key) != configured.authenticate(key));
+    CHECK_FALSE(rotated.authenticate(key));
+    for (const auto &invalid : json::array{false, 7, json::array{}, json::object{},
+                 "with whitespace", "with\ncontrol", std::string(4097, 'x')}) {
+        try {
+            (void)Config::load(file, {{"api_key", invalid}});
+            FAIL("Invalid API key was accepted");
+        } catch (const Error &error) {
+            CHECK(error.code == "invalid_config");
+            CHECK(std::string(error.what()).find(key) == std::string::npos);
+        }
+    }
+}
+TEST_CASE("Cookie import keys are separate and their limits are validated", "[config][auth]") {
+    Directory directory;
+    auto cfg = Config::load(directory.path / "config.json",
+        {{"api_key", "generation-test-key"}, {"cookie_import_key", "import-test-key"}});
+    CHECK(cfg.authenticate("generation-test-key"));
+    CHECK_FALSE(cfg.authenticate("import-test-key"));
+    CHECK(cfg.authenticate_cookie_import("import-test-key"));
+    CHECK_FALSE(cfg.authenticate_cookie_import("generation-test-key"));
+    CHECK_FALSE(cfg.authenticate_cookie_import(""));
+    CHECK(cfg.authenticate("generation-test-key") != cfg.authenticate_cookie_import("import-test-key"));
+    for (const auto &invalid : std::vector<json::object>{
+             {{"cookie_import_key", 7}}, {{"cookie_import_key", "invalid key"}},
+             {{"cookie_import_max_accounts", 0}}, {{"cookie_import_max_accounts", 33}},
+             {{"cookie_import_timeout_seconds", 0}}, {{"cookie_import_timeout_seconds", 241}}})
+        CHECK_THROWS_AS(Config::load(directory.path / "config.json", invalid), Error);
 }
 TEST_CASE("configuration file paths are independent of the working directory", "[config][paths]") {
     Directory directory;

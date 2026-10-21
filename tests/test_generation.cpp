@@ -134,10 +134,11 @@ struct GenerationServer {
         config.limits.stream_idle_seconds = 5;
         config.limits.max_attempts = 3;
         fs::create_directories(directory);
+        key = "generation-test-" + random_hex(24);
+        config.api_key = key;
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
         {
             Store store(config.data_dir);
-            key = string_or(store.create_key("Synthetic integration key"), "secret");
             // Two healthy accounts ensure an erroneous retry has somewhere to go.
             store.import_accounts(json::value("SAPISID=synthetic-first-account"), "Synthetic first");
             store.import_accounts(json::value("SAPISID=synthetic-second-account"), "Synthetic second");
@@ -346,6 +347,20 @@ TEST_CASE("Disconnecting an HTTP stream cancels the active generation backend", 
     REQUIRE(server.state->cancelled);
     REQUIRE(server.state->calls == 1);
     REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Readiness requires a nonempty configured API key", "[generation][http][config]") {
+    GenerationServer server(true);
+    REQUIRE(server.call("/ready", {}, http::verb::get).result_int() == 200);
+    server.config.api_key.clear();
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json()), true);
+    local_call(server.config, {{"command", "config.reload"}});
+    auto response = server.call("/ready", {}, http::verb::get);
+    REQUIRE(response.result_int() == 503);
+    REQUIRE_FALSE(bool_or(json::parse(response.body()).as_object(), "ready"));
+    REQUIRE_FALSE(bool_or(local_call(server.config, {{"command", "status"}}), "ready"));
+    REQUIRE(server.call("/v1/models", {}, http::verb::get).result_int() == 401);
+    REQUIRE(server.state->calls == 0);
 }
 
 TEST_CASE("Probe-all records one expired session and continues probing healthy accounts", "[generation][management][http]") {

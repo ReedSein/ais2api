@@ -7,7 +7,11 @@
   "properties": {
     "version": { "const": 1 },
     "bind": { "type": "string", "minLength": 1, "default": "127.0.0.1" },
-    "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 11451 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18451 },
+    "api_key": { "type": "string", "default": "", "maxLength": 4096, "pattern": "^[!-~]*$", "description": "User-configured HTTP API key; empty disables protected HTTP access. Reload or restart after editing. Stored as plaintext here; CLI output redacts it." },
+    "cookie_import_key": { "type": "string", "default": "", "maxLength": 4096, "pattern": "^[!-~]*$", "description": "Separate Bearer secret for userscript Cookie import; empty disables import. Never grants generation access." },
+    "cookie_import_max_accounts": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
+    "cookie_import_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 240, "default": 180 },
     "data_dir": { "type": "string", "minLength": 1, "description": "Defaults to data/ beside the executable. File-relative paths resolve from the configuration directory." },
     "browser_executable": { "type": "string", "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable." },
     "proxy": { "type": "string" },

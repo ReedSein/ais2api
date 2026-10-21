@@ -50,7 +50,10 @@ def check(path: Path, with_browser=False) -> int:
         licenses = [name for name in names if name.endswith('/share/doc/ais2api/LICENSE')]
         if len(licenses) != 1 or not read(licenses[0], 100000).startswith(b'Mozilla Public License Version 2.0'):
             raise ValueError('project_license_is_not_MPL_2_0')
-        forbidden = {'.tools', '.analysis', '.git', 'vcpkg_installed', 'data', 'dumps', 'server-logs', '.env', 'installation.json', 'config.yaml', 'state.sqlite3'}
+        forbidden = {'.tools', '.analysis', '.git', 'vcpkg_installed', 'data', 'dumps', 'server-logs',
+                     '.env', 'installation.json', 'config.yaml', 'config.json', 'config.local.json',
+                     'credentials', 'secrets', 'cookies.json', 'cookies.txt', 'storage_state.json',
+                     'storage-state.json', 'service.log', 'state.sqlite3'}
         relative, roots, original = set(), set(), {}
         for name in names:
             member = PurePosixPath(name)
@@ -67,7 +70,7 @@ def check(path: Path, with_browser=False) -> int:
         if len(roots) != 1:
             raise ValueError('archive_must_have_one_root')
         executable = 'bin/ais2api.exe' if path.suffix == '.zip' else 'bin/ais2api'
-        required = {executable, 'bin/browser/bridge.js', 'bin/runtime-manifest.json', 'share/doc/ais2api/LICENSE', 'share/doc/ais2api/platforms.md', 'share/doc/ais2api/NOTICE', 'share/doc/ais2api/THIRD_PARTY_NOTICES.md'}
+        required = {executable, 'bin/browser/bridge.js', 'bin/runtime-manifest.json', 'bin/userscript/ais2api-cookie.user.js', 'share/doc/ais2api/LICENSE', 'share/doc/ais2api/platforms.md', 'share/doc/ais2api/NOTICE', 'share/doc/ais2api/THIRD_PARTY_NOTICES.md'}
         if not required.issubset(relative):
             raise ValueError('missing_runtime_assets')
         if not any(name.startswith('share/ais2api/schemas/') for name in relative):

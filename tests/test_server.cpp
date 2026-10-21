@@ -23,11 +23,11 @@ struct LiveServer {
     std::string key;
     std::jthread thread;
     std::exception_ptr failure;
-    LiveServer(){
+    explicit LiveServer(bool configured_key=true){
         net::io_context io;tcp::acceptor port(io,{tcp::v4(),0});auto free_port=port.local_endpoint().port();port.close();
         config.data_dir=directory/"data";config.config_file=directory/"config.json";config.port=free_port;config.configured_models={"test-explicit-model"};config.limits.request_bytes=4096;config.limits.object_bytes=8192;config.limits.relay_bytes=1024;
+        key="http-test-"+random_hex(24);config.api_key=configured_key?key:"";
         fs::create_directories(directory);atomic_write(config.config_file,json::serialize(config.to_json()),true);
-        {Store store(config.data_dir);key=string_or(store.create_key("test"),"secret");}
         thread=std::jthread([this]{try{serve(config);}catch(...){failure=std::current_exception();}});
         bool ready=false;for(unsigned i=0;i<100;++i){try{local_call(config,{{"command","status"}});ready=true;break;}catch(const Error&){}std::this_thread::sleep_for(20ms);}
         if(!ready){if(thread.joinable())thread.join();if(failure)std::rethrow_exception(failure);throw std::runtime_error("HTTP test service did not start");}
@@ -52,6 +52,55 @@ TEST_CASE("HTTP exposes data routes and enforces authentication without Google",
     auto malformed=server.call(http::verb::post,"/v1/chat/completions","{",server.key);REQUIRE(malformed.result_int()==400);
     auto large=server.call(http::verb::post,"/v1/chat/completions",std::string(5000,'x'),server.key);REQUIRE(large.result_int()==413);
     REQUIRE_FALSE(server.failure);
+}
+
+TEST_CASE("HTTP authorization follows the configured key across reloads","[http][config]"){
+    LiveServer server;
+    std::string legacy_key;
+    {Store store(server.config.data_dir);legacy_key=string_or(store.create_key("legacy database key"),"secret");}
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},legacy_key).result_int()==401);
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},server.key).result_int()==200);
+    auto shown=json::serialize(local_call(server.config,{{"command","config.show"}}));
+    REQUIRE(shown.find(server.key)==std::string::npos);
+
+    auto invalid=server.config.to_json();
+    invalid["api_key"]="invalid key with whitespace";
+    atomic_write(server.config.config_file,json::serialize(invalid),true);
+    try {
+        local_call(server.config,{{"command","config.reload"}});
+        FAIL("Invalid key configuration was applied");
+    } catch(const Error& error) {
+        REQUIRE(error.code=="invalid_config");
+    }
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},server.key).result_int()==200);
+
+    const auto old_key=server.key;
+    server.key="rotated-http-test-"+random_hex(24);
+    server.config.api_key=server.key;
+    atomic_write(server.config.config_file,json::serialize(server.config.to_json()),true);
+    REQUIRE(string_or(local_call(server.config,{{"command","config.reload"}}),"status")=="reloaded");
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},old_key).result_int()==401);
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},server.key).result_int()==200);
+    shown=json::serialize(local_call(server.config,{{"command","config.show"}}));
+    REQUIRE(shown.find(server.key)==std::string::npos);
+
+    server.config.api_key.clear();
+    atomic_write(server.config.config_file,json::serialize(server.config.to_json()),true);
+    local_call(server.config,{{"command","config.reload"}});
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},server.key).result_int()==401);
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},legacy_key).result_int()==401);
+    REQUIRE(server.call(http::verb::get,"/v1/models").result_int()==401);
+    const auto ready=server.call(http::verb::get,"/ready");
+    REQUIRE(ready.result_int()==503);
+    REQUIRE_FALSE(bool_or(json::parse(ready.body()).as_object(),"ready"));
+}
+
+TEST_CASE("An empty configured key never authorizes HTTP requests","[http][config]"){
+    LiveServer server(false);
+    REQUIRE(server.call(http::verb::get,"/health").result_int()==200);
+    REQUIRE(server.call(http::verb::get,"/v1/models").result_int()==401);
+    REQUIRE(server.call(http::verb::get,"/v1/models",{},server.key).result_int()==401);
+    REQUIRE_FALSE(bool_or(local_call(server.config,{{"command","status"}}),"ready"));
 }
 
 TEST_CASE("HTTP listener reports an occupied port with actionable diagnostics","[http]"){

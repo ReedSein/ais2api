@@ -37,6 +37,7 @@ std::string redact_proxy(std::string proxy) {
 }
 
 bool sensitive_key(std::string key) {
+    if (key == "cookie_import_max_accounts" || key == "cookie_import_timeout_seconds") return false;
     std::transform(key.begin(), key.end(), key.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (key == "token" || key.ends_with("_token") || key == "accesstoken" || key == "refreshtoken") return true;
@@ -83,17 +84,16 @@ json::object manage(Store& store, Config& config, const json::object& command) {
         else store.reset_account(id);
         return {{"ok", true}, {"id", id}};
     }
-    if (name == "keys.create") return store.create_key(string_or(command, "name", "API key"));
-    if (name == "keys.list") return {{"keys", store.keys()}};
-    if (name == "keys.revoke") {
-        auto id = identifier(command);
-        bool found = false;
-        for (auto& key : store.keys())
-            if (string_or(key.as_object(), "id") == id) found = true;
-        if (!found) throw Error(404, "key_not_found", "API key not found");
-        store.revoke_key(id);
-        return {{"ok", true}, {"id", id}};
+    if (name == "keys.list") {
+        json::array keys;
+        if (!config.api_key.empty())
+            keys.push_back(json::object{{"id", "config"}, {"name", "Configured API key"},
+                                        {"source", "config"}});
+        return {{"source", "config"}, {"configured", !config.api_key.empty()}, {"keys", keys}};
     }
+    if (name == "keys.create" || name == "keys.revoke")
+        throw Error(409, "keys_managed_in_config",
+                    "Edit api_key in config.json, then run config reload or restart; clear it to revoke access");
     if (name == "stats") return store.stats();
     if (name == "config.show") {
         json::value value(config.to_json());

@@ -16,6 +16,7 @@ class GenerationBackend {
     virtual void generate(const Request &, const Account &, const EventSink &, std::stop_token) = 0;
     virtual json::array models(std::stop_token = {}) = 0;
     virtual json::object probe(const Account &, std::stop_token = {}) = 0;
+    virtual json::object probe_import(Account &account, std::stop_token token = {}) { return probe(account, token); }
     virtual json::object diagnostics() = 0;
     virtual void reconfigure(const Config &) {}
     virtual void close() = 0;
