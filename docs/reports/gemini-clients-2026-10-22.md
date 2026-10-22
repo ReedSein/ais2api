@@ -17,6 +17,8 @@
 
 Windows MSVC Release 构建成功；完整 CTest 通过：156 个测试用例、2393 个断言，耗时约 31 秒。
 
+后续版本前缀兼容修复：先用合成 HTTP 生成测试复现 `/v1beta/v1beta/models/...` 返回 `404 route_not_found`，再验证归一化后的模型列表、详情、普通生成与 SSE、编码模型名、query key 与请求头鉴权、未知资源及非 Gemini 路由边界。Windows MSVC Release 程序重新构建成功；本次完整 CTest 通过 210 个测试用例、3353 个断言，耗时约 34 秒。该验证使用合成后端，未在真实 SillyTavern 和 Google 账号上做端到端测试。
+
 新增回归覆盖客户端请求形状、`x-goog-api-key` 与 query key 鉴权、普通 JSON 与 SSE、工具编码、五类安全设置输入、思考显示与签名、大小写和别名冲突、无效控制值、模型列表与详情，并保持 OpenAI 模型列表合同。合成后端实际执行 `encode_request`，避免只验证接收请求而遗漏上游 wire 编码失败。
 
 HTTP 测试使用临时数据、合成账号和回环连接；在允许本机 IPC/网络的测试进程中执行。结果不代表真实账号、浏览器、移动设备、Linux 或 Termux 的端到端验收。
@@ -24,7 +26,7 @@ HTTP 测试使用临时数据、合成账号和回环连接；在允许本机 IP
 ## 连接方式
 
 - RikkaHub：Google 提供商，Base URL 为 `http://HOST:18451/v1beta`，API Key 使用网关密钥。
-- SillyTavern：Google AI Studio，反向代理为 `http://HOST:18451`，代理密码使用网关密钥。
+- SillyTavern：Google AI Studio，反向代理可为 `http://HOST:18451` 或社区常用的 `http://HOST:18451/v1beta/`（末尾斜杠可省略），代理密码使用网关密钥。SillyTavern 自动追加 `/v1beta/models/...`；服务现在兼容重复的版本前缀和版本之间的多余斜杠，模型列表、详情、普通及流式生成均使用原有 Gemini 路由和鉴权。资源名、查询字符串及其他接口路径不作归一化。
 - 流式路径为 `/v1beta/models/MODEL:streamGenerateContent?alt=sse`，普通路径为 `:generateContent`；`/v1/models` 保持 OpenAI 列表格式。
 
 `HOST` 应为客户端能够访问的服务地址。完整参数边界见 [协议合同](../protocol.md)。

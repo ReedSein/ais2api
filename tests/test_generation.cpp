@@ -417,6 +417,37 @@ TEST_CASE("RikkaHub and SillyTavern native request shapes work over HTTP", "[gen
     REQUIRE(server.state->calls == 4);
 }
 
+TEST_CASE("SillyTavern versioned proxy URLs generate native JSON and SSE", "[generation][http][gemini-clients]") {
+    GenerationServer server;
+    unsigned calls = 0;
+    for (auto prefix : {"/v1beta/", "/v1beta/v1beta/", "/v1beta//v1beta/", "/v1beta//"}) {
+        for (bool streaming : {false, true}) {
+            INFO("prefix=" << prefix << ", streaming=" << streaming);
+            // ST appends /v1beta/models/... even when the proxy URL already has /v1beta.
+            // An encoded model id also checks extraction after prefix normalization.
+            auto target = std::string(prefix) + "models/synthetic%2Dnative%2Dparts:" +
+                (streaming ? "streamGenerateContent?alt=sse&key=" : "generateContent?key=") + server.key;
+            auto response = server.call(target,
+                R"({"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":false}}})",
+                http::verb::post, "");
+            REQUIRE(response.result_int() == 200);
+            json::object result;
+            if (streaming) {
+                REQUIRE(response[http::field::content_type].starts_with("text/event-stream"));
+                for (const auto& record : sse_records(response.body()))
+                    merge_event(result, json::parse(record).as_object(), 32768);
+            } else result = json::parse(response.body()).as_object();
+            auto& candidate = result.at("candidates").as_array()[0].as_object();
+            auto& parts = candidate.at("content").as_object().at("parts").as_array();
+            REQUIRE(parts[0].as_object().at("text") == "answer");
+            REQUIRE(parts.back().as_object().at("thoughtSignature") == "synthetic-original-signature");
+            REQUIRE(candidate.at("finishReason") == "STOP");
+            REQUIRE(server.state->calls == ++calls);
+        }
+    }
+    REQUIRE_FALSE(server.failed);
+}
+
 TEST_CASE("Client grounding options reach AI Studio wire over unary and SSE HTTP", "[generation][http][grounding]") {
     GenerationServer server;
     const std::vector<std::string> options{

@@ -10,6 +10,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <array>
 #include <future>
 #include <thread>
 using namespace ais2api;
@@ -188,6 +189,55 @@ TEST_CASE("HTTP model contracts provide Gemini display names and preserve metada
         REQUIRE_FALSE(model.contains("displayName"));
         REQUIRE_FALSE(model.contains("name"));
     }
+}
+
+TEST_CASE("Gemini-compatible clients accept version-prefixed model routes without rewriting resources", "[http][gemini-clients]") {
+    LiveServer server;
+    const std::array<std::string, 4> bases{
+        "/v1beta/v1beta", "/v1beta//v1beta", "/v1beta/", "/v1beta/v1beta/v1beta"
+    };
+    for (const auto& base : bases) {
+        auto listed = server.call(http::verb::get, base + "/models", {}, server.key);
+        REQUIRE(listed.result_int() == 200);
+        auto body = json::parse(listed.body()).as_object();
+        REQUIRE_FALSE(body.contains("data"));
+        const auto& models = body.at("models").as_array();
+        REQUIRE(models.size() == 1);
+        REQUIRE(string_or(models[0].as_object(), "name") == "models/test-explicit-model");
+        REQUIRE(string_or(models[0].as_object(), "displayName") == "test-explicit-model");
+
+        auto detail = server.call(http::verb::get, base + "/models/test-explicit-model", {}, server.key);
+        REQUIRE(detail.result_int() == 200);
+        auto model = json::parse(detail.body()).as_object();
+        REQUIRE(string_or(model, "name") == "models/test-explicit-model");
+        REQUIRE(string_or(model, "displayName") == "test-explicit-model");
+    }
+    REQUIRE(server.call(http::verb::get, "/v1beta/v1beta/models?key=" + server.key).result_int() == 200);
+    REQUIRE(server.call(http::verb::get, "/v1beta//models",
+                        {}, {}, {{"x-goog-api-key", server.key}}).result_int() == 200);
+    REQUIRE(server.call(http::verb::get, "/v1beta/v1beta/models").result_int() == 401);
+    REQUIRE(server.call(http::verb::get, "/v1beta//models", {}, "invalid").result_int() == 401);
+
+    auto unknown_model = server.call(http::verb::get, "/v1beta/v1beta/models/unknown-model", {}, server.key);
+    REQUIRE(unknown_model.result_int() == 404);
+    REQUIRE(json::parse(unknown_model.body()).as_object().at("error").as_object().at("reason") == "model_not_found");
+    auto unnormalized_resource = server.call(http::verb::get, "/v1beta/models//test-explicit-model", {}, server.key);
+    REQUIRE(unnormalized_resource.result_int() == 404);
+    REQUIRE(json::parse(unnormalized_resource.body()).as_object().at("error").as_object().at("reason") == "model_not_found");
+
+    for (const auto* path : {"/v1beta/accounts", "/v1beta/v1beta/unknown", "/v1beta/v1betax/models",
+                             "/v1beta/../v1/models", "/v1beta/admin/v1/models", "/v1beta/v1/chat/models"}) {
+        auto response = server.call(http::verb::get, path, {}, server.key);
+        REQUIRE(response.result_int() == 404);
+        REQUIRE(json::parse(response.body()).as_object().at("error").as_object().at("reason") == "route_not_found");
+    }
+    for (auto action : {":generateContent", ":streamGenerateContent"}) {
+        auto path = std::string("/v1beta/v1beta/models/test-explicit-model") + action;
+        REQUIRE(server.call(http::verb::post, path, "{}").result_int() == 401);
+        REQUIRE(server.call(http::verb::post, path + "?key=invalid", "{}").result_int() == 401);
+    }
+    REQUIRE(server.call(http::verb::post, "/v1beta/v1beta/models", "{}", server.key).result_int() == 404);
+    REQUIRE_FALSE(server.failure);
 }
 
 TEST_CASE("HTTP authorization follows the configured key across reloads","[http][config]"){

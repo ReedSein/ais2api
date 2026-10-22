@@ -720,6 +720,18 @@ bool json_content_type(std::string_view value) {
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
     return ascii_equal(value, "application/json");
 }
+std::string normalize_gemini_path(std::string_view path) {
+    // SillyTavern appends /v1beta even to an already versioned proxy URL.
+    // Only normalize the version prefix; resource ids and other routes stay literal.
+    auto resource = path;
+    while (resource.starts_with("/v1beta/")) {
+        resource.remove_prefix(std::string_view("/v1beta").size());
+        while (resource.starts_with("//")) resource.remove_prefix(1);
+    }
+    if (resource != path && (resource == "/models" || resource.starts_with("/models/")))
+        return "/v1beta" + std::string(resource);
+    return std::string(path);
+}
 std::string token_from(const http::request<http::string_body> &request) {
     std::string_view target(request.target().data(), request.target().size());
     auto query = target.find('?');
@@ -1078,7 +1090,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     co_await http::async_read(stream, input, parser, net::use_awaitable);
     auto request = parser.release();
     std::string target(request.target());
-    auto path = target.substr(0, target.find('?'));
+    auto path = normalize_gemini_path(std::string_view(target).substr(0, target.find('?')));
     state.openai = path.starts_with("/v1/");
     if (request.method() == http::verb::get || request.method() == http::verb::head) {
         if (auto asset = webui::find(path)) {

@@ -4,6 +4,8 @@ The implementation is new C++ code. The reference project's `docs/WIRE_SPECIFICA
 
 ## Request and response representation
 
+Native Gemini model routes accept repeated leading `/v1beta` segments and extra slashes immediately after those version segments, e.g. `/v1beta/v1beta/models` and `/v1beta//v1beta/models/MODEL:streamGenerateContent`. This supports SillyTavern proxy URLs that already end in `/v1beta/` before the client appends its API version. List, detail, unary generation and SSE requests use the canonical `/v1beta/models` handlers with unchanged authentication. Model resources, query strings, other API versions and non-Gemini routes are not normalized.
+
 Model discovery is independent of generation bootstrap. It waits for the selected account identity, captures the page's real ListModels request through fetch or XHR, and checks the account slot before replay. It does not require a prompt editor, Run button, generation template or snapshot service. Cached results remain scoped to the verified browser context; explicit configured models retain their source marker. Missing or ambiguous page identity is distinct from a confirmed different account and never authorizes cross-account reuse.
 
 All API adapters normalize to a standard Gemini request object. The browser transport receives a newly encoded JSPB request based on the captured live template. Known generation fields, contents, model, signature, system instruction, tools and cached-content fields are replaced or cleared for every request. Unknown template fields are retained for upstream compatibility. Model aliases resolve before encoding.

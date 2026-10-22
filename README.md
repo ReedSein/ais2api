@@ -80,7 +80,7 @@ Cherry Studio 使用 OpenAI 兼容提供商时，Base URL 填 `http://127.0.0.1:
 
 支持完整历史的真 role 转发与客户端思考签名往返：保留连续同角色消息及原生部件，OpenAI 中途系统提示保留在原位置，工具签名通过 `call_gemini_...` 调用 ID 回传。使用方法与客户端限制见 [真 role 与签名](docs/true-role.md)。
 
-RikkaHub 的 Google 提供商 Base URL 填 `http://127.0.0.1:18451/v1beta`；SillyTavern 选择 Google AI Studio，反向代理填根地址 `http://127.0.0.1:18451`，代理密码填本服务 API Key（移动设备需使用可访问的服务地址）。支持客户端的默认安全设置、单候选、思考显示开关和工具字段别名。`thinkingBudget` 与 `seed` 当前接受但忽略，不保证预算或固定随机种子生效；具体边界见 [协议合同](docs/protocol.md)。
+RikkaHub 的 Google 提供商 Base URL 填 `http://127.0.0.1:18451/v1beta`；SillyTavern 选择 Google AI Studio，反向代理可填根地址 `http://127.0.0.1:18451`，也支持社区常用的 `http://127.0.0.1:18451/v1beta/`（末尾斜杠可省略），代理密码填本服务 API Key（移动设备需使用可访问的服务地址）。SillyTavern 自动追加版本路径导致的重复 `/v1beta` 及版本之间的多余斜杠会在 Gemini 模型接口路由时归一化，支持模型列表、详情、普通与流式生成。支持客户端的默认安全设置、单候选、思考显示开关和工具字段别名。`thinkingBudget` 与 `seed` 当前接受但忽略，不保证预算或固定随机种子生效；具体边界见 [协议合同](docs/protocol.md)。
 
 Google 提供商的搜索、代码执行、URL context 等内置工具会转换为 AI Studio 原生选项，搜索声明自动去重，文本工具请求带浏览器时区。兼容 RikkaHub 混用函数与搜索时附带的 `includeServerSideToolInvocations`，但该参数要求的额外调用记录暂未实现；旧搜索动态阈值也不生效，两者会记录为忽略参数。搜索是否执行由模型决定，引用/搜索来源元数据尚未解析。详见 [搜索工具修复与验证](docs/reports/grounding-tools-2026-10-22.md)。
 
