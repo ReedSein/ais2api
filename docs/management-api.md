@@ -61,6 +61,8 @@ Managed generation keys have independent persisted records. Existing legacy data
 
 ## Configuration save and restart behavior
 
+`ignore_unsupported_parameters` is a boolean, defaults to false and applies immediately when patched. It controls dropping known unsupported optional generation parameters across Gemini, Chat and Responses; it does not relax configuration, authentication or content validation. See [the compatibility switch](protocol.md#optional-unsupported-parameter-dropping).
+
 `GET /config` returns the redacted running `config`, its file path and `restart_required`. When a saved change awaits restart, `saved_config` contains the redacted pending configuration. PATCH validates the full resulting configuration before atomically saving it. Unknown fields, wrong types, invalid limits and the display mask `***` as a secret are rejected. Omit unchanged redacted secret fields from a submitted form.
 
 Patches merge only the nested `limits` object. `model_aliases`, `model_defaults`, `configured_models` and `admin_origins` replace their respective complete containers. To delete a model alias, submit a replacement map without it.

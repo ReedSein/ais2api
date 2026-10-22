@@ -13,8 +13,12 @@ Windows descendants belong to a kill-on-close Job Object. POSIX launches own a
 new process group; shutdown targets only that group. Runtime profiles are removed
 after shutdown. Imported credentials remain in the Store and are not erased.
 
-The bridge is original JavaScript in `browser/bridge.js`. CMake must copy it beside
-the executable under `browser/`, or define AIS2API_ASSET_DIR. It discovers a live
+The bridge is original JavaScript in `browser/bridge.js`, embedded as bytes into
+the executable by CMake. Generation always uses the embedded copy; stale adjacent
+scripts and developer source directories cannot override it. Packages retain
+`browser/bridge.js` as a reference asset. Diagnostics expose `bridgeSource=embedded`,
+the embedded SHA-256 and the current adapter phase; browser failures log those
+safe fields without raw JavaScript exceptions or page data. It discovers a live
 MakerSuite snapshot adapter, observes its real service argument, and captures a
 real GenerateContent request from the page. A small bootstrap prompt is inserted
 and Run is clicked. Captured bootstrap generation and prompt-save fetches receive

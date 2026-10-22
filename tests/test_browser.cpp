@@ -14,6 +14,13 @@
 #include <thread>
 
 using namespace ais2api;
+TEST_CASE("Browser bridge is embedded with a matching digest and required host methods", "[browser]") {
+    const auto source = browser_detail::embedded_bridge_source();
+    REQUIRE_FALSE(source.empty());
+    REQUIRE(source.size() <= 256 * 1024);
+    REQUIRE(sha256(source) == browser_detail::embedded_bridge_sha256());
+    REQUIRE(source.find("identity, bootstrap, finishBootstrap, run, snapshot, start, ack, abort, discoverModels") != std::string_view::npos);
+}
 TEST_CASE("Google authorization signs synthetic cookies with exact SHA1 hashes", "[google-auth]") {
     browser_detail::GoogleAuthorizationCache cache;
     auto cookies = [] { return json::array{
@@ -183,6 +190,9 @@ TEST_CASE("unconfigured browser probe fails without claiming account readiness")
     catch (const Error& error) { CHECK(error.code == "browser_not_configured"); }
     CHECK_FALSE(bool_or(gateway.diagnostics(), "running"));
     CHECK_FALSE(bool_or(gateway.diagnostics(), "templateCaptured"));
+    CHECK(gateway.diagnostics().at("bridgeSource") == "embedded");
+    CHECK(string_or(gateway.diagnostics(), "bridgeSha256") == browser_detail::embedded_bridge_sha256());
+    CHECK(gateway.diagnostics().at("phase") == "browser_start");
     gateway.close(); gateway.close();
 }
 TEST_CASE("account verification distinguishes delayed identity from a different Google account") {

@@ -61,6 +61,11 @@
       "type": "boolean",
       "default": true
     },
+    "ignore_unsupported_parameters": {
+      "type": "boolean",
+      "default": false,
+      "description": "Discard optional data API parameters explicitly unsupported by the upstream. Takes effect without restarting."
+    },
     "model_aliases": {
       "type": "object",
       "additionalProperties": {

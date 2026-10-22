@@ -62,6 +62,193 @@ std::string item_text(const json::object &i) {
     return string_or(p->as_array()[0].as_object(), "text");
 }
 } // namespace
+void discard_unsupported_responses(json::object &in, json::array &ignored) {
+    auto drop = [&](std::string_view key, bool discard) {
+        if (discard) {
+            in.erase(key);
+            ignored.push_back(json::value(key));
+        }
+    };
+    auto one_of = [](const json::value &v, std::initializer_list<std::string_view> values) {
+        return v.is_string() && std::find(values.begin(), values.end(),
+            std::string_view(v.as_string())) != values.end();
+    };
+    for (auto key : {"store", "background"})
+        if (auto p = in.if_contains(key)) drop(key, p->is_bool() && p->as_bool());
+    if (auto p = in.if_contains("previous_response_id")) drop("previous_response_id", p->is_string());
+    if (auto p = in.if_contains("conversation")) {
+        bool valid = p->is_string();
+        if (p->is_object()) {
+            auto &o = p->as_object();
+            auto id = o.if_contains("id");
+            valid = o.size() == 1 && id && id->is_string();
+        }
+        drop("conversation", valid);
+    }
+    if (auto p = in.if_contains("include"); p && p->is_array() && !p->as_array().empty()) {
+        bool valid = true;
+        for (auto &v : p->as_array())
+            valid = valid && one_of(v, {"code_interpreter_call.outputs", "computer_call_output.output.image_url",
+                "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs",
+                "reasoning.encrypted_content", "web_search_call.action.sources"});
+        drop("include", valid);
+    }
+    if (auto p = in.if_contains("truncation")) drop("truncation", *p == "auto");
+    if (auto p = in.if_contains("service_tier"))
+        drop("service_tier", one_of(*p, {"default", "flex", "priority", "scale"}));
+    if (auto p = in.if_contains("parallel_tool_calls"))
+        drop("parallel_tool_calls", p->is_bool() && !p->as_bool());
+    if (auto p = in.if_contains("reasoning"); p && p->is_object()) {
+        auto &r = p->as_object();
+        if (auto summary = r.if_contains("summary"); summary && one_of(*summary, {"auto", "concise", "detailed"})) {
+            r.erase("summary");
+            ignored.push_back("reasoning.summary");
+        }
+    }
+    auto discard_strict = [&](json::object &o, std::string_view path) {
+        if (auto strict = o.if_contains("strict"); strict && strict->is_bool() && strict->as_bool()) {
+            o.erase("strict");
+            ignored.push_back(json::value(path));
+        }
+    };
+    if (auto tools = in.if_contains("tools"); tools && tools->is_array())
+        for (auto &tool : tools->as_array())
+            if (tool.is_object()) {
+                auto &o = tool.as_object();
+                if (auto type = o.if_contains("type"); type && *type == "function")
+                    discard_strict(o, "responses.tools.function.strict");
+            }
+    if (auto text = in.if_contains("text"); text && text->is_object())
+        if (auto format = text->as_object().if_contains("format"); format && format->is_object()) {
+            auto &o = format->as_object();
+            if (auto type = o.if_contains("type"); type && *type == "json_schema")
+                discard_strict(o, "responses.text.format.strict");
+        }
+    auto strings = [](const json::value &v) {
+        if (!v.is_array()) return false;
+        return std::all_of(v.as_array().begin(), v.as_array().end(),
+                           [](const json::value &entry) { return entry.is_string(); });
+    };
+    auto named_tools = [&](const json::value &v, bool read_only) {
+        if (!v.is_object()) return false;
+        auto &o = v.as_object();
+        auto names = o.if_contains("tool_names");
+        if (!names || !strings(*names)) return false;
+        for (auto &entry : o)
+            if (entry.key() != "tool_names" &&
+                !(read_only && entry.key() == "read_only" && entry.value().is_bool())) return false;
+        return true;
+    };
+    auto container = [&](const json::value &v) {
+        if (v.is_string()) return true;
+        if (!v.is_object()) return false;
+        auto &o = v.as_object();
+        auto type = o.if_contains("type");
+        if (!type || *type != "auto") return false;
+        for (auto &entry : o) {
+            if (entry.key() == "type") continue;
+            if (entry.key() == "file_ids" && strings(entry.value())) continue;
+            if (entry.key() == "memory_limit" && one_of(entry.value(), {"1g", "4g", "16g", "64g"})) continue;
+            return false;
+        }
+        return true;
+    };
+    auto location = [](const json::value &v) {
+        if (!v.is_object()) return false;
+        auto &o = v.as_object();
+        auto type = o.if_contains("type");
+        if (!type || *type != "approximate") return false;
+        for (auto &entry : o)
+            if (entry.key() != "type" &&
+                !((entry.key() == "city" || entry.key() == "country" || entry.key() == "region" ||
+                   entry.key() == "timezone") && entry.value().is_string())) return false;
+        return true;
+    };
+    // Keep unknown fields and malformed definitions so the normal validator still rejects them.
+    auto builtin = [&](const json::value &v, bool choice) {
+        if (!v.is_object()) return false;
+        auto &o = v.as_object();
+        auto type = o.if_contains("type");
+        if (!type || !one_of(*type, {"web_search", "web_search_preview", "file_search", "code_interpreter",
+                "computer_use_preview", "image_generation", "mcp", "local_shell", "shell", "apply_patch"})) return false;
+        if (!choice) {
+            auto required_string = [&](std::string_view key) {
+                auto p = o.if_contains(key);
+                return p && p->is_string();
+            };
+            if (*type == "mcp" && !required_string("server_label")) return false;
+            if (*type == "file_search" && !o.if_contains("vector_store_ids")) return false;
+            if (*type == "code_interpreter") {
+                auto c = o.if_contains("container");
+                if (!c || !container(*c)) return false;
+            }
+            if (*type == "computer_use_preview" &&
+                (!o.if_contains("display_width") || !o.if_contains("display_height") || !required_string("environment"))) return false;
+        }
+        for (auto &kv : o) {
+            if (kv.key() == "type") continue;
+            if (choice) {
+                if ((kv.key() != "server_label" && kv.key() != "name") || !kv.value().is_string()) return false;
+                continue;
+            }
+            if (*type == "code_interpreter" && kv.key() == "container" && container(kv.value())) continue;
+            if ((*type == "web_search" || *type == "web_search_preview") && kv.key() == "user_location" && location(kv.value())) continue;
+            if (*type == "web_search" && kv.key() == "filters" && kv.value().is_object()) {
+                auto &filters = kv.value().as_object();
+                auto domains = filters.if_contains("allowed_domains");
+                if (filters.size() == 1 && domains && strings(*domains)) continue;
+            }
+            if (*type == "mcp") {
+                if (kv.key() == "headers" && kv.value().is_object() &&
+                    std::all_of(kv.value().as_object().begin(), kv.value().as_object().end(),
+                        [](const auto &header) { return header.value().is_string(); })) continue;
+                if (kv.key() == "allowed_tools" && (strings(kv.value()) || named_tools(kv.value(), true))) continue;
+                if (kv.key() == "require_approval") {
+                    if (one_of(kv.value(), {"always", "never"})) continue;
+                    if (kv.value().is_object() && !kv.value().as_object().empty()) {
+                        bool valid = true;
+                        for (auto &rule : kv.value().as_object())
+                            valid = valid && (rule.key() == "always" || rule.key() == "never") && named_tools(rule.value(), false);
+                        if (valid) continue;
+                    }
+                }
+            }
+            // Only discard definitions whose optional configuration is understood here.
+            if ((kv.key() == "container" || kv.key() == "search_context_size" || kv.key() == "server_label" || kv.key() == "server_url" ||
+                 kv.key() == "server_description" || kv.key() == "authorization" || kv.key() == "environment" ||
+                 kv.key() == "model" || kv.key() == "size" || kv.key() == "quality" || kv.key() == "background" ||
+                 kv.key() == "output_format" || kv.key() == "moderation") && kv.value().is_string()) continue;
+            if ((kv.key() == "vector_store_ids" || kv.key() == "allowed_domains") && kv.value().is_array()) {
+                bool valid = true;
+                for (auto &entry : kv.value().as_array()) valid = valid && entry.is_string();
+                if (valid) continue;
+            }
+            if ((kv.key() == "display_width" || kv.key() == "display_height" || kv.key() == "max_num_results" ||
+                 kv.key() == "partial_images" || kv.key() == "output_compression") && kv.value().is_int64() &&
+                 kv.value().as_int64() > 0) continue;
+            return false;
+        }
+        return true;
+    };
+    if (auto p = in.if_contains("tools"); p && p->is_array()) {
+        auto &a = p->as_array();
+        for (std::size_t i = a.size(); i-- > 0;)
+            if (builtin(a[i], false)) {
+                ignored.push_back(json::value("tools[" + std::to_string(i) + "]"));
+                a.erase(a.begin() + i);
+            }
+    }
+    if (auto p = in.if_contains("tool_choice")) {
+        bool forced = *p == "required";
+        if (p->is_object()) {
+            auto &o = p->as_object();
+            auto type = o.if_contains("type");
+            auto name = o.if_contains("name");
+            forced = o.size() == 2 && type && *type == "function" && name && name->is_string() && !name->as_string().empty();
+        }
+        drop("tool_choice", forced || builtin(*p, true));
+    }
+}
 json::object responses_to_chat(const json::object &in) {
     keys(in, {"model",
               "input",

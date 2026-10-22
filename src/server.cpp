@@ -239,6 +239,7 @@ class Service {
             return result;
         }
         if (action == "rotation.status") return store_.rotation_status();
+        if (action == "browser.diagnostics") return gateway_->diagnostics();
         if (action == "rotation.next") return {{"preferred_account_id", store_.rotate_account()},
             {"browser_prepared", false}};
         if (action == "rotation.clear") {
@@ -539,7 +540,10 @@ class Service {
             gateway_->reconfigure(cfg);
             if (Clock::now() - work->queued > std::chrono::seconds(cfg.limits.queue_seconds))
                 throw Error(504, "queue_timeout", "Queue wait exceeded limit");
+            json::array ignored_responses;
             if (work->responses) {
+                if (cfg.ignore_unsupported_parameters)
+                    discard_unsupported_responses(work->body, ignored_responses);
                 work->response_options = responses_options(work->body);
                 work->body = responses_to_chat(work->body);
             }
@@ -548,6 +552,8 @@ class Service {
             auto request = work->protocol == Protocol::gemini
                                ? normalize_gemini(work->model, work->body, work->stream, cfg)
                                : normalize_openai(work->body, cfg, &store_, work->principal);
+            for (auto &parameter : ignored_responses)
+                request.ignored_parameters.push_back(parameter);
             request.principal = work->principal;
             work->model = request.model;
             work->include_usage = request.include_usage;
@@ -650,6 +656,16 @@ class Service {
             throw Error(502, "generation_failed", "Generation failed");
         } catch (const Error &e) {
             trace.error = e.code;
+            if (e.code == "browser_incompatible") {
+                // Only stable diagnostics, never raw CDP exceptions or page data.
+                try {
+                    auto diagnostics = gateway_->diagnostics();
+                    json::object record{{"event", "browser_failure"}, {"request_id", work->id}, {"code", e.code}};
+                    for (auto key : {"phase", "bridgeSource", "bridgeSha256", "status", "templateCaptured"})
+                        if (auto value = diagnostics.if_contains(key)) record[key] = *value;
+                    log(std::move(record));
+                } catch (...) {}
+            }
             work->pipe->finish(e);
         } catch (const std::exception &) {
             trace.error = "internal";
@@ -684,6 +700,26 @@ std::string decode_url(std::string_view source) {
     }
     return out;
 }
+bool ascii_equal(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    auto lower = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+    return std::equal(a.begin(), a.end(), b.begin(),
+                      [&](unsigned char x, unsigned char y) { return lower(x) == lower(y); });
+}
+std::string_view bearer_token(std::string_view value) {
+    auto space = value.find(' ');
+    if (space == std::string_view::npos || !ascii_equal(value.substr(0, space), "Bearer"))
+        return {};
+    value.remove_prefix(space);
+    while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+    return value;
+}
+bool json_content_type(std::string_view value) {
+    value = value.substr(0, value.find(';'));
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+    return ascii_equal(value, "application/json");
+}
 std::string token_from(const http::request<http::string_body> &request) {
     std::string_view target(request.target().data(), request.target().size());
     auto query = target.find('?');
@@ -705,10 +741,7 @@ std::string token_from(const http::request<http::string_body> &request) {
         if (it != request.end())
             return std::string(it->value());
     }
-    auto h = request[http::field::authorization];
-    if (h.starts_with("Bearer "))
-        return std::string(h.substr(7));
-    return {};
+    return std::string(bearer_token(request[http::field::authorization]));
 }
 net::awaitable<void> send_json(beast::tcp_stream &stream, unsigned status,
                                const json::object &object, std::string_view origin = {}) {
@@ -802,7 +835,7 @@ std::map<std::string, std::string> query_parameters(std::string_view target) {
 json::object admin_body(const http::request<http::string_body>& request) {
     if (request.body().empty()) return {};
     auto type = std::string_view(request[http::field::content_type]);
-    if (type.substr(0, type.find(';')) != "application/json")
+    if (!json_content_type(type))
         throw Error(415, "content_type", "Content-Type must be application/json");
     boost::system::error_code ec;
     auto parsed = json::parse(request.body(), ec);
@@ -810,8 +843,7 @@ json::object admin_body(const http::request<http::string_body>& request) {
     return std::move(parsed.as_object());
 }
 std::string admin_token(const http::request<http::string_body>& request) {
-    auto value = request[http::field::authorization];
-    return value.starts_with("Bearer ") ? std::string(value.substr(7)) : "";
+    return std::string(bearer_token(request[http::field::authorization]));
 }
 void admin_origin(const Config& config, const http::request<http::string_body>& request,
                   ConnectionState& state) {
@@ -1008,6 +1040,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     else if (get && path == "/logs/sources") { state.audit = false; result = log_sources(cfg.data_dir); }
     else if ((get && path == "/diagnostics") || (post && path == "/diagnostics/export")) {
         result = {{"version", "0.1.0"}, {"status", service.control({{"command", "status"}})},
+            {"browser", service.control({{"command", "browser.diagnostics"}})},
             {"config", service.control({{"command", "config.show"}})},
             {"stats", service.control({{"command", "stats"}})},
             {"logs", log_sources(cfg.data_dir)}, {"google_verified", false}};
@@ -1096,10 +1129,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             throw Error(403, admin ? "admin_disabled" : "cookie_import_disabled",
                 admin ? "Set admin_key in config.json to enable management API" :
                         "Set cookie_import_key in config.json to enable userscript import");
-        const auto authorization = request[http::field::authorization];
-        std::string_view provided;
-        if (authorization.starts_with("Bearer "))
-            provided = {authorization.data() + 7, authorization.size() - 7};
+        const auto provided = bearer_token(request[http::field::authorization]);
         const auto principal = admin ? import_cfg.authenticate_admin(provided) : import_cfg.authenticate_cookie_import(provided);
         if (!principal)
             throw Error(401, admin ? "admin_authentication" : "cookie_import_authentication",
@@ -1108,9 +1138,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         if (!admin && !origin.empty() && origin != "https://aistudio.google.com")
             throw Error(403, "cookie_import_origin", "Cookie import requires the AI Studio userscript");
         auto content_type = std::string_view(request[http::field::content_type]);
-        content_type = content_type.substr(0, content_type.find(';'));
-        while (!content_type.empty() && content_type.back() == ' ') content_type.remove_suffix(1);
-        if (content_type != "application/json")
+        if (!json_content_type(content_type))
             throw Error(415, "content_type", "Content-Type must be application/json");
         if (request.body().size() > 1024 * 1024)
             throw Error(413, "cookie_import_limit", "Cookie import exceeds one MiB");
@@ -1252,7 +1280,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         co_return;
     }
     auto content_type = request[http::field::content_type];
-    if (!content_type.starts_with("application/json"))
+    if (!json_content_type(content_type))
         throw Error(415, "content_type", "Content-Type must be application/json");
     auto input_bytes = request.body().size();
     boost::system::error_code ec;

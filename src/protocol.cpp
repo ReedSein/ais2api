@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/protocol.hpp"
+#include "ais2api/schema.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -124,16 +125,22 @@ void canonical_content(json::value &value) {
             canonical_parts(*parts);
 }
 void canonical_gemini(json::object &o) {
-    aliases(o, {"systemInstruction", "generationConfig", "toolConfig", "safetySettings"});
+    aliases(o, {"systemInstruction", "generationConfig", "toolConfig", "safetySettings", "cachedContent"});
     if (auto contents = o.if_contains("contents"); contents && contents->is_array())
         for (auto &content : contents->as_array()) canonical_content(content);
     if (auto system = o.if_contains("systemInstruction")) canonical_content(*system);
     if (auto generation = o.if_contains("generationConfig"); generation && generation->is_object()) {
         auto &g = generation->as_object();
         aliases(g, {"stopSequences", "maxOutputTokens", "topP", "topK", "responseMimeType",
-                    "responseSchema", "presencePenalty", "frequencyPenalty", "responseLogprobs",
+                    "responseSchema", "responseJsonSchema", "presencePenalty", "frequencyPenalty", "responseLogprobs",
                     "responseModalities", "thinkingConfig", "mediaResolution", "imageConfig",
-                    "candidateCount"});
+                    "candidateCount", "speechConfig", "routingConfig", "modelSelectionConfig", "audioTimestamp"});
+        if (auto schema = g.if_contains("responseJsonSchema")) {
+            if (g.if_contains("responseSchema")) invalid("responseSchema conflicts with responseJsonSchema");
+            auto value = std::move(*schema);
+            g.erase("responseJsonSchema");
+            g["responseSchema"] = std::move(value);
+        }
         if (auto t = g.if_contains("thinkingConfig"); t && t->is_object())
             aliases(t->as_object(), {"includeThoughts", "thinkingBudget", "thinkingLevel"});
         if (auto image = g.if_contains("imageConfig"); image && image->is_object())
@@ -149,7 +156,7 @@ void canonical_gemini(json::object &o) {
             if (!tool.is_object()) continue;
             auto &t = tool.as_object();
             aliases(t, {"functionDeclarations", "codeExecution", "googleSearch",
-                        "googleSearchRetrieval", "googleMaps", "urlContext"});
+                        "googleSearchRetrieval", "googleMaps", "urlContext", "computerUse", "fileSearch", "enterpriseWebSearch"});
             if (auto search = t.if_contains("googleSearch"); search && search->is_object()) {
                 aliases(search->as_object(), {"searchTypes"});
                 if (auto types = search->as_object().if_contains("searchTypes"); types && types->is_object())
@@ -359,6 +366,7 @@ json::array content_wire(const json::object &c, bool system = false) {
     }
     return {encoded, system ? "user" : role};
 }
+json::array encode_native_schema(const json::object &s);
 json::array schemas(const json::value &v, bool allow_null) {
     json::array out;
     for (auto &item : array(v, "schema union")) {
@@ -366,7 +374,7 @@ json::array schemas(const json::value &v, bool allow_null) {
         auto type = string_or(branch, "type");
         if ((type == "null" || type == "NULL") && allow_null)
             continue;
-        out.push_back(encode_schema(branch));
+        out.push_back(encode_native_schema(branch));
     }
     if (out.empty())
         invalid("schema union needs a non-null branch");
@@ -778,7 +786,8 @@ json::array encode_contents(const json::array &contents) {
     return out;
 }
 
-json::array encode_schema(const json::object &s) {
+namespace {
+json::array encode_native_schema(const json::object &s) {
     keys(s, {"type",     "format",     "description",     "nullable",      "enum",
              "items",    "properties", "required",        "minProperties", "maxProperties",
              "minimum",  "maximum",    "minLength",       "maxLength",     "pattern",
@@ -821,7 +830,7 @@ json::array encode_schema(const json::object &s) {
             else if (type.empty())
                 type = t;
             else
-                invalid("Only nullable single-type arrays are supported");
+                throw UnsupportedSchema("Only nullable single-type arrays are supported");
         }
     }
     std::transform(type.begin(), type.end(), type.begin(),
@@ -854,6 +863,8 @@ json::array encode_schema(const json::object &s) {
     std::transform(type.begin(), type.end(), type.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     auto it = types.find(type);
+    if (it == types.end() && (type.empty() || type == "null"))
+        throw UnsupportedSchema("Schema requires a supported concrete type");
     if (it == types.end())
         invalid("Schema requires a supported concrete type");
     json::array out{it->second};
@@ -877,12 +888,12 @@ json::array encode_schema(const json::object &s) {
     if (nullable)
         put(out, 3, true);
     if (auto p = s.if_contains("items"))
-        put(out, 5, encode_schema(object(*p, "schema.items")));
+        put(out, 5, encode_native_schema(object(*p, "schema.items")));
     if (auto p = s.if_contains("properties")) {
         json::array props;
         for (auto &kv : object(*p, "schema.properties"))
             props.push_back(
-                json::array{kv.key(), encode_schema(object(kv.value(), "property schema"))});
+                json::array{kv.key(), encode_native_schema(object(kv.value(), "property schema"))});
         put(out, 6, props);
     }
     if (auto p = s.if_contains("example"))
@@ -891,18 +902,123 @@ json::array encode_schema(const json::object &s) {
         if (auto p = s.if_contains(k))
             put(out, i, schemas(*p, i != 18));
     if (auto p = s.if_contains("not"))
-        put(out, 19, encode_schema(object(*p, "schema.not")));
+        put(out, 19, encode_native_schema(object(*p, "schema.not")));
     trim(out);
     return out;
 }
+} // namespace
+
+json::array encode_schema(const json::object &s) {
+    return encode_native_schema(prepare_schema(s));
+}
+
+namespace {
+void ignored_parameter(json::array &ignored, std::string_view name) {
+    json::value value(name);
+    if (std::find(ignored.begin(), ignored.end(), value) == ignored.end()) ignored.push_back(std::move(value));
+}
+void discard_parameter(json::object &object, std::string_view key, json::array &ignored,
+                       std::string_view name) {
+    if (object.erase(key)) ignored_parameter(ignored, name);
+}
+void discard_gemini_controls(json::object &body, std::string model, json::array &ignored) {
+    if (auto cached = body.if_contains("cachedContent")) {
+        if (!cached->is_string()) invalid("cachedContent must be a string");
+        discard_parameter(body, "cachedContent", ignored, "cachedContent");
+    }
+    if (auto generation = body.if_contains("generationConfig"); generation && generation->is_object()) {
+        auto &g = generation->as_object();
+        if (auto count = g.if_contains("candidateCount"); count &&
+            (count->is_int64() || count->is_uint64()) && number(*count) > 1)
+            discard_parameter(g, "candidateCount", ignored, "generationConfig.candidateCount");
+        for (auto key : {"speechConfig", "routingConfig", "modelSelectionConfig"})
+            if (auto p = g.if_contains(key)) {
+                object(*p, key);
+                discard_parameter(g, key, ignored, std::string("generationConfig.") + key);
+            }
+        if (auto timestamp = g.if_contains("audioTimestamp")) {
+            if (!timestamp->is_bool()) invalid("audioTimestamp must be boolean");
+            discard_parameter(g, "audioTimestamp", ignored, "generationConfig.audioTimestamp");
+        }
+        if (auto modalities = g.if_contains("responseModalities")) {
+            bool audio = false;
+            for (const auto &mode : array(*modalities, "responseModalities")) {
+                auto value = upper(str(mode));
+                if (value != "TEXT" && value != "IMAGE" && value != "AUDIO")
+                    invalid("Unsupported response modality");
+                audio = audio || value == "AUDIO";
+            }
+            if (audio) discard_parameter(g, "responseModalities", ignored, "generationConfig.responseModalities");
+        }
+    }
+    if (auto config = body.if_contains("toolConfig"); config && config->is_object())
+        if (auto calling = config->as_object().if_contains("functionCallingConfig"); calling && calling->is_object()) {
+            auto &f = calling->as_object();
+            if (auto mode = f.if_contains("mode"); mode && (*mode == "ANY" || *mode == "VALIDATED"))
+                discard_parameter(f, "mode", ignored, "toolConfig.functionCallingConfig.mode");
+        }
+    std::transform(model.begin(), model.end(), model.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (auto tools = body.if_contains("tools"); tools && tools->is_array())
+        for (auto &value : tools->as_array()) {
+            object(value, "tool");
+            auto &tool = value.as_object();
+            for (auto key : {"codeExecution", "googleMaps", "urlContext"})
+                if (auto p = tool.if_contains(key); p &&
+                    (image_model(model) || (std::string_view(key) != "codeExecution" && !model.starts_with("gemini-")))) {
+                    keys(object(*p, key), {}, key);
+                    discard_parameter(tool, key, ignored, std::string("tools.") + key);
+                }
+            for (auto key : {"retrieval", "computerUse", "fileSearch", "enterpriseWebSearch"})
+                if (auto p = tool.if_contains(key)) {
+                    object(*p, key);
+                    discard_parameter(tool, key, ignored, std::string("tools.") + key);
+                }
+        }
+    if (auto settings = body.if_contains("safetySettings"); settings && settings->is_array()) {
+        auto &values = settings->as_array();
+        for (auto it = values.begin(); it != values.end();) {
+            auto &setting = object(*it, "safety setting");
+            auto threshold = string_or(setting, "threshold");
+            if (string_or(setting, "category") == "HARM_CATEGORY_CIVIC_INTEGRITY" &&
+                (threshold == "BLOCK_LOW_AND_ABOVE" || threshold == "BLOCK_MEDIUM_AND_ABOVE" || threshold == "BLOCK_ONLY_HIGH")) {
+                keys(setting, {"category", "threshold"}, "safety setting");
+                it = values.erase(it);
+                ignored_parameter(ignored, "safetySettings.HARM_CATEGORY_CIVIC_INTEGRITY");
+            } else ++it;
+        }
+    }
+}
+void prepare_optional_schema(json::object &owner, std::string_view key, Request &request,
+                             std::string_view name, bool discard) {
+    auto value = owner.if_contains(key);
+    if (!value) return;
+    if (discard && value->is_bool()) {
+        discard_parameter(owner, key, request.ignored_parameters, name);
+        return;
+    }
+    try {
+        auto schema = prepare_schema(object(*value, "schema"), &request.ignored_parameters, name, discard);
+        // Concrete types and unions are checked here too, so a capability
+        // failure can drop this optional schema before transport validation.
+        encode_native_schema(schema);
+        *value = std::move(schema);
+    } catch (const UnsupportedSchema &) {
+        if (!discard) throw;
+        discard_parameter(owner, key, request.ignored_parameters, name);
+    }
+}
+} // namespace
 
 Request normalize_gemini(std::string model, const json::object &input, bool stream,
                          const Config &config) {
     auto canonical = input;
     canonical_gemini(canonical);
+    if (!config.ignore_unsupported_parameters && canonical.if_contains("cachedContent"))
+        invalid("Gemini request: unsupported field cachedContent");
     keys(canonical,
          {"contents", "systemInstruction", "generationConfig", "tools", "toolConfig",
-          "safetySettings", "ais2api"},
+          "safetySettings", "ais2api", "cachedContent"},
          "Gemini request");
     Request r;
     r.model = model_name(std::move(model), config);
@@ -938,6 +1054,22 @@ Request normalize_gemini(std::string model, const json::object &input, bool stre
         family_defaults["safetySettings"] = safety;
     }
     merge_request_defaults(r.gemini, family_defaults);
+    if (config.ignore_unsupported_parameters)
+        discard_gemini_controls(r.gemini, r.model, r.ignored_parameters);
+    // Do this once at each schema root so local references resolve against the
+    // caller's complete schema. Property names and tool arguments remain opaque.
+    if (auto g = r.gemini.if_contains("generationConfig"); g && g->is_object())
+        prepare_optional_schema(g->as_object(), "responseSchema", r,
+                                "generationConfig.responseSchema", config.ignore_unsupported_parameters);
+    if (auto tools = r.gemini.if_contains("tools"); tools && tools->is_array())
+        for (auto &tool : tools->as_array())
+            if (tool.is_object())
+                if (auto functions = tool.as_object().if_contains("functionDeclarations"); functions && functions->is_array())
+                    for (auto &function : functions->as_array())
+                        if (function.is_object())
+                            for (auto key : {"parameters", "parametersJsonSchema"})
+                                prepare_optional_schema(function.as_object(), key, r,
+                                                        "tools.functionDeclarations.parameters", config.ignore_unsupported_parameters);
     auto contents = r.gemini.if_contains("contents");
     if (!contents)
         invalid("contents is required");
@@ -1475,8 +1607,37 @@ json::object openai_message(const json::object &content, Store *store, std::stri
 }
 } // namespace
 
-Request normalize_openai(const json::object &input, const Config &config, Store *store,
+Request normalize_openai(const json::object &raw_input, const Config &config, Store *store,
                          std::string principal) {
+    auto input = raw_input;
+    json::array discarded;
+    // Only recognized optional controls are eligible for opt-in dropping.
+    // Content, credentials, arbitrary unknown fields and malformed values are
+    // still validated normally; never retry a blanket 400 with a weaker body.
+    for (auto key : {"seed", "logit_bias", "service_tier"})
+        if (auto value = input.if_contains(key)) {
+            if (!config.ignore_unsupported_parameters)
+                invalid(std::string("OpenAI request: unsupported field ") + key);
+            if (std::string_view(key) == "seed" && !(value->is_int64() || value->is_uint64()))
+                invalid("seed must be an integer");
+            if (std::string_view(key) == "logit_bias")
+                for (const auto &entry : object(*value, "logit_bias"))
+                    if (!entry.value().is_number()) invalid("logit_bias values must be numeric");
+            if (std::string_view(key) == "service_tier" &&
+                (!value->is_string() || (*value != "auto" && *value != "default" && *value != "flex" && *value != "priority" && *value != "scale")))
+                invalid("Invalid service_tier");
+            discard_parameter(input, key, discarded, key);
+        }
+    if (config.ignore_unsupported_parameters) {
+        if (auto n = input.if_contains("n"); n && (n->is_int64() || n->is_uint64()) && number(*n) > 1)
+            discard_parameter(input, "n", discarded, "n");
+        if (auto persistence = input.if_contains("store"); persistence && persistence->is_bool() && persistence->as_bool())
+            discard_parameter(input, "store", discarded, "store");
+        if (auto parallel = input.if_contains("parallel_tool_calls"); parallel && parallel->is_bool() && !parallel->as_bool())
+            discard_parameter(input, "parallel_tool_calls", discarded, "parallel_tool_calls");
+        if (auto effort = input.if_contains("reasoning_effort"); effort && (*effort == "none" || *effort == "xhigh"))
+            discard_parameter(input, "reasoning_effort", discarded, "reasoning_effort");
+    }
     keys(input,
          {"model",
           "messages",
@@ -1514,6 +1675,8 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
         invalid("stream must be boolean");
     if (auto v = input.if_contains("parallel_tool_calls"); v && !v->is_bool())
         invalid("parallel_tool_calls must be boolean");
+    if (auto v = input.if_contains("parallel_tool_calls"); v && !v->as_bool())
+        invalid("parallel_tool_calls=false is not supported by this upstream");
     json::array contents, system;
     bool conversation_started = false, previous_tool = false;
     std::map<std::string, std::string> call_names;
@@ -1719,8 +1882,13 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
                 invalid("json_schema is required");
             auto &schema = object(*q, "json_schema");
             keys(schema, {"name", "description", "strict", "schema"}, "json_schema");
-            if (bool_or(schema, "strict"))
-                invalid("strict JSON Schema is not supported by this upstream");
+            if (auto strict = schema.if_contains("strict"); strict && !strict->is_bool())
+                invalid("json_schema.strict must be boolean");
+            if (bool_or(schema, "strict")) {
+                if (!config.ignore_unsupported_parameters)
+                    invalid("strict JSON Schema is not supported by this upstream");
+                ignored_parameter(discarded, "response_format.json_schema.strict");
+            }
             auto s = schema.if_contains("schema");
             if (!s)
                 invalid("json_schema.schema is required");
@@ -1740,16 +1908,23 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
                 invalid("Only function tools are supported in standard OpenAI tools");
             auto f = object(required_value(t, "function"), "function");
             if (auto strict = f.if_contains("strict")) {
-                if (!strict->is_bool() || strict->as_bool())
+                if (!strict->is_bool() || (strict->as_bool() && !config.ignore_unsupported_parameters))
                     invalid("strict function schema is not supported");
+                if (strict->as_bool()) ignored_parameter(discarded, "tools.function.strict");
                 f.erase("strict");
             }
             functions.push_back(f);
         }
         body["tools"] = json::array{json::object{{"functionDeclarations", functions}}};
     }
-    if (auto p = input.if_contains("tool_choice"))
-        tool_choice(body, *p);
+    if (auto p = input.if_contains("tool_choice")) {
+        json::object choice;
+        tool_choice(choice, *p);
+        auto &calling = choice.at("toolConfig").as_object().at("functionCallingConfig").as_object();
+        if (config.ignore_unsupported_parameters && string_or(calling, "mode") == "ANY")
+            ignored_parameter(discarded, "tool_choice");
+        else body["toolConfig"] = choice.at("toolConfig");
+    }
     if (auto p = input.if_contains("ais2api")) {
         auto &ext = object(*p, "ais2api");
         keys(ext, {"gemini"}, "ais2api");
@@ -1760,6 +1935,8 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
         }
     }
     auto request = normalize_gemini(model, body, bool_or(input, "stream"), config);
+    for (const auto &parameter : discarded)
+        ignored_parameter(request.ignored_parameters, str(parameter));
     request.protocol = Protocol::openai;
     request.principal = std::move(principal);
     if (auto p = input.if_contains("stream_options")) {

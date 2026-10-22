@@ -152,7 +152,7 @@ TEST_CASE("Responses defaults and input media retain the supported codec contrac
                 .as_object()
                 .at("url") == "https://example.com/image.png");
     auto schema = responses_to_chat(read(
-        R"({"model":"m","input":"x","text":{"format":{"type":"json_schema","name":"answer","strict":false,"schema":{"type":"object","properties":{"answer":{"type":"string"}}}}}})"));
+        R"({"model":"m","input":"x","text":{"format":{"type":"json_schema","name":"answer","strict":false,"schema":{"type":"object","title":"Answer","additionalProperties":false,"properties":{"answer":{"type":"string","default":"yes"}}}}}})"));
     REQUIRE(normalize_openai(schema, Config{})
                 .gemini.at("generationConfig")
                 .as_object()
@@ -223,4 +223,81 @@ TEST_CASE("Responses native text and reasoning signatures replay in their respec
                 .at("inlineData")
                 .as_object()
                 .at("data") == "AQID");
+}
+
+TEST_CASE("Responses opt-in sanitizer discards known optional features", "[responses]") {
+    auto input = read(R"({"model":"m","input":"hello","store":true,"background":true,"previous_response_id":"resp_old","conversation":{"id":"conv_old"},"include":["reasoning.encrypted_content"],"truncation":"auto","service_tier":"priority","parallel_tool_calls":false,"reasoning":{"effort":"low","summary":"concise"},"tools":[{"type":"web_search"},{"type":"function","name":"f"},{"type":"file_search","vector_store_ids":["vs_1"]}],"tool_choice":{"type":"web_search"}})");
+    json::array ignored;
+    discard_unsupported_responses(input, ignored);
+    REQUIRE(ignored.size() == 12);
+    REQUIRE(input.at("tools").as_array().size() == 1);
+    REQUIRE(input.at("reasoning").as_object().at("effort") == "low");
+    REQUIRE(input.at("input") == "hello");
+    REQUIRE_NOTHROW(responses_to_chat(input));
+    REQUIRE_FALSE(responses_options(input).contains("tool_choice"));
+}
+TEST_CASE("Responses sanitizer preserves malformed and unknown fields", "[responses]") {
+    for (auto field : {R"("store":"true")", R"("previous_response_id":4)",
+                       R"("conversation":{"oops":"x"})", R"("include":["typo"])",
+                       R"("truncation":"automatic")", R"("service_tier":"fastest")",
+                       R"("parallel_tool_calls":0)", R"("reasoning":{"summary":"typo"})",
+                       R"("tools":[{"type":"web_serch"}])",
+                       R"("tools":[{"type":"web_search","search_context_size":4}])",
+                       R"("tool_choice":{"type":"web_search","typo":true})"}) {
+        auto input = read(std::string(R"({"model":"m","input":"hello",)") + field + "}");
+        auto original = input;
+        json::array ignored;
+        discard_unsupported_responses(input, ignored);
+        REQUIRE(input == original);
+        REQUIRE(ignored.empty());
+        REQUIRE_THROWS_AS(responses_to_chat(input), Error);
+    }
+}
+
+TEST_CASE("Responses sanitizer removes strict flags before echo options", "[responses]") {
+    auto input = read(R"({"model":"m","input":"x","tools":[{"type":"function","name":"f","strict":true}],"text":{"format":{"type":"json_schema","name":"r","strict":true,"schema":{"type":"object"}}}})");
+    json::array ignored;
+    discard_unsupported_responses(input, ignored);
+    REQUIRE(ignored.size() == 2);
+    auto options = responses_options(input);
+    REQUIRE_FALSE(options.at("tools").as_array()[0].as_object().contains("strict"));
+    REQUIRE_FALSE(options.at("text").as_object().at("format").as_object().contains("strict"));
+    REQUIRE(input.at("text").as_object().at("format").as_object().contains("schema"));
+}
+
+TEST_CASE("Responses sanitizer understands common built-in tool configuration", "[responses]") {
+    for (auto tool : {
+        R"({"type":"code_interpreter","container":{"type":"auto","file_ids":["file_1"],"memory_limit":"4g"}})",
+        R"({"type":"web_search","filters":{"allowed_domains":["example.com"]},"user_location":{"type":"approximate","city":"Tokyo","country":"JP","region":"Tokyo","timezone":"Asia/Tokyo"}})",
+        R"({"type":"mcp","server_label":"docs","headers":{"Authorization":"secret"},"allowed_tools":["lookup"],"require_approval":"never"})",
+        R"({"type":"mcp","server_label":"docs","allowed_tools":{"tool_names":["lookup"],"read_only":true},"require_approval":{"always":{"tool_names":["write"]},"never":{"tool_names":["lookup"]}}})"}) {
+        auto input = read(std::string(R"({"model":"m","input":"x","tools":[)") + tool + "]}");
+        json::array ignored;
+        discard_unsupported_responses(input, ignored);
+        REQUIRE(input.at("tools").as_array().empty());
+        REQUIRE(ignored.size() == 1);
+        REQUIRE_NOTHROW(responses_to_chat(input));
+    }
+}
+TEST_CASE("Responses sanitizer preserves malformed built-in configuration", "[responses]") {
+    for (auto tool : {
+        R"({"type":"code_interpreter","container":{"type":"auto","memory_limit":"2g"}})",
+        R"({"type":"code_interpreter","container":{"type":"auto","file_ids":[3]}})",
+        R"({"type":"code_interpreter","container":{"type":"auto","typo":true}})",
+        R"({"type":"web_search","filters":{"allowed_domains":[false]}})",
+        R"({"type":"web_search","filters":{"allowed_domains":[],"typo":true}})",
+        R"({"type":"web_search","user_location":{"type":"approximate","city":1}})",
+        R"({"type":"web_search","user_location":{"type":"exact"}})",
+        R"({"type":"mcp","server_label":"docs","headers":{"x":3}})",
+        R"({"type":"mcp","server_label":"docs","allowed_tools":{"tool_names":[],"read_only":"true"}})",
+        R"({"type":"mcp","server_label":"docs","require_approval":{"always":{"tool_names":[],"typo":true}}})",
+        R"({"type":"mcp","server_label":"docs","require_approval":"sometimes"})"}) {
+        auto input = read(std::string(R"({"model":"m","input":"x","tools":[)") + tool + "]}");
+        auto original = input;
+        json::array ignored;
+        discard_unsupported_responses(input, ignored);
+        REQUIRE(input == original);
+        REQUIRE(ignored.empty());
+        REQUIRE_THROWS_AS(responses_to_chat(input), Error);
+    }
 }

@@ -64,6 +64,12 @@ Cookie 推送使用独立的 `cookie_import_key`，默认空值禁用。导入�
 
 ## 当前明确限制
 
+2026-10-22 针对 Cherry Studio schema 拒绝问题完成了三种数据 API 的适配审查：常见非 strict JSON Schema 经过统一转换，新增本地引用展开及资源上限，并修复 HTTP 请求头兼容问题。MSVC Release 与全量 CTest 通过；详细修复、接口矩阵、降级语义及未验证项见 [API 兼容审查](reports/api-compatibility-2026-10-22.md)。
+
+随后新增默认关闭的 `ignore_unsupported_parameters` 热更新开关，允许显式舍弃已知不支持的可选参数继续生成。前端类型检查、含 WebUI 的 MSVC Release 构建及全量 CTest（207 个测试、3241 项断言）通过；开关关闭/开启/再关闭与三种 API 普通/SSE 路径均由本机合成 HTTP 回归覆盖。
+
+同日修复安装目录旧桥接与新 exe 混用导致的 browser_incompatible：脚本改为内嵌并增加版本/阶段诊断，完整 CTest 208 个用例、3250 项断言和脚本 37 项回归通过；本机安装已更新，Flash-Lite 真实生成复测 HTTP 200。证据与范围见 [桥接版本错配修复](reports/browser-embedded-bridge-2026-10-22.md)。
+
 thinkingBudget 和 seed 没有已核实的私有协议映射，为兼容 Gemini 客户端接受合法值但忽略，并记录字段名；不保证预算或随机种子生效，thinkingBudget=0 也不关闭模型思考。includeThoughts=false 在网关隐藏思考文本，保留签名、工具调用和 usage。强制函数调用 ANY/required/named、VALIDATED 和 strict JSON Schema 仍明确拒绝。thinkingLevel、原生思考块与逐块签名已有编解码。不能据此声称所有 Gemini 参数或 OpenAI 可选字段完整支持；详见 [协议合同](protocol.md)。
 
 当前只允许一个驻留上下文和一个生成任务；队列与资源限额可配置，尚无多驻留上下文并发调度。统计保存账号/模型的调用计数及 usage；阶段耗时与字节量写入脱敏日志。日志不写正文、Cookie、API Key 或签名。

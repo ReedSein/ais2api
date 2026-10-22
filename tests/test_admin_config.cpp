@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/management.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cstdlib>
 using namespace ais2api;
 namespace {
 struct AdminDirectory {
@@ -9,6 +10,53 @@ struct AdminDirectory {
     AdminDirectory() { fs::create_directories(path); }
     ~AdminDirectory() { std::error_code ec; fs::remove_all(path, ec); }
 };
+struct CompatibilityEnvironment {
+    static constexpr const char* key = "AIS2API_IGNORE_UNSUPPORTED_PARAMETERS";
+    std::optional<std::string> previous;
+    CompatibilityEnvironment() {
+        if (const auto* value = std::getenv(key)) previous = value;
+        set("");
+    }
+    ~CompatibilityEnvironment() { set(previous ? previous->c_str() : ""); }
+    void set(const char* value) {
+#ifdef _WIN32
+        _putenv_s(key, value);
+#else
+        if (*value) setenv(key, value, 1);
+        else unsetenv(key);
+#endif
+    }
+};
+}
+TEST_CASE("unsupported parameter compatibility config persists and updates without restart", "[config][admin]") {
+    CompatibilityEnvironment environment;
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK_FALSE(Config{}.ignore_unsupported_parameters);
+    CHECK_FALSE(cfg.ignore_unsupported_parameters);
+    CHECK(cfg.to_json().at("ignore_unsupported_parameters") == false);
+    auto enabled = cfg.patched({{"ignore_unsupported_parameters", true}});
+    CHECK(enabled.ignore_unsupported_parameters);
+    CHECK_FALSE(restart_required(cfg, enabled));
+    enabled.save();
+    CHECK(Config::load(cfg.config_file).ignore_unsupported_parameters);
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
+    auto disabled = enabled.patched({{"ignore_unsupported_parameters", false}});
+    CHECK_FALSE(disabled.ignore_unsupported_parameters);
+    CHECK_FALSE(restart_required(enabled, disabled));
+    for (const auto& invalid : json::array{0, 1, "true", nullptr, json::array{}, json::object{}})
+        CHECK_THROWS_AS(cfg.patched({{"ignore_unsupported_parameters", invalid}}), Error);
+
+    environment.set("false");
+    CHECK_FALSE(Config::load(cfg.config_file).ignore_unsupported_parameters);
+    CHECK(Config::load(cfg.config_file, {{"ignore_unsupported_parameters", true}}).ignore_unsupported_parameters);
+    environment.set("true");
+    CHECK(Config::load(dir.path / "missing.json").ignore_unsupported_parameters);
+    for (const auto* invalid : {"1", "\"true\"", "null", "invalid"}) {
+        environment.set(invalid);
+        CHECK_THROWS_AS(Config::load(cfg.config_file), Error);
+    }
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
 }
 TEST_CASE("management config authentication and origins are independent", "[config][admin]") {
     AdminDirectory dir;

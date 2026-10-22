@@ -68,6 +68,7 @@ TEST_CASE("loading a partial configuration fills defaults, preserves values and 
     CHECK(migrated.ends_with('\n'));
     const auto persisted = json::parse(migrated).as_object();
     CHECK(persisted.at("version") == 1);
+    CHECK(persisted.at("ignore_unsupported_parameters") == false);
     CHECK(persisted.at("port") == 19000);
     CHECK(persisted.at("data_dir") == "relative-data");
     CHECK(persisted.at("browser_executable") == "");

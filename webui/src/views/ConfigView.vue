@@ -13,7 +13,7 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'data_dir' | 'browser_executable' | 'headless' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
@@ -29,6 +29,13 @@ interface FieldDef {
 
 const U32 = 4294967295
 const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
+  {
+    title: 'API 兼容性',
+    icon: 'globe',
+    fields: [
+      { key: 'ignore_unsupported_parameters', label: '忽略不支持的参数', desc: '默认关闭。开启后，数据 API 会丢弃上游明确不支持的可选参数；保存后立即生效。', type: 'bool' },
+    ],
+  },
   {
     title: '网络',
     icon: 'globe',

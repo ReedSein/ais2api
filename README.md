@@ -74,6 +74,10 @@ curl http://127.0.0.1:18451/v1/chat/completions \
 
 Gemini 接口为 `/v1beta/models/MODEL:generateContent` 与 `:streamGenerateContent`；OpenAI 为 `/v1/chat/completions` 与 `/v1/responses`。Responses 支持文本、图片输入、完整历史、函数调用、JSON 返回及命名 SSE 事件，示例与边界见 [Responses 使用说明](docs/responses.md)。模型列表仅来自实时发现、缓存或显式配置，不内置声称可用的模型清单。高级内容通过 `ais2api` 命名空间往返，详见 [协议合同](docs/protocol.md) 和 [扩展 schema](schemas/protocol-extensions.schema.json)。
 
+Cherry Studio 使用 OpenAI 兼容提供商时，Base URL 填 `http://127.0.0.1:18451/v1`，模型从列表选择。工具和非 strict 结构化输出接受常见 `additionalProperties`、`title`、`default` 和本地 `$ref`；网页上游不能原生执行的 schema 限制转换为模型描述提示，并记录降级字段名，客户端仍需校验输出。三种 API 的兼容范围、已修复问题与测试边界见 [API 兼容审查](docs/reports/api-compatibility-2026-10-22.md)。
+
+需要舍弃已知不支持的可选参数并继续生成时，在管理控制台「配置 → API 兼容性」打开「忽略不支持的参数」，或在 `config.json` 设置 `"ignore_unsupported_parameters": true` 后执行 `ais2api config reload`。默认关闭；支持环境变量 `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`。开启后，strict、强制工具选择、多候选等控制项及已识别的不支持 schema 约束被移除，字段名写入日志；请求按剩余参数执行，不保证被舍弃的能力。未知参数、无效 JSON、保留内容格式错误、字段冲突和资源超限仍会拒绝，详见 [兼容开关](docs/protocol.md#optional-unsupported-parameter-dropping)。
+
 支持完整历史的真 role 转发与客户端思考签名往返：保留连续同角色消息及原生部件，OpenAI 中途系统提示保留在原位置，工具签名通过 `call_gemini_...` 调用 ID 回传。使用方法与客户端限制见 [真 role 与签名](docs/true-role.md)。
 
 RikkaHub 的 Google 提供商 Base URL 填 `http://127.0.0.1:18451/v1beta`；SillyTavern 选择 Google AI Studio，反向代理填根地址 `http://127.0.0.1:18451`，代理密码填本服务 API Key（移动设备需使用可访问的服务地址）。支持客户端的默认安全设置、单候选、思考显示开关和工具字段别名。`thinkingBudget` 与 `seed` 当前接受但忽略，不保证预算或固定随机种子生效；具体边界见 [协议合同](docs/protocol.md)。
@@ -122,6 +126,8 @@ ais2api stop
 浏览器上下文独立于标签页，每个请求固定其账号、上下文和一次性请求快照。模型返回的 thoughtSignature 与浏览器快照是两种不同数据。默认一个浏览器进程、一个驻留账号、一个生成请求，最多排队 8 个请求；取消贯穿 HTTP、原生层和浏览器读取。
 
 浏览器桥接使用 BYOB 分块和逐块确认；生成输出不完整积存在无界队列。内联媒体和非流式响应具有独立对象上限，并不意味着整个 Chromium 进程的 RSS 可以由 C++ 精确限制。
+
+桥接脚本随可执行文件内嵌，避免只更新 exe 后加载旧 browser/bridge.js。管理诊断显示桥接哈希及当前阶段；本次版本错配修复及真实复测见 [修复记录](docs/reports/browser-embedded-bridge-2026-10-22.md)。
 
 原理参考 [aistudio-api-termux](https://github.com/ReedSein/aistudio-api-termux/tree/84b50663fcae79058fe33e0e45b5c3452da7c461)。实现代码和回归样例在本项目独立编写；上游私有协议变化仍需更新适配器。浏览器行为与验证限制见 [docs/browser.md](docs/browser.md)。
 

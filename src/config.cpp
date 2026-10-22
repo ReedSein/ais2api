@@ -144,6 +144,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
           {"proxy", proxy},
           {"headless", headless},
+          {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"limits",
            {{"request_bytes", limits.request_bytes},
             {"object_bytes", limits.object_bytes},
@@ -204,7 +205,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
       e[pair.second] = v;
   }
   for (auto pair :
-       {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"}}) {
+       {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
+        {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first)) {
       try {
@@ -268,7 +270,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "headless", "limits", "model_aliases",
+             "proxy", "headless", "ignore_unsupported_parameters", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -307,6 +309,9 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");
   c.headless = o.at("headless").as_bool();
+  if (!o.at("ignore_unsupported_parameters").is_bool())
+    throw Error(400, "invalid_config", "ignore_unsupported_parameters must be boolean");
+  c.ignore_unsupported_parameters = o.at("ignore_unsupported_parameters").as_bool();
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
       !o.at("model_defaults").is_object())

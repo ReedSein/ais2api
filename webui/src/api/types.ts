@@ -124,6 +124,7 @@ export interface Config {
   browser_executable?: string
   proxy?: string
   headless?: boolean
+  ignore_unsupported_parameters?: boolean
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>

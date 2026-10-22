@@ -58,6 +58,7 @@ for event in client.responses.create(
 
 - 支持 `instructions`、`stream`、`max_output_tokens`、`temperature`、`top_p`、`reasoning.effort`、函数工具与 `tool_choice: "auto" / "none"`，以及 `text.format` 的 text、json_object 和非 strict json_schema。参数仍受现有 [协议合同](protocol.md) 的上游限制约束。
 - 默认不保存响应；可省略 `store` 或传 `false`。`store: true`、非空 `previous_response_id` / `conversation`、`background: true`、输入项引用、自动截断、内置工具、strict schema、强制函数调用、`parallel_tool_calls: false` 和指定推理摘要均明确拒绝。没有响应查询、删除、取消或 WebSocket 接口；HTTP 断连会取消当前生成。
+- 可通过全局 `ignore_unsupported_parameters: true` 选择舍弃已识别的不支持可选参数再生成，包括上述存储、续接、后台和控制项；仍只使用本次提交的完整历史、同步生成且不保存响应。输入项引用、文件内容和无效请求不会自动改写。开关默认关闭，配置可热更新；完整清单见 [兼容开关](protocol.md#optional-unsupported-parameter-dropping)。
 - JSON 输出使用 `object: "response"`、`output`、`status` 和 `usage`。文本位于 `output[].content[]` 的 `output_text` 项；SDK 的 `output_text` 为客户端便捷属性。usage 使用 `input_tokens`、`output_tokens`、`total_tokens` 和缓存/推理 token 明细。
 - 流式响应使用命名 SSE，`event` 名称等于 JSON 的 `type`，所有事件带递增 `sequence_number`。正常结束为 `response.completed`，token 上限或过滤为 `response.incomplete`，已发送内容后发生错误为 `response.failed`；不发送 `[DONE]`。思考文本和可见文本分别发送，函数参数在上游完整返回时发送。
 - 请求、媒体、输出聚合和流式状态遵守资源限额；超限会报错。兼容验证使用合成生成源和本机真实 HTTP，不代表已验证真实账号的 Responses 调用。

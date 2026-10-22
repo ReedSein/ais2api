@@ -68,6 +68,8 @@ Options may precede or follow the command. Use a value after the option or `--op
 
 The effective configuration combines defaults, the configuration file, `AIS2API_*` environment overrides, then explicit CLI options. `start` preserves its effective settings in the child process without adding proxy credentials to the child command line. Keep using the same `--data-dir` for all commands targeting that service. Paths with spaces should be quoted by the shell.
 
+`ignore_unsupported_parameters` is a hot-reloadable config boolean, default false. Set it to true and run `ais2api config reload`, or set `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`, to discard known unsupported optional generation controls. No dedicated CLI flag is required. Dropped fields are logged by name; see [compatibility behavior](protocol.md#optional-unsupported-parameter-dropping).
+
 ## Accounts and keys
 
 ```text

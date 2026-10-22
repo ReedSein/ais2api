@@ -118,6 +118,9 @@ TEST_CASE("management HTTP authentication origins and disabled configuration", "
     for (const auto& key : {std::string{}, server.api, server.importer})
         CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, key).result_int() == 401);
     CHECK(server.get("/status").result_int() == 200);
+    auto diagnostics = server.get("/diagnostics");
+    REQUIRE(diagnostics.result_int() == 200);
+    CHECK(object(diagnostics).at("browser").as_object().at("synthetic") == true);
     CHECK(server.call(http::verb::get, "/v1/models", {}, server.admin).result_int() == 401);
     CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin, "https://denied.example").result_int() == 403);
     auto allowed = server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin, "https://allowed.example");

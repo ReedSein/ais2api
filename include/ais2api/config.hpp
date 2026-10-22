@@ -32,6 +32,7 @@ struct Config {
     fs::path browser_executable;
     std::string proxy;
     bool headless = true;
+    bool ignore_unsupported_parameters = false;
     Limits limits;
     json::object model_aliases;
     json::array configured_models;

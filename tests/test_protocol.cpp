@@ -105,9 +105,87 @@ TEST_CASE("Schemas encode recursive properties union and constraints without met
         R"({"type":"string","oneOf":[{"type":"string","enum":["a"]},{"type":"string","enum":["b"]}],"example":"a"})"));
     REQUIRE(union_schema[16].as_array().size() == 2);
     REQUIRE(union_schema[15].as_array()[2] == "a");
-    REQUIRE_THROWS_AS(encode_schema(obj(R"({"type":"object","additionalProperties":false})")),
-                      Error);
-    REQUIRE_THROWS_AS(encode_schema(obj(R"({"type":"string","title":"unsupported"})")), Error);
+    auto closed = encode_schema(obj(R"({"type":"object","additionalProperties":false})"));
+    REQUIRE(closed[0] == 6);
+    REQUIRE(closed[2].as_string().find("Do not include") != json::string::npos);
+    auto title = encode_schema(obj(R"({"type":"string","title":"Label","default":"yes"})"));
+    REQUIRE(title[0] == 1);
+    REQUIRE(title[2].as_string().find("Label") != json::string::npos);
+}
+
+TEST_CASE("Client schemas lower nested metadata maps and local references without new wire fields", "[protocol][schema]") {
+    auto encoded = encode_schema(obj(R"({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "$defs":{"a/b~c":{"type":"string","title":"Query","default":"hello"}},
+        "type":"object","additionalProperties":false,
+        "properties":{
+            "additionalProperties":{"$ref":"#/$defs/a~1b~0c"},
+            "options":{"type":"object","additionalProperties":{"type":"integer"}},
+            "enabled":{"type":"boolean","enum":[true,false]},
+            "kind":{"type":"string","const":"lookup"},
+            "list":{"type":"array","items":{"$ref":"#/$defs/a~1b~0c"}}
+        },"required":["additionalProperties"]})"));
+    REQUIRE(encoded[0] == 6);
+    REQUIRE(encoded.size() <= 23);
+    const auto &props = encoded[6].as_array();
+    REQUIRE(props[0].as_array()[0] == "additionalProperties");
+    REQUIRE(props[0].as_array()[1].as_array()[0] == 1);
+    REQUIRE(props[1].as_array()[1].as_array()[2].as_string().find("integer") != json::string::npos);
+    REQUIRE(props[2].as_array()[1].as_array()[2].as_string().find("true,false") != json::string::npos);
+    REQUIRE(props[3].as_array()[1].as_array()[4] == json::array{"lookup"});
+    REQUIRE(props[4].as_array()[1].as_array()[5] == props[0].as_array()[1]);
+    REQUIRE(encode_schema(obj(R"({"type":"object","additionalProperties":true})")) == json::array{6});
+    REQUIRE(encode_schema(obj(R"({"definitions":{"T":{"type":"integer"}},"$ref":"#/definitions/T"})")) == json::array{3});
+    REQUIRE(encode_schema(obj(R"({"const":"lookup"})"))[4] == json::array{"lookup"});
+    REQUIRE(encode_schema(obj(R"({"enum":["a","b"]})"))[0] == 1);
+}
+
+TEST_CASE("Schema expansion rejects unresolved recursive remote and conflicting references", "[protocol][schema]") {
+    for (auto source : {
+        R"({"$ref":"#"})",
+        R"({"$ref":"#/$defs/missing"})",
+        R"({"$ref":"https://example.com/schema.json"})",
+        R"({"$defs":{"T":{"type":"string"}},"$ref":"#/$defs/T","type":"integer"})",
+        R"({"type":"object","additionalProperties":7})",
+        R"({"type":"string","minLength":-1})",
+        R"({"type":"object","properties":{"x":{"type":"string","unknownConstraint":true}}})"
+    }) REQUIRE_THROWS_AS(encode_schema(obj(source)), Error);
+    json::object nested{{"type", "string"}};
+    for (unsigned i = 0; i < 66; ++i) nested = json::object{{"type", "array"}, {"items", nested}};
+    REQUIRE_THROWS_AS(encode_schema(nested), Error);
+    json::object properties;
+    for (unsigned i = 0; i < 100; ++i)
+        properties["p" + std::to_string(i)] = json::object{{"$ref", "#/$defs/T"}};
+    auto expanded = json::object{{"type", "object"}, {"properties", properties},
+        {"$defs", json::object{{"T", json::object{{"type", "string"}, {"description", std::string(128 * 1024, 'x')}}}}}};
+    REQUIRE_THROWS_AS(encode_schema(expanded), Error);
+}
+
+TEST_CASE("Cherry style tool schemas normalize in Chat and Gemini and record keyword downgrades", "[protocol][schema]") {
+    auto schema = obj(R"({"type":"object","title":"Search","properties":{"query":{"type":"string","default":"hi"}},"additionalProperties":false})");
+    auto chat = obj(R"({"model":"gemini-test","messages":[{"role":"user","content":"find it"}],"tools":[{"type":"function","function":{"name":"search","parameters":{}}}]})");
+    chat.at("tools").as_array()[0].as_object().at("function").as_object()["parameters"] = schema;
+    auto request = normalize_openai(chat, Config{});
+    REQUIRE(request.ignored_parameters.size() == 3);
+    auto wire = encode_request(request, {}, "s");
+    auto parameters = wire[6].as_array()[0].as_array()[1].as_array()[0].as_array()[2];
+    REQUIRE(parameters.as_array()[0] == 6);
+    REQUIRE(parameters.as_array()[6].as_array()[0].as_array()[0] == "query");
+    auto native = obj(R"({"contents":[{"parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"search","parametersJsonSchema":{}}]}],"generation_config":{"response_json_schema":{}}})");
+    native.at("tools").as_array()[0].as_object().at("functionDeclarations").as_array()[0].as_object()["parametersJsonSchema"] = schema;
+    native.at("generation_config").as_object()["response_json_schema"] = schema;
+    request = normalize_gemini("gemini-test", native, false, Config{});
+    REQUIRE(request.ignored_parameters.size() == 6);
+    wire = encode_request(request, {}, "s");
+    REQUIRE(wire[3].as_array()[8] == parameters);
+    auto invalid_chat = chat;
+    invalid_chat["parallel_tool_calls"] = false;
+    REQUIRE_THROWS_AS(normalize_openai(invalid_chat, Config{}), Error);
+    invalid_chat["parallel_tool_calls"] = true;
+    REQUIRE_NOTHROW(normalize_openai(invalid_chat, Config{}));
+    auto &function = invalid_chat.at("tools").as_array()[0].as_object().at("function").as_object();
+    function["strict"] = true;
+    REQUIRE_THROWS_AS(normalize_openai(invalid_chat, Config{}), Error);
 }
 
 TEST_CASE("Request encoding replaces stale template generation fields", "[protocol]") {

@@ -9,6 +9,8 @@
 #include <memory>
 namespace ais2api {
 namespace browser_detail {
+std::string_view embedded_bridge_source();
+std::string_view embedded_bridge_sha256();
 std::string wire_content_hash(const json::array &wire);
 enum class IdentityVerdict { pending, verified, mismatch, ambiguous };
 IdentityVerdict identity_verdict(const json::object &identity, std::string_view expected_email);

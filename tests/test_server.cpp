@@ -34,10 +34,45 @@ struct LiveServer {
         if(!ready){if(thread.joinable())thread.join();if(failure)std::rethrow_exception(failure);throw std::runtime_error("HTTP test service did not start");}
     }
     ~LiveServer(){try{local_call(config,{{"command","stop"}});}catch(...){}if(thread.joinable())thread.join();std::error_code ec;fs::remove_all(directory,ec);}
-    http::response<http::string_body> call(http::verb method,std::string target,std::string body={},std::string auth={}){
-        net::io_context io;tcp::socket socket(io);socket.connect({net::ip::make_address("127.0.0.1"),config.port});http::request<http::string_body> request(method,target,11);request.set(http::field::host,"127.0.0.1");request.set(http::field::content_type,"application/json");if(!auth.empty())request.set(http::field::authorization,"Bearer "+auth);request.body()=std::move(body);request.prepare_payload();http::write(socket,request);boost::beast::flat_buffer input;http::response_parser<http::string_body> response;response.skip(method==http::verb::head);http::read(socket,input,response);return response.release();
+    http::response<http::string_body> call(http::verb method,std::string target,std::string body={},std::string auth={},std::initializer_list<std::pair<std::string,std::string>> headers={}){
+        net::io_context io;tcp::socket socket(io);socket.connect({net::ip::make_address("127.0.0.1"),config.port});http::request<http::string_body> request(method,target,11);request.set(http::field::host,"127.0.0.1");request.set(http::field::content_type,"application/json");if(!auth.empty())request.set(http::field::authorization,"Bearer "+auth);for(const auto& [name,value]:headers)request.set(name,value);request.body()=std::move(body);request.prepare_payload();http::write(socket,request);boost::beast::flat_buffer input;http::response_parser<http::string_body> response;response.skip(method==http::verb::head);http::read(socket,input,response);return response.release();
     }
 };
+}
+TEST_CASE("HTTP parses media types and Bearer schemes with exact case-insensitive boundaries", "[http]") {
+    LiveServer server;
+    server.config.admin_key = "admin-test-" + random_hex(24);
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json()), true);
+    local_call(server.config, {{"command", "config.reload"}});
+    for (auto scheme : {"bearer ", "bEaReR ", "Bearer   "}) {
+        REQUIRE(server.call(http::verb::get, "/v1/models", {}, {},
+                            {{"Authorization", std::string(scheme) + server.key}}).result_int() == 200);
+        REQUIRE(server.call(http::verb::get, "/api/admin/v1/auth/check", {}, {},
+                            {{"Authorization", std::string(scheme) + server.config.admin_key}}).result_int() == 200);
+    }
+    for (auto scheme : {"BearerX ", "Basic ", "Bearer"}) {
+        REQUIRE(server.call(http::verb::get, "/v1/models", {}, {},
+                            {{"Authorization", std::string(scheme) + server.key}}).result_int() == 401);
+        REQUIRE(server.call(http::verb::get, "/api/admin/v1/auth/check", {}, {},
+                            {{"Authorization", std::string(scheme) + server.config.admin_key}}).result_int() == 401);
+    }
+    for (auto type : {"Application/JSON", "application/json; charset=utf-8", "APPLICATION/JSON \t; charset=UTF-8"}) {
+        auto generation = server.call(http::verb::post, "/v1/chat/completions", "{", server.key,
+                                      {{"Content-Type", type}});
+        REQUIRE(generation.result_int() == 400);
+        REQUIRE(generation.body().find("invalid_json") != std::string::npos);
+        auto management = server.call(http::verb::post, "/api/admin/v1/keys", "{", server.config.admin_key,
+                                      {{"Content-Type", type}});
+        REQUIRE(management.result_int() == 400);
+        REQUIRE(management.body().find("invalid_json") != std::string::npos);
+    }
+    for (auto type : {"application/jsonp", "application/json-extra", "text/json"}) {
+        REQUIRE(server.call(http::verb::post, "/v1/chat/completions", "{}", server.key,
+                            {{"Content-Type", type}}).result_int() == 415);
+        REQUIRE(server.call(http::verb::post, "/api/admin/v1/keys", "{}", server.config.admin_key,
+                            {{"Content-Type", type}}).result_int() == 415);
+    }
+    REQUIRE_FALSE(server.failure);
 }
 TEST_CASE("HTTP exposes data routes and enforces authentication without Google","[http]"){
     LiveServer server;

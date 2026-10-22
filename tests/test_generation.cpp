@@ -276,6 +276,77 @@ json::object await_operation(const Config& config, const json::object& queued) {
 }
 }
 
+TEST_CASE("Cherry style schemas reach the backend across Gemini Chat and Responses in unary and SSE", "[generation][http][schema]") {
+    GenerationServer server;
+    auto schema = json::parse(R"({"type":"object","title":"Search input","$defs":{"Query":{"type":"string","default":"hello"}},"properties":{"query":{"$ref":"#/$defs/Query"}},"required":["query"],"additionalProperties":false})");
+    for (bool streaming : {false, true}) {
+        for (auto protocol : {"gemini", "chat", "responses"}) {
+            const std::string kind(protocol);
+            json::object body;
+            std::string route;
+            if (kind == "gemini") {
+                body = {{"contents", json::parse(R"([{"parts":[{"text":"hello"}]}])")},
+                        {"tools", json::array{json::object{{"functionDeclarations", json::array{json::object{{"name", "search"}, {"parametersJsonSchema", schema}}}}}}},
+                        {"generationConfig", json::object{{"responseMimeType", "application/json"}, {"responseJsonSchema", schema}}}};
+                route = "/v1beta/models/synthetic-schema:" + std::string(streaming ? "streamGenerateContent?alt=sse" : "generateContent");
+            } else if (kind == "chat") {
+                body = {{"model", "synthetic-schema"}, {"stream", streaming},
+                        {"messages", json::parse(R"([{"role":"user","content":"hello"}])")},
+                        {"tools", json::array{json::object{{"type", "function"}, {"function", json::object{{"name", "search"}, {"parameters", schema}, {"strict", false}}}}}},
+                        {"response_format", json::object{{"type", "json_schema"}, {"json_schema", json::object{{"name", "answer"}, {"strict", false}, {"schema", schema}}}}}};
+                route = "/v1/chat/completions";
+            } else {
+                body = {{"model", "synthetic-schema"}, {"stream", streaming}, {"input", "hello"},
+                        {"tools", json::array{json::object{{"type", "function"}, {"name", "search"}, {"parameters", schema}, {"strict", false}}}},
+                        {"text", json::object{{"format", json::object{{"type", "json_schema"}, {"name", "answer"}, {"strict", false}, {"schema", schema}}}}}};
+                route = "/v1/responses";
+            }
+            INFO(kind << ", stream=" << streaming);
+            auto response = server.call(route, json::serialize(body));
+            REQUIRE(response.result_int() == 200);
+            REQUIRE(response[http::field::content_type].starts_with(streaming ? "text/event-stream" : "application/json"));
+            std::lock_guard lock(server.state->mutex);
+            const auto &wire = server.state->wire;
+            const auto &parameters = wire[6].as_array()[0].as_array()[1].as_array()[0].as_array()[2];
+            REQUIRE(parameters == wire[3].as_array()[8]);
+            REQUIRE(parameters.as_array()[0] == 6);
+            REQUIRE(parameters.as_array()[6].as_array()[0].as_array()[0] == "query");
+            REQUIRE(parameters.as_array().size() <= 23);
+        }
+    }
+    REQUIRE(server.state->calls == 6);
+}
+
+TEST_CASE("Compatibility config reload changes all data APIs without restarting", "[generation][http][compat]") {
+    GenerationServer server;
+    auto chat = json::parse(R"({"model":"synthetic-schema","messages":[{"role":"user","content":"hello"}],"parallel_tool_calls":false,"tool_choice":"required","response_format":{"type":"json_schema","json_schema":{"name":"reply","strict":true,"schema":{"type":"object","properties":{"n":{"type":"number","multipleOf":2}}}}}})").as_object();
+    REQUIRE(server.call("/v1/chat/completions", json::serialize(chat)).result_int() == 400);
+    REQUIRE(server.state->calls == 0);
+    server.config.ignore_unsupported_parameters = true;
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json()), true);
+    auto reload = local_call(server.config, {{"command", "config.reload"}});
+    REQUIRE(reload.at("status") == "reloaded");
+    for (bool streaming : {false, true}) {
+        chat["stream"] = streaming;
+        REQUIRE(server.call("/v1/chat/completions", json::serialize(chat)).result_int() == 200);
+        auto responses = json::parse(R"({"model":"synthetic-schema","input":"hello","store":true,"background":true,"previous_response_id":"resp_old","parallel_tool_calls":false,"tools":[{"type":"web_search"}],"tool_choice":"required","text":{"format":{"type":"json_schema","name":"reply","strict":true,"schema":{"type":"string"}}}})").as_object();
+        responses["stream"] = streaming;
+        auto response = server.call("/v1/responses", json::serialize(responses));
+        REQUIRE(response.result_int() == 200);
+        REQUIRE(response.body().find("\"strict\":true") == std::string::npos);
+        REQUIRE(response.body().find("\"background\":true") == std::string::npos);
+        REQUIRE(response.body().find("web_search") == std::string::npos);
+        REQUIRE(server.call(std::string("/v1beta/models/synthetic-schema:") + (streaming ? "streamGenerateContent?alt=sse" : "generateContent"),
+            R"({"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"candidateCount":2},"toolConfig":{"functionCallingConfig":{"mode":"ANY"}},"tools":[{"urlContext":{}}]})").result_int() == 200);
+    }
+    REQUIRE(server.state->calls == 6);
+    server.config.ignore_unsupported_parameters = false;
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json()), true);
+    local_call(server.config, {{"command", "config.reload"}});
+    REQUIRE(server.call("/v1/chat/completions", json::serialize(chat)).result_int() == 400);
+    REQUIRE(server.state->calls == 6);
+}
+
 TEST_CASE("Gemini unary HTTP preserves multiple turns and aggregates synthetic events", "[generation][http]") {
     GenerationServer server;
     auto response = server.call("/v1beta/models/synthetic-unary:generateContent", R"({

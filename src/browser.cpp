@@ -82,6 +82,7 @@ namespace websocket = beast::websocket;
 namespace http = beast::http;
 using tcp = asio::ip::tcp;
 using namespace std::chrono_literals;
+#include "browser_bridge.inc"
 
 [[noreturn]] void incompatible(std::string message) { throw Error(502, "browser_incompatible", std::move(message)); }
 std::string quote_js(std::string_view s) { return json::serialize(json::value(s)); }
@@ -102,26 +103,8 @@ std::string decode64(std::string_view encoded) {
     if (bytes.size() > 32768) incompatible("Browser exceeded byte credit");
     return bytes;
 }
-fs::path executable_directory() {
-#ifdef _WIN32
-    std::wstring buffer(32768, L'\0');
-    const auto size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (size && size < buffer.size()) { buffer.resize(size); return fs::path(buffer).parent_path(); }
-#else
-    std::array<char, 4096> buffer{};
-    const auto size = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
-    if (size > 0) return fs::path(std::string(buffer.data(), static_cast<std::size_t>(size))).parent_path();
-#endif
-    return fs::current_path();
-}
 std::string bridge_source() {
-    std::vector<fs::path> candidates{executable_directory() / "browser" / "bridge.js"};
-#ifdef AIS2API_ASSET_DIR
-    candidates.emplace_back(fs::path(AIS2API_ASSET_DIR) / "bridge.js");
-    candidates.emplace_back(fs::path(AIS2API_ASSET_DIR) / "browser" / "bridge.js");
-#endif
-    for (const auto& path : candidates) if (fs::is_regular_file(path)) return read_file(path, 256 * 1024);
-    incompatible("Cannot locate browser/bridge.js beside the executable or in AIS2API_ASSET_DIR");
+    return std::string(browser_detail::embedded_bridge_source());
 }
 
 class OwnedProcess {
@@ -328,6 +311,10 @@ std::string content_hash(const json::array& wire) {
 } // namespace
 
 std::string browser_detail::wire_content_hash(const json::array& wire) { return content_hash(wire); }
+std::string_view browser_detail::embedded_bridge_source() {
+    return {reinterpret_cast<const char*>(embedded_bridge_bytes), sizeof(embedded_bridge_bytes)};
+}
+std::string_view browser_detail::embedded_bridge_sha256() { return embedded_bridge_digest; }
 
 struct BrowserGateway::Impl {
     Config config;
@@ -343,6 +330,7 @@ struct BrowserGateway::Impl {
     browser_detail::GoogleAuthorizationCache authorization_cache;
     Clock::time_point models_at{};
     std::string last_status = "not_started";
+    std::string phase = "idle";
     explicit Impl(const Config& c, Store& s) : config(c), store(s) {}
     ~Impl() { close(); }
     void close() noexcept {
@@ -459,6 +447,7 @@ struct BrowserGateway::Impl {
             ? "AI Studio exposed multiple account identities" : "AI Studio account identity did not finish loading");
     }
     void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
+        phase = "browser_start";
         ensure_browser(token);
         auto fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
         bool verified_session = false;
@@ -493,21 +482,28 @@ struct BrowserGateway::Impl {
                 }
                 if (account.auth_user.empty() || !std::all_of(account.auth_user.begin(), account.auth_user.end(), [](unsigned char c) { return std::isdigit(c); })) throw Error(400, "invalid_auth_user", "auth_user must be a nonnegative integer");
                 cdp->call("Page.navigate", {{"url", "https://aistudio.google.com/prompts/new_chat?authuser=" + account.auth_user}}, session, token);
+                phase = "account_identity";
                 await_account_identity(account, token, !identity_only);
                 account_id = account.id; account_fingerprint = std::move(fingerprint); last_status = "account_ready";
                 verified_session = true;
             } catch (...) { try { dispose_context({}); } catch (...) { close(); } throw; }
         }
-        if (!verified_session) await_account_identity(account, token, !identity_only);
+        if (!verified_session) {
+            phase = "account_identity";
+            await_account_identity(account, token, !identity_only);
+        }
         if (!bootstrap || !base_template.empty()) return;
+        phase = "bootstrap_prepare";
         auto prepared = eval("globalThis.__ais2bridge.bootstrap()", token);
         if (!prepared.is_bool() || !prepared.as_bool()) incompatible("Cannot prepare the real page bootstrap prompt");
         bool template_seen = false;
         try {
             pause(token, 350ms);
+            phase = "bootstrap_run";
             auto triggered = eval("globalThis.__ais2bridge.run()", token);
             if (!triggered.is_bool() || !triggered.as_bool()) incompatible("Cannot identify a supported page Run button");
             const auto deadline = Clock::now() + 45s;
+            phase = "bootstrap_capture";
             while (Clock::now() < deadline) {
                 identity(token);
                 auto capability = eval("globalThis.__ais2bridge.capability()", token);
@@ -520,8 +516,9 @@ struct BrowserGateway::Impl {
                             if (bool_or(capability.as_object(), "snapshot")) {
                                 base_template = body->as_array();
                                 timezone = string_or(capability.as_object(), "timezone", "UTC");
+                                phase = "bootstrap_finish";
                                 eval("globalThis.__ais2bridge.finishBootstrap()", token);
-                                last_status = "gateway_ready"; return;
+                                last_status = "gateway_ready"; phase = "ready"; return;
                             }
                         }
                     }
@@ -564,8 +561,13 @@ void BrowserGateway::reconfigure(const Config& config) {
     impl_->config.model_defaults = config.model_defaults;
 }
 json::object BrowserGateway::diagnostics() {
-    std::lock_guard lock(impl_->mutex);
-    return {{"status", impl_->last_status}, {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768}};
+    std::unique_lock lock(impl_->mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return {{"status", "busy"}, {"phase", "active"}, {"bridgeSource", "embedded"},
+                {"bridgeSha256", browser_detail::embedded_bridge_sha256()}};
+    return {{"status", impl_->last_status}, {"phase", impl_->phase},
+        {"bridgeSource", "embedded"}, {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
+        {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768}};
 }
 json::object BrowserGateway::probe(const Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
@@ -634,6 +636,7 @@ json::array BrowserGateway::models(std::stop_token cancel) {
 void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
+    impl_->phase = "snapshot_ticket";
     auto wire = encode_request(request, impl_->base_template, "", impl_->timezone);
     auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(wire)) + ")", cancel, 15s);
     if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
@@ -641,7 +644,9 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
     const auto body = json::serialize(wire);
     const auto chunk_bytes = std::min<std::size_t>(32768, impl_->config.limits.relay_bytes);
     if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
+    impl_->phase = "request_authorization";
     const auto authorization = impl_->authorization(cancel);
+    impl_->phase = "generation_start";
     impl_->eval("globalThis.__ais2bridge.start({body:" + quote_js(body) + ",authUser:" + quote_js(account.auth_user) + ",authorization:" + quote_js(authorization) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
     WireStreamParser parser(impl_->config.limits.object_bytes);
     const auto began = Clock::now();
@@ -651,6 +656,7 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
     constexpr std::size_t error_prefix_limit = 16384;
     std::optional<Error> parse_failure;
     try {
+        impl_->phase = "generation_read";
         while (true) {
             check_cancel(cancel);
             if (!request.stream && Clock::now() - began > std::chrono::seconds(impl_->config.limits.generation_seconds)) throw Error(504, "generation_timeout", "Generation deadline exceeded");
@@ -703,7 +709,7 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
                 }
                 if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*rpc);
                 if (parse_failure) throw *parse_failure;
-                parser.finish(); return;
+                parser.finish(); impl_->phase = "generation_complete"; return;
             } else pause(cancel, 30ms);
         }
     } catch (...) {
