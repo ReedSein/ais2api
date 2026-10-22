@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 ais2api contributors
+# SPDX-License-Identifier: MPL-2.0
+"""Runtime package contracts, including negative credential/ABI/license cases."""
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import struct
+import tarfile
+import tempfile
+import unittest
+import zipfile
+
+ROOT = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location('package_check', ROOT / 'scripts/check-package.py')
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+
+
+def executable(*, machine=183, interpreter='/system/bin/linker64', needed=('libc.so', 'libc++_shared.so')):
+    """A small ELF fixture with real program/dynamic headers, never executed."""
+    data = bytearray(1024)
+    data[:16] = b'\x7fELF\x02\x01\x01' + bytes(9)
+    struct.pack_into('<HHIQQQIHHHHHH', data, 16, 3, machine, 1, 0, 64, 0, 0, 64, 56, 3, 0, 0, 0)
+    base, interp, dynamic, strings = 0x400000, 0x180, 0x200, 0x300
+    loader = interpreter.encode() + b'\0'
+    table = b'\0'
+    offsets = []
+    for name in needed:
+        offsets.append(len(table))
+        table += name.encode() + b'\0'
+    entries = [(1, offset) for offset in offsets] + [(5, base + strings), (10, len(table)), (0, 0)]
+    struct.pack_into('<IIQQQQQQ', data, 64, 1, 5, 0, base, base, len(data), len(data), 4096)
+    struct.pack_into('<IIQQQQQQ', data, 120, 3, 4, interp, base + interp, 0, len(loader), len(loader), 1)
+    struct.pack_into('<IIQQQQQQ', data, 176, 2, 6, dynamic, base + dynamic, 0, 16 * len(entries), 16 * len(entries), 8)
+    data[interp:interp + len(loader)] = loader
+    data[strings:strings + len(table)] = table
+    for index, entry in enumerate(entries):
+        struct.pack_into('<qQ', data, dynamic + 16 * index, *entry)
+    return bytes(data)
+
+
+class RuntimeArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.files = {
+            'bin/ais2api': executable(),
+            'bin/browser/bridge.js': b'// fixture',
+            'bin/runtime-manifest.json': b'{}',
+            'bin/userscript/ais2api-cookie.user.js': b'// fixture',
+            'share/ais2api/schemas/config.schema.json': b'{}',
+            'share/doc/ais2api/LICENSE': (ROOT / 'LICENSE').read_bytes(),
+            'share/doc/ais2api/platforms.md': b'fixture',
+            'share/doc/ais2api/NOTICE': b'fixture',
+            'share/doc/ais2api/THIRD_PARTY_NOTICES.md': b'fixture',
+        }
+        for package in ['boost', 'libc++', 'ndk-sysroot']:
+            self.files[f'share/licenses/ais2api-dependencies/{package}/copyright'] = b'fixture license'
+        self.metadata = {
+            'schema_version': 1, 'target': 'termux-aarch64',
+            'source_commit': 'a' * 40,
+            'container_image': 'termux/termux-docker@sha256:' + 'b' * 64,
+            'executable': checker.elf_runtime(self.files['bin/ais2api']),
+            'packages': {name: {'version': '29', 'architecture': 'aarch64'}
+                         for name in ['boost', 'libc++', 'ndk-sysroot']},
+            'runtime_libraries': {
+                'libc.so': {'provider': 'android-system'},
+                'libc++_shared.so': {'provider': 'termux', 'package': 'libc++', 'needed': ['libc.so']},
+            },
+            'static_components': {'libc++experimental.a': {'package': 'ndk-sysroot', 'sha256': 'c' * 64}},
+            'dependency_notices': {name: 'included' for name in ['boost', 'libc++', 'ndk-sysroot']},
+        }
+
+    def archive(self, *, metadata=True, windows=False):
+        files = dict(self.files)
+        if metadata:
+            files['share/ais2api/termux-build.json'] = json.dumps(self.metadata).encode()
+        if windows:
+            files['bin/ais2api.exe'] = files.pop('bin/ais2api')
+        path = self.directory / ('runtime.zip' if windows else 'runtime.tar.gz')
+        if windows:
+            with zipfile.ZipFile(path, 'w') as output:
+                for name, content in files.items():
+                    output.writestr('runtime/' + name, content)
+        else:
+            with tarfile.open(path, 'w:gz') as output:
+                for name, content in files.items():
+                    entry = tarfile.TarInfo('runtime/' + name)
+                    entry.size = len(content)
+                    entry.mode = 0o755 if name == 'bin/ais2api' else 0o644
+                    output.addfile(entry, io.BytesIO(content))
+        Path(str(path) + '.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
+        return path
+
+    def verify(self, path=None, target='termux-aarch64'):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return checker.check(path or self.archive(), target=target)
+
+    def test_termux_runtime_with_system_dependencies(self):
+        self.assertEqual(self.verify(), 0)
+
+    def test_desktop_linux_contract_does_not_require_termux_metadata(self):
+        self.assertEqual(self.verify(self.archive(metadata=False), target='desktop'), 0)
+
+    def test_desktop_windows_contract_is_preserved(self):
+        self.assertEqual(self.verify(self.archive(metadata=False, windows=True), target='desktop'), 0)
+
+    def test_termux_requires_its_metadata(self):
+        with self.assertRaisesRegex(ValueError, 'missing_termux_build_metadata'):
+            self.verify(self.archive(metadata=False))
+
+    def test_wrong_cpu_is_rejected(self):
+        self.files['bin/ais2api'] = executable(machine=62)
+        with self.assertRaisesRegex(ValueError, 'expected_AArch64_ELF'):
+            self.verify()
+
+    def test_glibc_loader_is_rejected(self):
+        self.files['bin/ais2api'] = executable(interpreter='/lib/ld-linux-aarch64.so.1')
+        with self.assertRaisesRegex(ValueError, 'wrong_termux_interpreter'):
+            self.verify()
+
+    def test_elf_dynamic_dependencies_must_match_metadata(self):
+        self.metadata['executable']['needed'] = ['libc.so']
+        with self.assertRaisesRegex(ValueError, 'termux_executable_metadata_mismatch'):
+            self.verify()
+
+    def test_missing_runtime_dependency_is_rejected(self):
+        del self.metadata['runtime_libraries']['libc++_shared.so']
+        with self.assertRaisesRegex(ValueError, 'unreported_termux_runtime_library'):
+            self.verify()
+
+    def test_transitive_dependency_must_be_reported(self):
+        self.metadata['runtime_libraries']['libc++_shared.so']['needed'].append('libmissing.so')
+        with self.assertRaisesRegex(ValueError, 'unreported_termux_runtime_library'):
+            self.verify()
+
+    def test_arbitrary_library_cannot_be_declared_an_android_library(self):
+        self.metadata['runtime_libraries']['libc++_shared.so'] = {'provider': 'android-system'}
+        with self.assertRaisesRegex(ValueError, 'unexpected_android_system_library'):
+            self.verify()
+
+    def test_static_experimental_library_license_is_required(self):
+        del self.files['share/licenses/ais2api-dependencies/ndk-sysroot/copyright']
+        with self.assertRaisesRegex(ValueError, 'missing_termux_dependency_license'):
+            self.verify()
+
+    def test_linked_library_license_is_required(self):
+        del self.files['share/licenses/ais2api-dependencies/libc++/copyright']
+        with self.assertRaisesRegex(ValueError, 'missing_termux_dependency_license'):
+            self.verify()
+
+    def test_external_dynamic_library_notice_absence_is_explicit(self):
+        self.files['bin/ais2api'] = executable(needed=('libc.so', 'libc++_shared.so', 'libicuuc.so.78'))
+        self.metadata['executable'] = checker.elf_runtime(self.files['bin/ais2api'])
+        self.metadata['packages']['libicu'] = {'version': '78.3', 'architecture': 'aarch64'}
+        self.metadata['runtime_libraries']['libicuuc.so.78'] = {
+            'provider': 'termux', 'package': 'libicu', 'needed': ['libc.so'],
+        }
+        self.metadata['dependency_notices']['libicu'] = 'external-system-package'
+        self.assertEqual(self.verify(), 0)
+        del self.metadata['dependency_notices']['libicu']
+        with self.assertRaisesRegex(ValueError, 'missing_termux_dependency_license'):
+            self.verify()
+
+    def test_embedded_code_cannot_use_external_notice_exemption(self):
+        self.metadata['dependency_notices']['ndk-sysroot'] = 'external-system-package'
+        with self.assertRaisesRegex(ValueError, 'missing_termux_dependency_license'):
+            self.verify()
+
+    def test_static_library_provenance_is_required(self):
+        self.metadata['static_components'] = {}
+        with self.assertRaisesRegex(ValueError, 'missing_experimental_library_provenance'):
+            self.verify()
+
+    def test_bundled_system_libraries_are_rejected(self):
+        self.files['bin/libc++_shared.so'] = b'not shipped'
+        with self.assertRaisesRegex(ValueError, 'unexpected_bundled_termux_library'):
+            self.verify()
+
+    def test_runtime_credentials_are_rejected(self):
+        for name in ['bin/config.json', 'bin/cookies.txt', 'bin/data/state.sqlite3', 'bin/.env']:
+            with self.subTest(name=name):
+                self.files[name] = b'synthetic-test-material'
+                with self.assertRaisesRegex(ValueError, 'private_or_build_files_in_archive'):
+                    self.verify()
+                del self.files[name]
+
+    def test_archive_path_traversal_is_rejected(self):
+        self.files['../outside'] = b'fixture'
+        with self.assertRaisesRegex(ValueError, 'unsafe_archive_entry'):
+            self.verify()
+
+    def test_archive_checksum_mismatch_is_rejected(self):
+        path = self.archive()
+        Path(str(path) + '.sha256').write_text('0' * 64 + '\n')
+        with self.assertRaisesRegex(ValueError, 'archive_checksum_mismatch'):
+            self.verify(path)
+
+    def test_missing_runtime_assets_are_rejected(self):
+        del self.files['bin/browser/bridge.js']
+        with self.assertRaisesRegex(ValueError, 'missing_runtime_assets'):
+            self.verify()
+
+    def test_unpinned_image_is_rejected(self):
+        self.metadata['container_image'] = 'termux/termux-docker:aarch64'
+        with self.assertRaisesRegex(ValueError, 'unpinned_termux_container'):
+            self.verify()
+
+    def test_source_version_is_required(self):
+        self.metadata['source_commit'] = 'latest'
+        with self.assertRaisesRegex(ValueError, 'invalid_source_commit'):
+            self.verify()
+
+    def test_prefix_qualified_sqlite_dependency_is_supported(self):
+        name = checker.TERMUX_PREFIX + '/lib/libsqlite3.so'
+        self.assertEqual(checker.termux_soname(name), 'libsqlite3.so')
+        self.files['bin/ais2api'] = executable(needed=('libc.so', name))
+        self.metadata['executable'] = checker.elf_runtime(self.files['bin/ais2api'])
+        self.metadata['packages']['libsqlite'] = {'version': '3.53.2', 'architecture': 'aarch64'}
+        self.metadata['dependency_notices']['libsqlite'] = 'included'
+        self.files['share/licenses/ais2api-dependencies/libsqlite/copyright'] = b'fixture license'
+        self.metadata['runtime_libraries']['libsqlite3.so'] = {
+            'provider': 'termux', 'package': 'libsqlite', 'needed': ['libc.so'],
+        }
+        self.assertEqual(self.verify(), 0)
+
+    def test_unexpected_absolute_library_path_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'invalid_termux_library_name'):
+            checker.termux_soname('/tmp/libsqlite3.so')
+
+    def test_truncated_elf_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'invalid_ELF_segment'):
+            checker.elf_runtime(executable()[:400])
+
+
+if __name__ == '__main__':
+    unittest.main()

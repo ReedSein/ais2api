@@ -18,6 +18,10 @@ ais2api 的自有实现采用 [MPL 2.0](LICENSE)。该许可不替换第三方�
 
 此表不是传递依赖的完整清单。桌面 CMake 安装和 CPack 流程会保留 vcpkg 提供的 `copyright` 文件，位置为 `share/licenses/ais2api-dependencies/`。修改依赖或分发方式时，应一并检查对应声明。Termux 系统依赖由其包管理器分发，不属于本仓库的 MPL 源码。
 
+Termux 后端包同样保留构建环境中已安装软件包提供的 `share/doc/PACKAGE/copyright`，归入包内的 `share/licenses/ais2api-dependencies/PACKAGE/copyright`。动态运行库由 Termux 包管理器和 Android 系统提供，不随后端包捆绑；构建时的包版本与实际动态依赖记录在 `share/ais2api/termux-build.json`。Boost 软件包的声明涵盖其头文件。使用 `-fexperimental-library` 链接的 `libc++experimental.a` 属于 LLVM 运行库；包内保留其提供者 `ndk-sysroot` 的版权和许可声明，并记录该静态归档的摘要。上述声明不将这些第三方组件改为 MPL 2.0。
+
+部分拆分的 Termux 动态库包未提供版权文件时，产物中的 `dependency_notices` 将其明确记为 `external-system-package`，表示由系统包管理器另行分发；可取得的声明仍保留。此项不适用于嵌入程序的 Boost/libc++ 代码及实验静态归档，它们的声明必须存在。
+
 ## 浏览器
 
 CloakBrowser/Chromium 二进制不纳入后端源码仓库。精简包按锁定清单从官方渠道下载浏览器；可选 `Browser-Local` 包供本机个人或内部使用，包含未修改的浏览器及其单独许可。浏览器没有改为 MPL 2.0。

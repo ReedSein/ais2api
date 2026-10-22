@@ -1,0 +1,65 @@
+# Copyright (c) 2026 ais2api contributors
+# SPDX-License-Identifier: MPL-2.0
+name: Termux ARM64
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: termux-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  TERMUX_CI_IMAGE: termux/termux-docker@sha256:3a0a340fca9947f7139a0d695f1234edf0172daed6a2f1e0b1413ef91453c9ce
+jobs:
+  termux:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check packaging contract and browser scripts
+        run: |
+          sh -n scripts/ci-termux.sh
+          python3 -m unittest discover -s tests -p test_check_package.py
+          node --check browser/bridge.js
+          node --test browser/test_bridge.cjs
+          node --check browser/test_cookie_runtime.cjs
+          node --check userscript/ais2api-cookie.user.js
+          node userscript/test_cookie_helper.cjs
+      - name: Prepare isolated container inputs
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/termux-ci/input" "$RUNNER_TEMP/termux-ci/output"
+          git archive --format=tar HEAD > "$RUNNER_TEMP/termux-ci/input/source.tar"
+          chmod 0644 "$RUNNER_TEMP/termux-ci/input/source.tar"
+          sudo chown 1000:1000 "$RUNNER_TEMP/termux-ci/output"
+          docker pull "$TERMUX_CI_IMAGE"
+      - name: Build and test inside native Termux ARM64
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          # The image's root entry point clears custom environment variables.
+          # https://github.com/termux/termux-docker/blob/master/entrypoint.sh
+          docker run --rm --user 1000:1000 \
+            --mount "type=bind,source=$RUNNER_TEMP/termux-ci/input/source.tar,target=/input/source.tar,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/termux-ci/output,target=/out" \
+            --env SOURCE_COMMIT --env TERMUX_CI_IMAGE --env AIS2API_TERMUX_CI=1 \
+            "$TERMUX_CI_IMAGE" bash -lc '
+              set -eu
+              mkdir "$HOME/ais2api-source"
+              tar -xf /input/source.tar -C "$HOME/ais2api-source"
+              cd "$HOME/ais2api-source"
+              sh scripts/ci-termux.sh
+            '
+      - name: Independently verify the uploaded archive
+        run: python3 scripts/check-package.py --target termux-aarch64 "$RUNNER_TEMP"/termux-ci/output/*.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: termux-aarch64-${{ github.sha }}
+          path: ${{ runner.temp }}/termux-ci/output/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

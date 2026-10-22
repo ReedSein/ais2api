@@ -8,7 +8,9 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path, PurePosixPath
+import re
 import stat
+import struct
 import sys
 import tarfile
 import zipfile
@@ -17,7 +19,141 @@ spec = importlib.util.spec_from_file_location('browser_bundle', Path(__file__).w
 bundle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bundle)
 
-def check(path: Path, with_browser=False) -> int:
+TERMUX_PREFIX = '/data/data/com.termux/files/usr'
+ANDROID_LIBRARIES = {'libc.so', 'libdl.so', 'libm.so', 'liblog.so', 'libandroid.so'}
+
+
+def termux_soname(name: str) -> str:
+    # SQLite's Termux build can record its full prefix path in DT_NEEDED.
+    name = name.removeprefix(TERMUX_PREFIX + '/lib/')
+    if not re.fullmatch(r'[A-Za-z0-9_+.-]+\.so(?:\.[0-9]+)*', name):
+        raise ValueError('invalid_termux_library_name')
+    return name
+
+
+def elf_runtime(data: bytes) -> dict:
+    """Read the ARM64 ELF loader contract without executing or extracting it."""
+    if len(data) < 64 or len(data) > 100_000_000 or data[:6] != b'\x7fELF\x02\x01':
+        raise ValueError('expected_little_endian_ELF64')
+    if struct.unpack_from('<H', data, 18)[0] != 183:
+        raise ValueError('expected_AArch64_ELF')
+    phoff = struct.unpack_from('<Q', data, 32)[0]
+    phsize, phcount = struct.unpack_from('<HH', data, 54)
+    if phsize != 56 or not 0 < phcount <= 1024 or phoff + phsize * phcount > len(data):
+        raise ValueError('invalid_ELF_program_headers')
+    loads, dynamic, interpreter = [], None, None
+    for index in range(phcount):
+        kind, _, offset, address, _, size, _, _ = struct.unpack_from('<IIQQQQQQ', data, phoff + index * phsize)
+        if offset + size > len(data):
+            raise ValueError('invalid_ELF_segment')
+        if kind == 1:
+            loads.append((offset, address, size))
+        elif kind == 2:
+            if dynamic is not None or size % 16:
+                raise ValueError('invalid_ELF_dynamic_segment')
+            dynamic = (offset, size)
+        elif kind == 3:
+            value = data[offset:offset + size]
+            if interpreter is not None or not value.endswith(b'\0') or b'\0' in value[:-1]:
+                raise ValueError('invalid_ELF_interpreter')
+            interpreter = value[:-1].decode('ascii')
+    if dynamic is None:
+        raise ValueError('missing_ELF_dynamic_segment')
+    tags, needed_offsets = {}, []
+    for offset in range(dynamic[0], dynamic[0] + dynamic[1], 16):
+        tag, value = struct.unpack_from('<qQ', data, offset)
+        if tag == 0:
+            break
+        if tag == 1:
+            needed_offsets.append(value)
+        else:
+            tags[tag] = value
+    else:
+        raise ValueError('unterminated_ELF_dynamic_segment')
+    address, size = tags.get(5, -1), tags.get(10, 0)
+    tables = [data[offset + address - base:offset + address - base + size]
+              for offset, base, length in loads if base <= address and address + size <= base + length]
+    if len(tables) != 1 or not size:
+        raise ValueError('invalid_ELF_string_table')
+    table, needed = tables[0], []
+    for offset in needed_offsets:
+        end = table.find(b'\0', offset)
+        if not 0 <= offset < len(table) or end < 0:
+            raise ValueError('invalid_ELF_needed_string')
+        needed.append(table[offset:end].decode('ascii'))
+    return {'machine': 'AArch64', 'interpreter': interpreter, 'needed': needed}
+
+
+def check_termux(relative, read) -> None:
+    metadata = 'share/ais2api/termux-build.json'
+    if metadata not in relative:
+        raise ValueError('missing_termux_build_metadata')
+    info = json.loads(read(metadata, 1_000_000))
+    if not isinstance(info, dict) or info.get('schema_version') != 1 or info.get('target') != 'termux-aarch64':
+        raise ValueError('invalid_termux_build_metadata')
+    if not re.fullmatch(r'[0-9a-f]{40}', info.get('source_commit', '')):
+        raise ValueError('invalid_source_commit')
+    if not re.fullmatch(r'termux/termux-docker@sha256:[0-9a-f]{64}', info.get('container_image', '')):
+        raise ValueError('unpinned_termux_container')
+    actual = elf_runtime(read('bin/ais2api', 100_000_001))
+    if actual['interpreter'] != '/system/bin/linker64':
+        raise ValueError('wrong_termux_interpreter')
+    if actual != info.get('executable'):
+        raise ValueError('termux_executable_metadata_mismatch')
+    if any(re.search(r'\.so(?:\.[0-9]+)*$', name) for name in relative):
+        raise ValueError('unexpected_bundled_termux_library')
+    packages, libraries = info.get('packages'), info.get('runtime_libraries')
+    if not isinstance(packages, dict) or not packages or not isinstance(libraries, dict) or not libraries:
+        raise ValueError('missing_termux_dependencies')
+    for package in packages.values():
+        if not isinstance(package, dict) or not package.get('version') or package.get('architecture') not in {'aarch64', 'all'}:
+            raise ValueError('invalid_termux_package')
+    # Header/static code is distributed inside the executable. Shared libraries
+    # stay in Termux's package manager and must declare their notice availability.
+    required_licenses, runtime_packages = {'boost', 'libc++'}, set()
+    required_libraries = {termux_soname(name) for name in actual['needed']}
+    for name, library in libraries.items():
+        if termux_soname(name) != name or not isinstance(library, dict):
+            raise ValueError('invalid_termux_library')
+        provider = library.get('provider')
+        if provider == 'android-system':
+            if name not in ANDROID_LIBRARIES:
+                raise ValueError('unexpected_android_system_library')
+        elif provider == 'termux':
+            package = library.get('package')
+            if package not in packages or not isinstance(library.get('needed'), list):
+                raise ValueError('unreported_termux_library_package')
+            runtime_packages.add(package)
+            required_libraries.update(termux_soname(item) for item in library['needed'])
+        else:
+            raise ValueError('invalid_termux_library_provider')
+    if not required_libraries.issubset(libraries):
+        raise ValueError('unreported_termux_runtime_library')
+    component = info.get('static_components', {}).get('libc++experimental.a', {})
+    if component.get('package') not in packages or not re.fullmatch(r'[0-9a-f]{64}', component.get('sha256', '')):
+        raise ValueError('missing_experimental_library_provenance')
+    required_licenses.add(component['package'])
+    notices = info.get('dependency_notices')
+    if not isinstance(notices, dict):
+        raise ValueError('missing_termux_dependency_notices')
+    for package in required_licenses | runtime_packages:
+        name = f'share/licenses/ais2api-dependencies/{package}/copyright'
+        declaration = notices.get(package)
+        if declaration == 'included':
+            if name not in relative or not read(name, 100000).strip():
+                raise ValueError('missing_termux_dependency_license')
+        elif declaration == 'external-system-package' and package not in required_licenses:
+            if name in relative:
+                raise ValueError('termux_notice_metadata_mismatch')
+        else:
+            raise ValueError('missing_termux_dependency_license')
+
+
+def check(path: Path, with_browser=False, target='desktop') -> int:
+    if target not in {'desktop', 'termux-aarch64'}:
+        raise ValueError('invalid_package_target')
+    if target == 'termux-aarch64' and (with_browser or not path.name.endswith('.tar.gz')):
+        raise ValueError('termux_requires_backend_tar_gz')
     archive = zipfile.ZipFile(path) if path.suffix == '.zip' else tarfile.open(path, 'r:gz')
     with archive:
         names = {}
@@ -77,6 +213,8 @@ def check(path: Path, with_browser=False) -> int:
             raise ValueError('missing_schemas')
         if not any(name.startswith('share/licenses/ais2api-dependencies/') and name.endswith('/copyright') for name in relative):
             raise ValueError('missing_dependency_licenses')
+        if target == 'termux-aarch64':
+            check_termux(relative, lambda name, limit=None: read(original[name], limit))
         browser_files = {name for name in relative if name.startswith('bin/browser-runtime/')}
         if with_browser:
             platform = 'windows-x64' if path.suffix == '.zip' else 'linux-x64'
@@ -123,10 +261,11 @@ def check(path: Path, with_browser=False) -> int:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--with-browser', action='store_true')
+    parser.add_argument('--target', choices=['desktop', 'termux-aarch64'], default='desktop')
     parser.add_argument('archive', type=Path)
     args = parser.parse_args()
     try:
-        sys.exit(check(args.archive, args.with_browser))
+        sys.exit(check(args.archive, args.with_browser, args.target))
     except Exception as error:
         print(f'Runtime archive validation failed: {type(error).__name__}: {error}', file=sys.stderr)
         sys.exit(1)
