@@ -289,21 +289,7 @@ json::object execute(Arguments args) {
         const bool initialized = fs::exists(marker);
         Store store(config.data_dir);
         if (!fs::exists(config.config_file))
-            atomic_write(config.config_file, json::serialize(config.to_json(true)), true);
-        else {
-            auto stored = json::parse(read_file(config.config_file)).as_object();
-            bool changed = false;
-            const auto defaults = config.to_json(true);
-            for (auto key : {"api_key", "cookie_import_key", "cookie_import_max_accounts", "cookie_import_timeout_seconds"}) {
-                if (!stored.contains(key)) {
-                    stored[key] = defaults.at(key);
-                    changed = true;
-                }
-            }
-            if (changed) {
-                atomic_write(config.config_file, json::serialize(stored), true);
-            }
-        }
+            config.save();
         json::object result{{"initialized", true},
                             {"config_file", path_utf8(config.config_file)},
                             {"data_dir", path_utf8(config.data_dir)},

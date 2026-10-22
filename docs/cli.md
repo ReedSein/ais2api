@@ -16,6 +16,15 @@ ais2api stop --config ./config.json --data-dir ./data
 
 `init` writes the first configuration and initializes local storage. It never generates or prints an API key. Its result includes `api_key_configured` and `next_step`. Set `api_key` in `config.json` to your own key before starting; the default is empty. Re-running initialization preserves it. Keys allow at most 4096 visible ASCII characters without whitespace.
 
+Generated and saved `config.json` files use two-space indentation, with each
+object field and array item on its own line. Loading an existing configuration
+automatically reformats it and fills in missing settings (including nested
+limits) with current defaults. Existing values and relative paths are preserved;
+environment and CLI overrides are not written back during this upgrade. Invalid
+configurations and unsupported schema versions are rejected without rewriting
+the file. The schema version remains `1`; this formatting upgrade needs no
+manual version change. Files already in the current format are not rewritten.
+
 The default listener is `127.0.0.1:18451`. Windows port reservations can change dynamically; use configuration `port` or `--port PORT` to override it.
 
 Defaults are portable: `config.json` and `data/` live beside the executable.

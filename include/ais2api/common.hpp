@@ -29,6 +29,7 @@ struct Error : std::runtime_error {
     int status;
     std::string code;
     unsigned retry_after = 0;
+    std::string quota_scope = "unknown";
     Error(int s, std::string c, std::string message)
         : std::runtime_error(std::move(message)), status(s), code(std::move(c)) {}
 };

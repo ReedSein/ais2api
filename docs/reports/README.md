@@ -1,5 +1,11 @@
 # 本机验证与回放记录
 
+[Google 请求逻辑对齐](upstream-request-alignment-2026-10-22.md)整理模型默认、会员等级头、重试、配额冷却与完成判定的落地范围、保留差异及验证证据。
+
+[Google Search 与内置工具转换修复](grounding-tools-2026-10-22.md)记录 RikkaHub 混用工具的拒绝原因、搜索参数与时区转换、回归覆盖和真实账号验收边界。
+
+[Gemini 客户端兼容修复](gemini-clients-2026-10-22.md)记录 RikkaHub / SillyTavern 源码核查、请求合同修复和离线 HTTP/SSE 回归，标明预算及种子限制。
+
 [前端管理 API 与完整实时日志](management-api-2026-10-21.md)记录管理鉴权、账号/配置/多密钥接口、历史与实时日志、故障行为及本机回归结果。
 
 [Debian 13 / WSL 2 本机适配](debian13-wsl2-2026-10-20.md)记录额外 Linux 目标的构建、运行与无账号浏览器验证；与真实生成验收分开。

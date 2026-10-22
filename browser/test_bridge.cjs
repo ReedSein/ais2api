@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function harness(options = {}) {
-  let fetches = 0, reads = 0, sourceOffset = 0;
+  let fetches = 0, tierFetches = 0, reads = 0, sourceOffset = 0;
   class FakeXHR extends EventTarget {
     open(method, url) { this.method = method; this.url = url; }
     dispatchEvent(event) { super.dispatchEvent(event); this['on' + event.type]?.(event); return true; }
@@ -24,15 +24,21 @@ function harness(options = {}) {
   const context = vm.createContext({
     crypto: require('node:crypto').webcrypto,
     Request, Response, URL, TextDecoder, TextEncoder, Blob, DOMException, Event, Uint8Array, AbortController, btoa, XMLHttpRequest: FakeXHR,
+    Date: class extends Date { static now() { return options.now ? options.now() : Date.now(); } },
     setInterval: callback => { context.install = callback; return 1; }, clearInterval() {},
-    setTimeout: (fn, ms) => setTimeout(fn, options.fastDiscoveryWait && ms === 100 ? 0 : options.fastDiscoveryTimeout && ms === 10000 ? 5 : ms), clearTimeout,
+    setTimeout: (fn, ms) => setTimeout(fn, options.fastDiscoveryWait && ms === 100 ? 0 : options.fastDiscoveryTimeout && ms === 10000 ? 5 : options.fastBenefitTimeout && ms === 8000 ? 5 : ms), clearTimeout,
     location: { href: 'https://aistudio.google.com/prompts/new_chat?authuser=0', origin: 'https://aistudio.google.com', hostname: 'aistudio.google.com' },
     document: { cookie: 'SAPISID=synthetic-cookie', readyState: 'complete', querySelector: () => ({}), querySelectorAll: () => [] },
     default_MakerSuite: options.exports || { adapter(service, hash) { return service.snapshot(hash); } },
     fetch: async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/GetAiStudioBenefitTier')) {
+        ++tierFetches;
+        if (options.tierFetch) return options.tierFetch(input, init);
+        return new Response('[0]');
+      }
       ++fetches;
       if (options.observeFetch) options.observeFetch(input, init);
-      const url = typeof input === 'string' ? input : input.url;
       if (url.includes('/ListModels')) {
         if (options.discoveryFetch) return options.discoveryFetch(input, init);
         return new Response(JSON.stringify([[['models/live-model', null, null, 'Live Model', 'Returned by RPC', 123, 45, ['generateContent']]]]));
@@ -55,14 +61,18 @@ function harness(options = {}) {
   context.install();
   const bridge = context.__ais2bridge;
   async function capture() {
-    const response = await context.fetch('https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent', { method: 'POST', headers: { 'content-type': 'application/json+protobuf', 'x-goog-api-key': 'test-key-never-real' }, body: '["real-captured-template",null,null,null,"ticket:bootstrap"]' });
+    const response = await context.fetch('https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent', { method: 'POST', headers: { 'content-type': 'application/json+protobuf', 'x-goog-api-key': 'test-key-never-real', authorization: 'SAPISIDHASH synthetic-captured', ...options.captureHeaders }, body: '["real-captured-template",null,null,null,"ticket:bootstrap"]' });
     assert.equal(await response.text(), '[]');
     await context.default_MakerSuite.adapter({ snapshot: hash => Promise.resolve(hash === 'a'.repeat(64) ? 'ticket:bootstrap' : 'ticket:' + hash) }, 'a'.repeat(64));
 
   }
-  return { context, bridge, capture, fetches: () => fetches, reads: () => reads };
+  return { context, bridge, capture, fetches: () => fetches, tierFetches: () => tierFetches, reads: () => reads };
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+test('capability reports browser timezone for grounding requests', () => {
+  const h = harness();
+  assert.equal(h.bridge.capability().timezone, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+});
 async function waitFor(predicate, description) {
   const deadline = Date.now() + 2000;
   while (!predicate()) {
@@ -81,6 +91,7 @@ const modelsUrl = 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.i
 function captureModelsXHR(h, headers = {}, url = modelsUrl) {
   const xhr = new h.context.XMLHttpRequest();
   xhr.open('POST', url);
+  xhr.setRequestHeader('Authorization', 'SAPISIDHASH synthetic-discovery');
   for (const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value);
   xhr.send('[]');
   assert.equal(xhr.sent, true);
@@ -124,7 +135,7 @@ test('abort releases pending credit without reading the remaining response', asy
 
 test('ListModels uses captured RPC endpoint and returns only real response rows', async () => {
   const h = harness();
-  await h.context.fetch(modelsUrl, { method: 'POST', headers: { 'x-goog-api-key': 'page-test-key' }, body: '[]' });
+  await h.context.fetch(modelsUrl, { method: 'POST', headers: { 'x-goog-api-key': 'page-test-key', authorization: 'SAPISIDHASH synthetic-discovery' }, body: '[]' });
   const models = await h.bridge.discoverModels('0');
   assert.equal(models.length, 1); assert.equal(models[0].id, 'live-model');
   assert.equal(models[0].source, 'live'); assert.equal(models[0].inputTokenLimit, 123);
@@ -313,6 +324,7 @@ test('XHR captures its live template and private headers without sending bootstr
   for (const type of ['readystatechange', 'load', 'loadend']) xhr.addEventListener(type, () => events.push(type + ':' + xhr.readyState));
   xhr.open('POST', generationUrl);
   xhr.setRequestHeader('X-Test-Page', 'private-header');
+  xhr.setRequestHeader('Authorization', 'SAPISIDHASH synthetic-xhr');
   xhr.send('["models/actual-page-model",[[[[null,"probe"]],"user"]],null,null,"actual-ticket"]');
   assert.equal(xhr.sent, undefined);
   await tick();
@@ -454,25 +466,181 @@ test('bootstrap restores the original editor and stops the probe', () => {
   h.bridge.dispose();
 });
 
-test('generation recalculates authentication from current cookies and verified account', async () => {
+test('generation prefers native CDP authentication and rebuilds the verified account header', async () => {
   let sent;
   const h = harness({ observeFetch: (_url, init) => { sent = init; } });
   await h.capture();
-  h.context.document.cookie = 'SAPISID=first-synthetic-cookie';
-  h.bridge.start({ body: '[]', authUser: '2' }); await waitPending(h);
-  const first = sent.headers.authorization;
+  // HttpOnly signing cookies are unavailable to document.cookie.
+  Object.defineProperty(h.context.document, 'cookie', { get() { throw new Error('must use native signing'); } });
+  const first = 'SAPISIDHASH 1_first SAPISID1PHASH 1_one SAPISID3PHASH 1_three';
+  h.bridge.start({ body: '[]', authUser: '2', authorization: first }); await waitPending(h);
+  assert.equal(sent.headers.authorization, first);
   assert.equal(sent.headers['x-goog-authuser'], '2');
-  const [timestamp, digest] = first.slice('SAPISIDHASH '.length).split('_');
-  assert.equal(digest, require('node:crypto').createHash('sha1').update(timestamp + ' first-synthetic-cookie https://aistudio.google.com').digest('hex'));
   h.bridge.abort(); await waitDone(h);
-  h.context.document.cookie = 'SAPISID=second-synthetic-cookie';
-  h.bridge.start({ body: '[]', authUser: '2' }); await waitPending(h);
-  assert.notEqual(sent.headers.authorization, first);
+  const second = 'SAPISIDHASH 2_new SAPISID1PHASH 2_new-one SAPISID3PHASH 2_new-three';
+  h.bridge.start({ body: '[]', authUser: '2', authorization: second }); await waitPending(h);
+  assert.equal(sent.headers.authorization, second);
+  assert.equal(JSON.stringify(h.bridge.capability()).includes(second), false);
+  assert.equal(JSON.stringify(h.bridge.poll()).includes(second), false);
   h.bridge.abort(); await waitDone(h);
-  const count = h.fetches();
-  h.context.document.cookie = '';
-  h.bridge.start({ body: '[]', authUser: '2' }); await waitDone(h);
-  assert.equal(h.fetches(), count);
-  assert.match(h.bridge.poll().error, /current SAPISID cookie unavailable/);
   h.bridge.dispose();
+});
+
+test('generation falls back to its captured authorization only when native signing is unavailable', async () => {
+  let sent;
+  const h = harness({ observeFetch: (_url, init) => { sent = init; } });
+  await h.capture();
+  h.bridge.start({ body: '[]', authUser: '0', authorization: '' }); await waitPending(h);
+  assert.equal(sent.headers.authorization, 'SAPISIDHASH synthetic-captured');
+  assert.equal(sent.headers['x-goog-authuser'], '0');
+  h.bridge.abort(); await waitDone(h); h.bridge.dispose();
+
+  const missing = harness({ captureHeaders: { authorization: '' } }); await missing.capture();
+  missing.bridge.start({ body: '[]', authUser: '0', authorization: '' }); await waitDone(missing);
+  assert.equal(missing.fetches(), 0);
+  assert.match(missing.bridge.poll().error, /signing cookies and captured Authorization unavailable/);
+  missing.bridge.dispose();
+});
+
+test('generation rejects captured account conflicts and unexpected origins even with fresh authentication', async () => {
+  for (const headers of [{ 'x-goog-authuser': '1' }, { 'x-goog-authuser': '0, 1' }]) {
+    const h = harness({ captureHeaders: headers }); await h.capture();
+    h.bridge.start({ body: '[]', authUser: '0', authorization: 'SAPISIDHASH fresh' }); await waitDone(h);
+    assert.equal(h.fetches(), 0); assert.match(h.bridge.poll().error, /identity_mismatch/);
+    h.bridge.dispose();
+  }
+  const h = harness(); await h.capture(); h.context.location.href = 'https://accounts.google.com/';
+  h.bridge.start({ body: '[]', authUser: '0', authorization: 'SAPISIDHASH fresh' }); await waitDone(h);
+  assert.equal(h.fetches(), 0); assert.match(h.bridge.poll().error, /unexpected authentication origin/);
+  h.bridge.dispose();
+});
+
+test('model discovery uses native authentication with captured fallback and rejects missing credentials', async () => {
+  let sent;
+  const h = harness({ observeFetch: (_url, init) => { sent = init; } });
+  captureModelsXHR(h);
+  h.context.document.cookie = '';
+  await h.bridge.discoverModels('2', 'SAPISIDHASH native-models');
+  assert.equal(sent.headers.authorization, 'SAPISIDHASH native-models');
+  assert.equal(sent.headers['x-goog-authuser'], '2');
+  await h.bridge.discoverModels('2', '');
+  assert.equal(sent.headers.authorization, 'SAPISIDHASH synthetic-discovery');
+  h.bridge.dispose();
+
+  const missing = harness();
+  await missing.context.fetch(modelsUrl, { method: 'POST', body: '[]' });
+  const count = missing.fetches();
+  await assert.rejects(missing.bridge.discoverModels('0', ''), /signing cookies and captured Authorization unavailable/);
+  assert.equal(missing.fetches(), count); missing.bridge.dispose();
+});
+
+test('benefit tier parses exact JSPB enums and rebuilds headers for generation and discovery', async () => {
+  for (const [body, tier, header] of [['[]', 'free'], ['[null]', 'free'], ['[0]', 'free'], [")]}'\n[1]", 'pro', 'TIER1'], ['[2]', 'ultra', 'TIER2'], ['[3]', 'plus', 'TIER0']]) {
+    let sent, queried;
+    const h = harness({ captureHeaders: { 'X-AIStudio-G1-Tier': 'STALE' },
+      tierFetch: (url, init) => { queried = { url, init }; return new Response(body); },
+      observeFetch: (_url, init) => { sent = init; } });
+    await h.capture();
+    h.bridge.start({ body: '[]', authUser: '0', authorization: 'SAPISIDHASH native' });
+    await waitPending(h);
+    assert.match(queried.url, /MakerSuiteService\/GetAiStudioBenefitTier$/);
+    assert.equal(queried.init.headers.authorization, 'SAPISIDHASH native');
+    assert.equal(queried.init.headers['x-aistudio-g1-tier'], undefined);
+    assert.equal(queried.init.credentials, 'include'); assert.equal(queried.init.body, '[]');
+    assert.equal(sent.headers['x-aistudio-g1-tier'], header);
+    assert.equal(h.bridge.capability().benefitTier, tier);
+    h.bridge.abort(); await waitDone(h);
+    captureModelsXHR(h, { 'x-aistudio-g1-tier': 'STALE' });
+    await h.bridge.discoverModels('0', 'SAPISIDHASH newer');
+    assert.equal(sent.headers['x-aistudio-g1-tier'], header);
+    assert.equal(sent.headers.authorization, 'SAPISIDHASH newer');
+    assert.equal(h.tierFetches(), 1); h.bridge.dispose();
+  }
+});
+
+test('benefit cache expires at 600 seconds and stays isolated between pages', async () => {
+  let now = 1000, code = 1, sent;
+  const h = harness({ now: () => now, tierFetch: () => new Response(JSON.stringify([code])), observeFetch: (_url, init) => { sent = init; } });
+  captureModelsXHR(h);
+  await h.bridge.discoverModels('0');
+  now += 599999; code = 2;
+  await h.bridge.discoverModels('0'); assert.equal(h.tierFetches(), 1);
+  assert.equal(sent.headers['x-aistudio-g1-tier'], 'TIER1');
+  now += 1; assert.equal(h.bridge.capability().benefitTier, 'unknown');
+  await h.bridge.discoverModels('0'); assert.equal(h.tierFetches(), 2);
+  assert.equal(sent.headers['x-aistudio-g1-tier'], 'TIER2');
+  await assert.rejects(h.bridge.discoverModels('1'), /identity_mismatch/);
+  h.bridge.dispose();
+  const other = harness(); captureModelsXHR(other); await other.bridge.discoverModels('0');
+  assert.equal(other.bridge.capability().benefitTier, 'free'); assert.equal(other.tierFetches(), 1); other.bridge.dispose();
+});
+
+test('benefit failures stay unknown, discard old tier headers, and suppress retries for 30 seconds', async () => {
+  for (const response of ['[true]', '["1"]', '[4]', '{}', 'secret-body-invalid', ' '.repeat(8193)]) {
+    let now = 1000, sent;
+    const h = harness({ now: () => now, tierFetch: () => new Response(response), observeFetch: (_url, init) => { sent = init; } });
+    captureModelsXHR(h, { 'X-AIStudio-G1-Tier': 'TIER2' });
+    await h.bridge.discoverModels('0');
+    assert.equal(h.bridge.capability().benefitTier, 'unknown'); assert.equal(sent.headers['x-aistudio-g1-tier'], undefined);
+    now += 29999; await h.bridge.discoverModels('0'); assert.equal(h.tierFetches(), 1);
+    now += 1; await h.bridge.discoverModels('0'); assert.equal(h.tierFetches(), 2);
+    assert.equal(JSON.stringify(h.bridge.capability()).includes('secret-body'), false); h.bridge.dispose();
+  }
+});
+
+test('benefit lookup is single flight and cancellation prevents generation without retry', async () => {
+  let release;
+  const h = harness({ tierFetch: () => new Promise(resolve => { release = resolve; }) });
+  captureModelsXHR(h);
+  const first = h.bridge.discoverModels('0');
+  const second = h.bridge.discoverModels('0');
+  assert.equal(h.tierFetches(), 1); release(new Response('[3]'));
+  await Promise.all([first, second]); assert.equal(h.tierFetches(), 1); h.bridge.dispose();
+  const cancelled = harness({ tierFetch: (_url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('private upstream detail', 'AbortError')), { once: true })) });
+  await cancelled.capture(); cancelled.bridge.start({ body: '[]' });
+  await waitFor(() => cancelled.tierFetches() === 1, 'benefit request');
+  cancelled.bridge.abort(); await waitDone(cancelled);
+  assert.equal(cancelled.fetches(), 0); assert.equal(cancelled.tierFetches(), 1);
+  assert.equal(cancelled.bridge.poll().error, 'cancelled'); cancelled.bridge.dispose();
+});
+
+test('benefit timeout and HTTP failure allow requests without disclosing response details', async () => {
+  for (const timeout of [false, true]) {
+    const h = harness({ fastBenefitTimeout: true, tierFetch: (_url, init) => timeout
+      ? new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('private token', 'AbortError')), { once: true }))
+      : new Response('private token', { status: 403 }) });
+    await h.capture(); h.bridge.start({ body: '[]' }); await waitPending(h);
+    assert.equal(h.bridge.capability().benefitTier, 'unknown'); assert.equal(h.tierFetches(), 1);
+    assert.equal(JSON.stringify(h.bridge.poll()).includes('private token'), false);
+    h.bridge.abort(); await waitDone(h); h.bridge.dispose();
+  }
+});
+
+test('a cancelled generation stops waiting on a shared discovery tier query', async () => {
+  let release;
+  const h = harness({ tierFetch: () => new Promise(resolve => { release = resolve; }) });
+  await h.capture(); captureModelsXHR(h);
+  const discovery = h.bridge.discoverModels('0');
+  h.bridge.start({ body: '[]' }); h.bridge.abort(); await waitDone(h);
+  assert.equal(h.bridge.poll().error, 'cancelled');
+  assert.equal(h.fetches(), 0); assert.equal(h.tierFetches(), 1);
+  release(new Response('[1]')); await discovery; h.bridge.dispose();
+});
+
+test('relay records benefit tier at send time even after cache expiry or refresh', async () => {
+  let now = 1000, code = 1;
+  const h = harness({ now: () => now, tierFetch: () => new Response(JSON.stringify([code])) });
+  await h.capture(); h.bridge.start({ body: '[]' }); await waitPending(h);
+  assert.equal(h.bridge.poll().benefitTier, 'pro');
+  now += 600000;
+  assert.equal(h.bridge.capability().benefitTier, 'unknown');
+  assert.equal(h.bridge.poll().benefitTier, 'pro');
+  code = 2; captureModelsXHR(h); await h.bridge.discoverModels('0');
+  assert.equal(h.bridge.capability().benefitTier, 'ultra');
+  assert.equal(h.bridge.poll().benefitTier, 'pro');
+  h.bridge.abort(); await waitDone(h); h.bridge.dispose();
+  const unknown = harness({ tierFetch: () => new Response('[9]') });
+  await unknown.capture(); unknown.bridge.start({ body: '[]' }); await waitPending(unknown);
+  assert.equal(unknown.bridge.poll().benefitTier, 'unknown');
+  unknown.bridge.abort(); await waitDone(unknown); unknown.bridge.dispose();
 });

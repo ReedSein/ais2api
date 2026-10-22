@@ -82,6 +82,50 @@ std::string stored_path(const fs::path &path, const fs::path &config_file, bool 
     return path_text(relative);
   return path_text(path);
 }
+void append_json(std::string &out, const json::value &value, std::size_t depth) {
+  if (value.is_object()) {
+    const auto &object = value.as_object();
+    out += '{';
+    std::size_t index = 0;
+    for (const auto &entry : object) {
+      out += '\n';
+      out.append((depth + 1) * 2, ' ');
+      out += json::serialize(json::value(entry.key()));
+      out += ": ";
+      append_json(out, entry.value(), depth + 1);
+      if (++index < object.size())
+        out += ',';
+    }
+    if (!object.empty()) {
+      out += '\n';
+      out.append(depth * 2, ' ');
+    }
+    out += '}';
+  } else if (value.is_array()) {
+    const auto &array = value.as_array();
+    out += '[';
+    for (std::size_t index = 0; index < array.size(); ++index) {
+      out += '\n';
+      out.append((depth + 1) * 2, ' ');
+      append_json(out, array[index], depth + 1);
+      if (index + 1 < array.size())
+        out += ',';
+    }
+    if (!array.empty()) {
+      out += '\n';
+      out.append(depth * 2, ' ');
+    }
+    out += ']';
+  } else {
+    out += json::serialize(value);
+  }
+}
+std::string formatted_config(const json::object &object) {
+  std::string out;
+  append_json(out, object, 0);
+  out += '\n';
+  return out;
+}
 } // namespace
 fs::path Config::default_directory() {
   return executable_path().parent_path();
@@ -113,6 +157,10 @@ json::object Config::to_json(bool portable_paths) const {
           {"configured_models", configured_models},
           {"model_defaults", model_defaults}};
 }
+void Config::save() const {
+  validate();
+  atomic_write(config_file, formatted_config(to_json(true)), true);
+}
 static Config parse_config(Config c, json::object o, bool explicit_browser);
 Config Config::load(const fs::path &file, const json::object &overrides) {
   Config c;
@@ -120,10 +168,18 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   c.data_dir = default_directory() / "data";
   bool explicit_browser = false;
   auto o = c.to_json();
+  std::optional<json::object> upgraded;
+  std::string original;
   if (fs::exists(c.config_file)) {
-    auto v = json::parse(read_file(c.config_file));
+    original = read_file(c.config_file);
+    auto v = json::parse(original);
     if (!v.is_object())
       throw Error(400, "invalid_config", "Configuration must be an object");
+    // Fill missing fields recursively without changing stored paths or values.
+    // Keep this separate from runtime settings so temporary overrides stay out
+    // of the file, and browser auto-detection is repeated after relocation.
+    upgraded = c.to_json(true);
+    merge(*upgraded, v.as_object());
     if (auto browser = v.as_object().if_contains("browser_executable"))
       explicit_browser = !browser->is_string() || !browser->as_string().empty();
     // File paths belong to the configuration directory, regardless of the
@@ -134,6 +190,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
         *value = path_text(absolute_path(fs::u8path(std::string(value->as_string())),
                                         c.config_file.parent_path()));
     merge(o, v.as_object());
+    // Never rewrite an invalid file, even when an override could mask it.
+    (void)parse_config(c, o, explicit_browser);
   }
   json::object e;
   for (auto pair : {std::pair{"AIS2API_ADMIN_KEY", "admin_key"},
@@ -199,7 +257,13 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   merge(o, overrides);
   explicit_browser = explicit_browser || e.contains("browser_executable") ||
                      overrides.contains("browser_executable");
-  return parse_config(std::move(c), std::move(o), explicit_browser);
+  auto result = parse_config(std::move(c), std::move(o), explicit_browser);
+  if (upgraded) {
+    const auto formatted = formatted_config(*upgraded);
+    if (formatted != original)
+      atomic_write(result.config_file, formatted, true);
+  }
+  return result;
 }
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",

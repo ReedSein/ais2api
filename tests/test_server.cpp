@@ -23,9 +23,9 @@ struct LiveServer {
     std::string key;
     std::jthread thread;
     std::exception_ptr failure;
-    explicit LiveServer(bool configured_key=true){
+    explicit LiveServer(bool configured_key=true,json::array models={"test-explicit-model"}){
         net::io_context io;tcp::acceptor port(io,{tcp::v4(),0});auto free_port=port.local_endpoint().port();port.close();
-        config.data_dir=directory/"data";config.config_file=directory/"config.json";config.port=free_port;config.configured_models={"test-explicit-model"};config.limits.request_bytes=4096;config.limits.object_bytes=8192;config.limits.relay_bytes=1024;
+        config.data_dir=directory/"data";config.config_file=directory/"config.json";config.port=free_port;config.configured_models=std::move(models);config.limits.request_bytes=4096;config.limits.object_bytes=8192;config.limits.relay_bytes=1024;
         key="http-test-"+random_hex(24);config.api_key=configured_key?key:"";
         fs::create_directories(directory);atomic_write(config.config_file,json::serialize(config.to_json()),true);
         thread=std::jthread([this]{try{serve(config);}catch(...){failure=std::current_exception();}});
@@ -59,6 +59,52 @@ TEST_CASE("HTTP exposes data routes and enforces authentication without Google",
     auto malformed=server.call(http::verb::post,"/v1/chat/completions","{",server.key);REQUIRE(malformed.result_int()==400);
     auto large=server.call(http::verb::post,"/v1/chat/completions",std::string(5000,'x'),server.key);REQUIRE(large.result_int()==413);
     REQUIRE_FALSE(server.failure);
+}
+
+TEST_CASE("HTTP model contracts provide Gemini display names and preserve metadata","[http][models]"){
+    LiveServer server(true,{
+        "configured-string",
+        json::object{{"id","configured-object"},{"displayName","Real Display Name"},{"description","Model description"},{"inputTokenLimit",32768},{"outputTokenLimit",8192},{"version","001"}},
+        json::object{{"id","null-display"},{"displayName",nullptr}},
+        json::object{{"id","empty-display"},{"displayName",""}}
+    });
+    auto response=server.call(http::verb::get,"/v1beta/models",{},server.key);
+    REQUIRE(response.result_int()==200);
+    auto body=json::parse(response.body()).as_object();
+    REQUIRE_FALSE(body.contains("data"));
+    auto models=body.at("models").as_array();
+    REQUIRE(models.size()==4);
+    for(const auto& value:models){
+        const auto& model=value.as_object();
+        auto name=string_or(model,"name");
+        auto detail=server.call(http::verb::get,"/v1beta/"+name,{},server.key);
+        REQUIRE(detail.result_int()==200);
+        REQUIRE(json::parse(detail.body())==value);
+        if(name=="models/configured-object"){
+            REQUIRE(string_or(model,"displayName")=="Real Display Name");
+            REQUIRE(string_or(model,"description")=="Model description");
+            REQUIRE(model.at("inputTokenLimit")==32768);
+            REQUIRE(model.at("outputTokenLimit")==8192);
+            REQUIRE(string_or(model,"version")=="001");
+        }else{
+            REQUIRE(string_or(model,"displayName")==name.substr(7));
+            REQUIRE_FALSE(model.contains("inputTokenLimit"));
+            REQUIRE_FALSE(model.contains("outputTokenLimit"));
+        }
+    }
+    response=server.call(http::verb::get,"/v1/models",{},server.key);
+    REQUIRE(response.result_int()==200);
+    body=json::parse(response.body()).as_object();
+    REQUIRE(string_or(body,"object")=="list");
+    REQUIRE_FALSE(body.contains("models"));
+    REQUIRE(body.at("data").as_array().size()==4);
+    for(const auto& value:body.at("data").as_array()){
+        const auto& model=value.as_object();
+        REQUIRE(string_or(model,"object")=="model");
+        REQUIRE_FALSE(string_or(model,"id").empty());
+        REQUIRE_FALSE(model.contains("displayName"));
+        REQUIRE_FALSE(model.contains("name"));
+    }
 }
 
 TEST_CASE("HTTP authorization follows the configured key across reloads","[http][config]"){

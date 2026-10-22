@@ -13,6 +13,8 @@ struct Request {
     std::string model, principal;
     bool stream = false;
     bool include_usage = false;
+    bool include_thoughts = true;
+    json::array ignored_parameters;
     json::object gemini;
 };
 using EventSink = std::function<void(json::object)>;
@@ -20,8 +22,10 @@ Request normalize_gemini(std::string model, const json::object& body, bool strea
 Request normalize_openai(const json::object& body, const Config& config, Store* store = nullptr, std::string principal = {});
 json::array encode_contents(const json::array& contents);
 json::array encode_schema(const json::object& schema);
-json::array encode_request(const Request& request, const json::array& base_template, std::string_view browser_snapshot);
+json::array encode_request(const Request& request, const json::array& base_template, std::string_view browser_snapshot,
+                           std::string_view timezone = "UTC");
 json::object decode_chunk(const json::value& wire_chunk);
+void filter_thoughts(json::object& event);
 bool has_content(const json::object& event);
 void merge_event(json::object& aggregate, const json::object& event, std::size_t byte_limit);
 json::object openai_response(const json::object& gemini, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});

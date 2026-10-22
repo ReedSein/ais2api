@@ -29,8 +29,26 @@ content hash. This anti-abuse ticket is separate from part-level thoughtSignatur
 metadata handled by the wire codec. Request encoding uses the live captured
 template. Hashing uses the final encoded contents, including expanded tool-result
 attachments; code and tool parts contribute empty fields to the single-space
-join. Each send rebuilds SAPISIDHASH from the current page cookie and sets the
-verified account slot. Credentials and required headers remain inside the page.
+join. Generation and model discovery rebuild SAPISIDHASH, SAPISID1PHASH and
+SAPISID3PHASH with a fresh timestamp from the selected page's CDP signing-cookie
+cache, including HttpOnly cookies. SAPISID takes priority over __Secure-1PAPISID;
+missing 1P/3P values fall back to the primary value. The cache refreshes on missing
+or expired signing cookies and after 60 seconds, and is cleared when its account
+context is disposed or the browser closes. Valid cached cookies can survive a
+temporary refresh failure; cancellation propagates. If native signing is
+unavailable, only that page's captured Authorization is used as a fallback.
+Missing both sources fails locally. Every send sets the verified account slot
+and rejects conflicting captured slots. Signing cookies and headers remain in
+memory and are never returned by diagnostics or written to logs.
+
+Generation and model discovery also query GetAiStudioBenefitTier using the live
+RPC endpoint and current account authorization. The bounded query has an
+eight-second timeout and 8 KiB response limit; its per-page cache lasts ten
+minutes, with a thirty-second retry delay after failure. Captured tier headers
+are removed. Only a verified plus/pro/ultra result adds TIER0/TIER1/TIER2;
+free and unknown omit the header. Each generation records the tier used at send
+time, so later cache expiry cannot change error classification. An unknown-tier
+403 ends the request without cooling down or rotating healthy accounts.
 
 Streaming uses fetch's BYOB reader with a fresh 32 KiB buffer. Only one base64
 chunk can be pending. C++ decodes the chunk and incrementally parses depth-three
@@ -43,6 +61,19 @@ requests use the idle deadline and may run longer than generation_seconds while
 bytes continue arriving; nonstreaming generation also has the total deadline.
 HTTP-200 google.rpc.Status error envelopes are classified before chunk decoding:
 RESOURCE_EXHAUSTED, PERMISSION_DENIED and UNAUTHENTICATED map to 429, 403 and 401.
+
+Recognized ambiguous GenerateContent routing 404s retry the same account within
+max_attempts, rebuilding the body and snapshot in its verified context. One empty
+204 on the first attempt may retry once; ordinary 404s do not rotate accounts.
+Responses require a non-unspecified finish reason as well as complete transport
+framing. Delivered content is never regenerated after failure. Generation quota
+cooldowns are model-scoped: minute limits wait at least sixty seconds without
+increasing daily quota counters; other 429s use 60/60/300/300/600 seconds, reset
+their counters at Pacific midnight and preserve drip counters after success.
+Retry-After can extend the delay up to one day. Known-tier permission failures
+temporarily cool the affected model for five minutes. Credential replacement
+does not clear outstanding quota cooldowns. Existing explicit global cooldowns
+and management reset operations retain their meanings.
 Non-200 replies retain only status, parsed Retry-After and at most 8 KiB of error
 text; malformed stream classification retains at most a 16 KiB prefix. None of
 this error text is logged or returned to clients. A sink that

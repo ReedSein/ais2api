@@ -88,7 +88,7 @@
     },
     "toolConfig": {
       "type": "object", "additionalProperties": false,
-      "properties": {"functionCallingConfig": {
+      "properties": {"includeServerSideToolInvocations": {"type": "boolean", "description": "Accepted for client compatibility and reported as ignored; the private gateway has no verified invocation-record control."}, "functionCallingConfig": {
         "type": "object", "additionalProperties": false,
         "properties": {"mode": {"enum": ["AUTO", "NONE"]}, "allowedFunctionNames": {"type": "array", "items": {"type": "string"}}}
       }}
@@ -99,7 +99,15 @@
       "properties": {
         "functionDeclarations": {"type": "array", "items": {"type": "object"}},
         "codeExecution": {"$ref": "#/$defs/emptyTool"}, "googleMaps": {"$ref": "#/$defs/emptyTool"},
-        "urlContext": {"$ref": "#/$defs/emptyTool"}, "googleSearchRetrieval": {"$ref": "#/$defs/emptyTool"},
+        "urlContext": {"$ref": "#/$defs/emptyTool"},
+        "googleSearchRetrieval": {
+          "type": "object", "additionalProperties": false,
+          "description": "Maps to modern Google Search. Legacy dynamic retrieval controls are validated and reported as ignored.",
+          "properties": {"dynamicRetrievalConfig": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"mode": {"enum": ["MODE_UNSPECIFIED", "MODE_DYNAMIC"]}, "dynamicThreshold": {"type": "number", "minimum": 0, "maximum": 1}}
+          }}
+        },
         "googleSearch": {
           "type": "object", "additionalProperties": false,
           "properties": {"searchTypes": {

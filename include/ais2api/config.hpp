@@ -39,6 +39,7 @@ struct Config {
     static fs::path default_directory();
     static Config load(const fs::path& file, const json::object& overrides = {});
     json::object to_json(bool portable_paths = false) const;
+    void save() const;
     std::optional<std::string> authenticate(std::string_view secret) const;
     std::optional<std::string> authenticate_cookie_import(std::string_view secret) const;
     Config patched(const json::object& patch) const;

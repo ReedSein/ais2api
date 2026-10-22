@@ -127,10 +127,76 @@ TEST_CASE("Request encoding replaces stale template generation fields", "[protoc
     REQUIRE(wire[4] == "!fresh");
     REQUIRE(wire[5].is_null());
     REQUIRE(wire[11].is_null());
-    REQUIRE(wire[13] == json::array{1});
+    REQUIRE(wire[13] == json::parse(R"([[null,null,"UTC"],null,1])"));
     REQUIRE(wire[3].as_array()[3] == 19);
     REQUIRE(wire[3].as_array()[16].as_array()[3] == 1);
     REQUIRE(wire[6].as_array()[0].as_array()[1].as_array().size() == 1);
+}
+
+TEST_CASE("Model family defaults are explicit and do not inherit captured sampling", "[protocol]") {
+    auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+    json::array base;
+    base.resize(14);
+    base[3] = json::parse("[null,null,null,999,0.9,0.8,40]");
+    base[6] = json::parse("[[[]]]");
+    base[7] = "stale-model";
+    base[11] = "stale-cache";
+    base[13] = json::array{1};
+    for (auto model : {"gemini-text", "gemma-text", "other-model"}) {
+        auto wire = encode_request(normalize_gemini(model, body, false, Config{}), base, "s");
+        auto &generation = wire[3].as_array();
+        REQUIRE(generation[16] == json::array{1, nullptr, nullptr, 3});
+        for (auto index : {3, 4, 5, 6}) REQUIRE(generation[index].is_null());
+        if (std::string_view(model) == "other-model") REQUIRE(wire[2].is_null());
+        else REQUIRE(wire[2] == json::parse("[[null,null,7,5],[null,null,8,5],[null,null,9,5],[null,null,10,5]]"));
+        for (auto index : {6, 7, 11, 13})
+            REQUIRE((wire.size() <= static_cast<std::size_t>(index) || wire[index].is_null()));
+    }
+    auto explicit_safety = body;
+    explicit_safety["safetySettings"] = json::parse(R"([{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"}])");
+    auto wire = encode_request(normalize_gemini("gemini-text", explicit_safety, false, Config{}), {}, "s");
+    REQUIRE(wire[2] == json::parse("[[null,null,7,3]]"));
+    explicit_safety["safetySettings"] = json::array{};
+    REQUIRE(encode_request(normalize_gemini("gemma-text", explicit_safety, false, Config{}), {}, "s")[2] == json::array{});
+}
+
+TEST_CASE("Exact model defaults fill generation and thinking fields without overriding requests", "[protocol]") {
+    Config config;
+    config.model_defaults = obj(R"({"gemini-custom":{"generation_config":{"temperature":0.7,"top_p":0.8,"thinking_config":{"thinking_level":"LOW","include_thoughts":false,"thinking_budget":100}},"safetySettings":[]}})");
+    auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}],"generationConfig":{"temperature":0.2,"thinkingConfig":{"thinkingLevel":"MEDIUM","includeThoughts":true}}})");
+    auto request = normalize_gemini("gemini-custom", body, false, config);
+    REQUIRE(request.include_thoughts);
+    REQUIRE(request.ignored_parameters == json::array{"generationConfig.thinkingConfig.thinkingBudget"});
+    auto wire = encode_request(request, {}, "s");
+    REQUIRE(wire[3].as_array()[4] == 0.2);
+    REQUIRE(wire[3].as_array()[5] == 0.8);
+    REQUIRE(wire[3].as_array()[16] == json::array{1, nullptr, nullptr, 2});
+    REQUIRE(wire[2] == json::array{});
+    body["generationConfig"] = json::object{{"thinkingConfig", json::object{{"includeThoughts", true}}}};
+    request = normalize_gemini("gemini-custom", body, false, config);
+    REQUIRE(request.include_thoughts);
+    REQUIRE(encode_request(request, {}, "s")[3].as_array()[16] == json::array{1, nullptr, nullptr, 1});
+}
+
+TEST_CASE("Image wire defaults and cleanup follow the model profile", "[protocol]") {
+    auto body = obj(R"({"contents":[{"parts":[{"text":"draw"}]}]})");
+    auto wire = encode_request(normalize_gemini("gemini-image", body, false, Config{}), {}, "s");
+    REQUIRE(wire[2].is_null());
+    REQUIRE(wire[3].as_array()[14] == json::array{2});
+    REQUIRE(wire[3].as_array()[16] == json::array{1, nullptr, nullptr, 4});
+    body["generationConfig"] = json::parse(R"({"temperature":0.3,"responseMimeType":"application/json","mediaResolution":"MEDIA_RESOLUTION_HIGH","responseModalities":["TEXT","IMAGE"],"thinkingConfig":{"thinkingLevel":"HIGH","includeThoughts":false,"thinkingBudget":0},"imageConfig":{"imageSize":"2K"}})");
+    body["safetySettings"] = json::parse(R"([{"category":"HARM_CATEGORY_HARASSMENT","threshold":"OFF"}])");
+    auto request = normalize_gemini("gemini-image", body, false, Config{});
+    REQUIRE_FALSE(request.include_thoughts);
+    REQUIRE(request.ignored_parameters == json::array{"generationConfig.thinkingConfig.thinkingBudget"});
+    wire = encode_request(request, {}, "s");
+    REQUIRE(wire[2].is_null());
+    auto &generation = wire[3].as_array();
+    REQUIRE(generation[4] == 0.3);
+    for (auto index : {7, 13, 17}) REQUIRE(generation[index].is_null());
+    REQUIRE(generation[14] == json::array{2, 1});
+    REQUIRE(generation[16] == json::array{1, nullptr, nullptr, 3});
+    REQUIRE(generation[26] == json::array{nullptr, "2K"});
 }
 
 TEST_CASE("Wire parser tolerates arbitrary byte splits and bounds the current chunk",
@@ -396,20 +462,73 @@ TEST_CASE("Tool registry maintains stream indices while signatures roundtrip sta
     REQUIRE(part.at("functionCall").as_object().at("id") == "call-a");
 }
 
-TEST_CASE("Unverified controls fail instead of advertising forced execution", "[protocol]") {
+TEST_CASE("Gemini client controls validate without inventing upstream fields", "[protocol]") {
+    auto request = normalize_gemini("m", obj(R"({"contents":[{"parts":[{"text":"x"}]}],
+        "generationConfig":{"candidateCount":1,"seed":42,"responseModalities":["text","image"],
+        "thinkingConfig":{"thinkingBudget":0,"includeThoughts":false,"thinkingLevel":"low"}}})"), false, Config{});
+    REQUIRE_FALSE(request.include_thoughts);
+    REQUIRE(request.ignored_parameters == json::array{"generationConfig.seed", "generationConfig.thinkingConfig.thinkingBudget"});
+    auto wire = encode_request(request, {}, "!synthetic").at(3).as_array();
+    REQUIRE(wire.at(14) == json::array{2, 1});
+    REQUIRE(wire.at(16) == json::array{1, nullptr, nullptr, 1});
+    for (auto control : {R"({"thinkingBudget":-1})", R"({"includeThoughts":false})"}) {
+        auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+        body["generationConfig"] = json::object{{"thinkingConfig", json::parse(control)}};
+        auto encoded = encode_request(normalize_gemini("m", body, false, Config{}), {}, "!synthetic").at(3).as_array();
+        REQUIRE(encoded.at(16) == json::array{1, nullptr, nullptr, 3});
+    }
+    for (auto bad : {R"({"candidateCount":2})", R"({"candidateCount":0})", R"({"candidateCount":1.0})",
+                     R"({"seed":"42"})", R"({"thinkingConfig":{"thinkingBudget":-2}})",
+                     R"({"thinkingConfig":{"thinkingBudget":0.5}})", R"({"thinkingConfig":{"includeThoughts":"false"}})"}) {
+        auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}]})");
+        body["generationConfig"] = json::parse(bad);
+        REQUIRE_THROWS_AS(normalize_gemini("m", body, false, Config{}), Error);
+    }
+}
+
+TEST_CASE("Gemini client aliases preserve caller-owned function data", "[protocol]") {
+    auto body = obj(R"({"contents":[{"parts":[
+        {"inline_data":{"mime_type":"image/png","data":"AA=="}},
+        {"function_call":{"name":"f","args":{"thinking_config":{"top_p":2}}},"thought_signature":"sig"},
+        {"function_response":{"name":"f","response":{"inline_data":"untouched"}}}]}],
+        "system_instruction":{"parts":[{"text":"rules"}]},
+        "generation_config":{"max_output_tokens":16,"top_p":0.5,"thinking_config":{"thinking_level":"minimal","include_thoughts":true}},
+        "tools":[{"function_declarations":[{"name":"f","parameters":{"type":"object","properties":{"inline_data":{"type":"string"}}}}]},{"google_search":{}}],
+        "tool_config":{"function_calling_config":{"mode":"AUTO","allowed_function_names":["f"]}}})");
+    auto request = normalize_gemini("m", body, false, Config{});
+    auto &parts = request.gemini.at("contents").as_array()[0].as_object().at("parts").as_array();
+    REQUIRE(parts[0].as_object().at("inlineData").as_object().at("mimeType") == "image/png");
+    REQUIRE(parts[1].as_object().at("functionCall").as_object().at("args") == obj(R"({"thinking_config":{"top_p":2}})"));
+    REQUIRE(parts[2].as_object().at("functionResponse").as_object().at("response") == obj(R"({"inline_data":"untouched"})"));
+    auto wire = encode_request(request, {}, "!synthetic");
+    REQUIRE(wire.at(6).as_array().size() == 2);
+    REQUIRE(wire.at(3).as_array().at(16).as_array().at(3) == 4);
+    body["generationConfig"] = json::object{};
+    REQUIRE_THROWS_AS(normalize_gemini("m", body, false, Config{}), Error);
+}
+
+TEST_CASE("Retired civic filter disabled by clients does not block generation", "[protocol]") {
+    auto body = obj(R"({"contents":[{"parts":[{"text":"x"}]}],"safetySettings":[
+        {"category":"HARM_CATEGORY_HARASSMENT","threshold":"OFF"},
+        {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"OFF"},
+        {"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"OFF"},
+        {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"OFF"},
+        {"category":"HARM_CATEGORY_CIVIC_INTEGRITY","threshold":"OFF"}]})");
+    auto wire = encode_request(normalize_gemini("m", body, false, Config{}), {}, "!synthetic");
+    REQUIRE(wire.at(2) == json::array{json::array{nullptr, nullptr, 7, 5}, json::array{nullptr, nullptr, 8, 5},
+                                   json::array{nullptr, nullptr, 9, 5}, json::array{nullptr, nullptr, 10, 5}});
+    auto &setting = body.at("safetySettings").as_array().back().as_object();
+    setting["threshold"] = "BLOCK_NONE";
+    REQUIRE(encode_request(normalize_gemini("m", body, false, Config{}), {}, "!synthetic").at(2).as_array().size() == 4);
+    setting["threshold"] = "BLOCK_LOW_AND_ABOVE";
+    REQUIRE_THROWS_AS(encode_request(normalize_gemini("m", body, false, Config{}), {}, "!synthetic"), Error);
+    setting["category"] = "UNKNOWN_CATEGORY";
+    setting["threshold"] = "OFF";
+    REQUIRE_THROWS_AS(encode_request(normalize_gemini("m", body, false, Config{}), {}, "!synthetic"), Error);
+}
+
+TEST_CASE("Unverified forced execution still fails explicitly", "[protocol]") {
     Config cfg;
-    REQUIRE_THROWS_AS(
-        normalize_gemini(
-            "m",
-            obj(R"({"contents":[{"parts":[{"text":"x"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":100}}})"),
-            false, cfg),
-        Error);
-    REQUIRE_THROWS_AS(
-        normalize_gemini(
-            "m",
-            obj(R"({"contents":[{"parts":[{"text":"x"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true}}})"),
-            false, cfg),
-        Error);
     REQUIRE_THROWS_AS(
         normalize_openai(
             obj(R"({"model":"m","messages":[{"role":"user","content":"x"}],"tool_choice":"required"})"),
@@ -425,6 +544,20 @@ TEST_CASE("Unverified controls fail instead of advertising forced execution", "[
         false, cfg);
     auto wire = encode_request(signed_only, {}, "!snapshot");
     REQUIRE(wire[1].as_array()[0].as_array()[0].as_array()[0].as_array()[14] == "opaque");
+}
+
+TEST_CASE("Thought filtering retains attached signatures and model actions", "[protocol]") {
+    auto event = obj(R"({"candidates":[{"content":{"role":"model","parts":[
+        {"text":"hidden","thought":true,"thoughtSignature":"keep"},
+        {"text":"answer"},
+        {"functionCall":{"name":"f","args":{}},"thought":true,"thoughtSignature":"tool"}]}}]})");
+    filter_thoughts(event);
+    auto &parts = event.at("candidates").as_array()[0].as_object().at("content").as_object().at("parts").as_array();
+    REQUIRE(parts.size() == 3);
+    REQUIRE(parts[0] == json::object{{"thoughtSignature", "keep"}});
+    REQUIRE(parts[1].as_object().at("text") == "answer");
+    REQUIRE(parts[2].as_object().if_contains("functionCall"));
+    REQUIRE(parts[2].as_object().at("thoughtSignature") == "tool");
 }
 
 TEST_CASE("Executable code enums and function-response media survive request encoding",

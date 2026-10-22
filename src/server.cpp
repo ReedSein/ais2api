@@ -23,6 +23,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <utility>
 namespace ais2api {
 namespace {
 namespace net = boost::asio;
@@ -206,7 +207,7 @@ class Service {
             const auto previous = config();
             const auto next = (pending_config_ ? *pending_config_ : previous).patched(value->as_object());
             const bool restart = restart_required(previous, next);
-            atomic_write(previous.config_file, json::serialize(next.to_json(true)), true);
+            next.save();
             if (!restart) {
                 std::lock_guard lock(config_mutex_);
                 config_ = next;
@@ -549,15 +550,20 @@ class Service {
             request.principal = work->principal;
             work->model = request.model;
             work->include_usage = request.include_usage;
+            if (!request.ignored_parameters.empty())
+                log({{"event", "generation_parameters_ignored"}, {"request_id", work->id},
+                     {"parameters", request.ignored_parameters},
+                     {"reason", "No verified private upstream mapping"}});
             trace.normalized = Clock::now();
             json::object().swap(work->body);
             std::vector<std::string> excluded;
             std::optional<Error> previous;
+            std::optional<Account> retry_account;
             bool delivered = false;
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
                 trace.attempts = attempt + 1;
                 check_cancel(token);
-                auto account = store_.choose(request.model, excluded);
+                auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded);
                 if (!account) {
                     if (previous)
                         throw *previous;
@@ -571,6 +577,7 @@ class Service {
                     {"account_id", account->id}, {"attempt", attempt+1}});
                 try {
                     bool received = false;
+                    bool completed = false;
                     gateway_->generate(
                         request, *account,
                         [&](json::object event) {
@@ -580,6 +587,14 @@ class Service {
                                 usage = p->as_object();
                             if (has_content(event))
                                 delivered = true;
+                            if (auto candidates = event.if_contains("candidates"); candidates && candidates->is_array())
+                                for (auto &candidate : candidates->as_array())
+                                    if (candidate.is_object()) {
+                                        const auto reason = string_or(candidate.as_object(), "finishReason");
+                                        if (!reason.empty() && reason != "FINISH_REASON_UNSPECIFIED") completed = true;
+                                    }
+                            if (!request.include_thoughts)
+                                filter_thoughts(event);
                             work->pipe->push(
                                 std::move(event),
                                 Clock::now() + std::chrono::seconds(
@@ -590,14 +605,30 @@ class Service {
                     if (!received)
                         throw Error(502, "empty_upstream",
                                     "Upstream returned no generation events");
+                    if (!completed)
+                        throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
                     store_.success(account->id, request.model, usage);
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
                     if (token.stop_requested())
                         throw;
-                    auto kind = e.status == 429   ? "rate_limit"
-                                : e.status == 403 ? "permission"
+                    // Upstream route glitches and one empty 204 are retries of
+                    // this request, not evidence that an account is unhealthy.
+                    const bool same_account = e.code == "transient_rpc_route" ||
+                                              (e.code == "upstream_no_content" && attempt == 0);
+                    if (same_account) {
+                        if (delivered || attempt + 1 == cfg.limits.max_attempts) throw;
+                        retry_account = account;
+                        // generate() re-encodes the body and obtains a new
+                        // snapshot; a route glitch does not invalidate login.
+                        continue;
+                    }
+                    if (e.status == 404 || e.status == 204 || e.code == "upstream_no_content" ||
+                        e.code == "benefit_tier_unconfirmed") throw;
+                    auto kind = e.status == 429   ? (e.quota_scope == "minute" ? "rate_limit_minute" :
+                                                    e.quota_scope == "day" ? "rate_limit_day" : "rate_limit_model")
+                                : e.status == 403 ? "permission_temporary"
                                 : (e.status == 401 || e.code == "login_expired" ||
                                    e.code == "session_expired")
                                     ? "login_expired"
@@ -1167,6 +1198,10 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             else {
                 object.erase("id");
                 object["name"] = "models/" + id;
+                auto display_name = object.if_contains("displayName");
+                if (!display_name || display_name->is_null() ||
+                    (display_name->is_string() && display_name->as_string().empty()))
+                    object["displayName"] = id;
                 object["supportedGenerationMethods"] =
                     json::array{"generateContent", "streamGenerateContent"};
                 list.push_back(std::move(object));

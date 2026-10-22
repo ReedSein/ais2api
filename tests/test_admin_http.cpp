@@ -143,6 +143,9 @@ TEST_CASE("management HTTP config and keys validate redact apply and persist", "
     CHECK(server.send(http::verb::patch, "/config", {{"unknown", true}}).result_int() == 400);
     CHECK(read_file(server.config.config_file) == before);
     REQUIRE(server.send(http::verb::patch, "/config", {{"limits", json::object{{"queue_size", 12}}}}).result_int() == 200);
+    const auto saved_text = read_file(server.config.config_file);
+    CHECK(saved_text.starts_with("{\n  \"version\": 1,\n"));
+    CHECK(saved_text.find("\n    \"queue_size\": 12,") != std::string::npos);
     CHECK(Config::load(server.config.config_file).limits.queue_size == 12);
     const auto replacement = "synthetic-rotated-api-" + random_hex(12);
     REQUIRE(server.send(http::verb::put, "/keys/config", {{"api_key", replacement}}).result_int() == 200);

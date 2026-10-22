@@ -6,6 +6,7 @@
 
 #include "ais2api/browser.hpp"
 #include "../browser/cdp.hpp"
+#include "../browser/google_auth.hpp"
 #include "../browser/rpc_error.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -337,18 +338,34 @@ struct BrowserGateway::Impl {
     fs::path profile;
     std::string context, session, account_id, account_fingerprint;
     json::array base_template;
+    std::string timezone = "UTC";
     json::array cached_models;
+    browser_detail::GoogleAuthorizationCache authorization_cache;
     Clock::time_point models_at{};
     std::string last_status = "not_started";
     explicit Impl(const Config& c, Store& s) : config(c), store(s) {}
     ~Impl() { close(); }
     void close() noexcept {
+        authorization_cache.clear();
         if (cdp) cdp->close();
         cdp.reset(); process.stop(); context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear();
         if (!profile.empty()) { std::error_code ec; fs::remove_all(profile, ec); profile.clear(); }
         last_status = "closed";
     }
     json::value eval(std::string expression, std::stop_token token, std::chrono::seconds timeout = 30s) { return cdp->evaluate(std::move(expression), session, token, timeout); }
+    std::string authorization(std::stop_token token) {
+        check_cancel(token);
+        auto result = authorization_cache.authorization([&] {
+            // Query the selected page's cookie store, including HttpOnly values.
+            // Never use the import file or cookies from another browser context.
+            auto state = cdp->call("Network.getCookies", {{"urls", json::array{"https://aistudio.google.com/"}}}, session, token, 5s);
+            auto cookies = state.if_contains("cookies");
+            if (!cookies || !cookies->is_array()) incompatible("Browser did not return signing cookies");
+            return cookies->as_array();
+        });
+        check_cancel(token);
+        return result;
+    }
     void ensure_browser(std::stop_token token) {
         check_cancel(token);
         if (cdp && beast::get_lowest_layer(cdp->socket).socket().is_open() && process.alive()) return;
@@ -386,6 +403,7 @@ struct BrowserGateway::Impl {
         } catch (...) { close(); throw; }
     }
     void dispose_context(std::stop_token token) {
+        authorization_cache.clear();
         if (!context.empty()) cdp->call("Target.disposeBrowserContext", {{"browserContextId", context}}, {}, token);
         context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear();
     }
@@ -501,6 +519,7 @@ struct BrowserGateway::Impl {
                             template_seen = true;
                             if (bool_or(capability.as_object(), "snapshot")) {
                                 base_template = body->as_array();
+                                timezone = string_or(capability.as_object(), "timezone", "UTC");
                                 eval("globalThis.__ais2bridge.finishBootstrap()", token);
                                 last_status = "gateway_ready"; return;
                             }
@@ -600,7 +619,8 @@ json::array BrowserGateway::models(std::stop_token cancel) {
             for (auto& item : cached) item.as_object()["source"] = "cache";
             return cached;
         }
-        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + ")", cancel, 15s);
+        const auto authorization = impl_->authorization(cancel);
+        auto result = impl_->eval("globalThis.__ais2bridge.discoverModels(" + quote_js(account->auth_user) + "," + quote_js(authorization) + ")", cancel, 25s);
         if (!result.is_array()) incompatible("ListModels returned an unsupported response");
         impl_->cached_models = result.as_array(); impl_->models_at = Clock::now();
         return impl_->cached_models.empty() ? configured() : impl_->cached_models;
@@ -614,14 +634,15 @@ json::array BrowserGateway::models(std::stop_token cancel) {
 void BrowserGateway::generate(const Request& request, const Account& account, const EventSink& sink, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     impl_->ensure_account(account, cancel, true);
-    auto wire = encode_request(request, impl_->base_template, "");
+    auto wire = encode_request(request, impl_->base_template, "", impl_->timezone);
     auto snapshot = impl_->eval("globalThis.__ais2bridge.snapshot(" + quote_js(content_hash(wire)) + ")", cancel, 15s);
     if (!snapshot.is_string() || snapshot.as_string().empty()) incompatible("Snapshot service produced no request ticket");
     wire[4] = snapshot;
     const auto body = json::serialize(wire);
     const auto chunk_bytes = std::min<std::size_t>(32768, impl_->config.limits.relay_bytes);
     if (!chunk_bytes) throw Error(500, "invalid_config", "Browser relay byte budget must be positive");
-    impl_->eval("globalThis.__ais2bridge.start({body:" + quote_js(body) + ",authUser:" + quote_js(account.auth_user) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
+    const auto authorization = impl_->authorization(cancel);
+    impl_->eval("globalThis.__ais2bridge.start({body:" + quote_js(body) + ",authUser:" + quote_js(account.auth_user) + ",authorization:" + quote_js(authorization) + ",chunkBytes:" + std::to_string(chunk_bytes) + "})", cancel);
     WireStreamParser parser(impl_->config.limits.object_bytes);
     const auto began = Clock::now();
     auto activity = began;
@@ -637,6 +658,11 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
             auto value = impl_->eval("globalThis.__ais2bridge.poll()", cancel, 5s);
             if (!value.is_object()) incompatible("Browser relay state was lost");
             const auto& state = value.as_object();
+            auto classified = [&](Error error) {
+                if (error.status == 403 && string_or(state, "benefitTier", "unknown") == "unknown")
+                    error.code = "benefit_tier_unconfirmed";
+                return error;
+            };
             const auto retry_value = state.if_contains("retryAfter");
             const auto retry_after = retry_value && retry_value->is_int64() && retry_value->as_int64() > 0 ? static_cast<unsigned>(std::min<std::int64_t>(86400, retry_value->as_int64())) : 0u;
             auto pending = state.if_contains("pending");
@@ -646,10 +672,10 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
                 const auto bytes = decode64(string_or(pending->as_object(), "bytes"));
                 if (bytes.empty()) incompatible("Empty browser relay credit");
                 if (error_prefix.size() < error_prefix_limit) error_prefix.append(bytes.substr(0, error_prefix_limit - error_prefix.size()));
-                if (auto error = browser_detail::rpc_text_error(error_prefix, retry_after)) throw *error;
+                if (auto error = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*error);
                 try { if (!parse_failure) parser.feed(bytes, [&](json::value chunk) {
                     check_cancel(cancel);
-                    if (auto error = browser_detail::rpc_error(chunk, retry_after)) throw *error;
+                    if (auto error = browser_detail::rpc_error(chunk, retry_after)) throw classified(*error);
                     auto event = decode_chunk(chunk);
                     if (!event.empty()) sink(std::move(event));
                     check_cancel(cancel);
@@ -666,14 +692,16 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
                 activity = Clock::now();
             } else if (bool_or(state, "done")) {
                 const auto error = string_or(state, "error");
+                const auto status_value = state.if_contains("status");
+                const auto status = status_value && status_value->is_int64() ? status_value->as_int64() : 0;
+                if (status == 204) throw Error(502, "upstream_no_content", "Google returned an empty response");
                 if (!error.empty()) {
-                    if (auto rpc = browser_detail::rpc_text_error(string_or(state, "errorBody"), retry_after)) throw *rpc;
-                    const auto status_value = state.if_contains("status");
-                    const auto status = status_value && status_value->is_int64() ? status_value->as_int64() : 0;
-                    if (auto http = browser_detail::rpc_status_error(status, retry_after)) throw *http;
+                    const auto error_body = string_or(state, "errorBody");
+                    if (auto rpc = browser_detail::rpc_text_error(error_body, retry_after)) throw classified(*rpc);
+                    if (auto http = browser_detail::rpc_status_error(status, retry_after, error_body)) throw classified(*http);
                     throw Error(502, error.starts_with("browser_incompatible") ? "browser_incompatible" : "upstream_error", "Browser generation transport failed");
                 }
-                if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw *rpc;
+                if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*rpc);
                 if (parse_failure) throw *parse_failure;
                 parser.finish(); return;
             } else pause(cancel, 30ms);

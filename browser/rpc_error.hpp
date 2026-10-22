@@ -10,7 +10,8 @@
 #include <cctype>
 
 namespace ais2api::browser_detail {
-inline std::optional<Error> rpc_status_error(std::int64_t code, unsigned retry_after = 0) {
+inline std::optional<Error> rpc_status_error(std::int64_t code, unsigned retry_after = 0,
+                                             std::string_view message = {}) {
     int http = 502;
     switch (code) {
         case 1: http = 499; break; case 2: http = 500; break;
@@ -25,6 +26,17 @@ inline std::optional<Error> rpc_status_error(std::int64_t code, unsigned retry_a
     }
     Error error(http, http == 429 ? "rate_limit" : http == 401 ? "upstream_auth" : http == 403 ? "permission_denied" : "upstream_error", "Google returned an upstream RPC error");
     error.retry_after = std::min(retry_after, 86400u);
+    std::string lower(message);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (http == 404 && lower.find("ambiguous request for service") != std::string::npos &&
+        lower.find("generatecontent") != std::string::npos)
+        error.code = "transient_rpc_route";
+    if (http == 429) {
+        if (lower.find("per minute") != std::string::npos || lower.find("perminute") != std::string::npos)
+            error.quota_scope = "minute";
+        else if (lower.find("per day") != std::string::npos || lower.find("perday") != std::string::npos)
+            error.quota_scope = "day";
+    }
     return error;
 }
 inline std::optional<Error> rpc_error(const json::value& value, unsigned retry_after = 0, unsigned depth = 0) {
@@ -33,11 +45,20 @@ inline std::optional<Error> rpc_error(const json::value& value, unsigned retry_a
         auto error = value.as_object().if_contains("error");
         if (!error || !error->is_object()) return {};
         const auto& object = error->as_object();
-        if (auto code = object.if_contains("code"); code && code->is_int64()) return rpc_status_error(code->as_int64(), retry_after);
+        const auto message = string_or(object, "message");
+        auto classify = [&](std::int64_t code) {
+            auto result = rpc_status_error(code, retry_after, message);
+            if (result && result->status == 429 && result->quota_scope == "unknown")
+                if (auto details = object.if_contains("details"))
+                    result->quota_scope = rpc_status_error(429, retry_after, json::serialize(*details))->quota_scope;
+            return result;
+        };
+        if (auto code = object.if_contains("code"); code && code->is_int64()) return classify(code->as_int64());
         const auto status = string_or(object, "status");
-        if (status == "RESOURCE_EXHAUSTED") return rpc_status_error(8, retry_after);
-        if (status == "PERMISSION_DENIED") return rpc_status_error(7, retry_after);
-        if (status == "UNAUTHENTICATED") return rpc_status_error(16, retry_after);
+        if (status == "RESOURCE_EXHAUSTED") return classify(8);
+        if (status == "PERMISSION_DENIED") return classify(7);
+        if (status == "UNAUTHENTICATED") return classify(16);
+        if (status == "NOT_FOUND") return classify(5);
         return {};
     }
     if (!value.is_array()) return {};
@@ -51,7 +72,11 @@ inline std::optional<Error> rpc_error(const json::value& value, unsigned retry_a
     }
     // google.rpc.Status in JSON+protobuf: [code, message, details?].
     if (array.size() >= 2 && array.size() <= 3 && array[0].is_int64() && array[1].is_string() && !array[1].as_string().empty()) {
-        if (auto error = rpc_status_error(array[0].as_int64(), retry_after)) return error;
+        if (auto error = rpc_status_error(array[0].as_int64(), retry_after, array[1].as_string())) {
+            if (error->status == 429 && error->quota_scope == "unknown" && array.size() == 3)
+                error->quota_scope = rpc_status_error(429, retry_after, json::serialize(array[2]))->quota_scope;
+            return error;
+        }
     }
     for (const auto& child : array) if (auto error = rpc_error(child, retry_after, depth + 1)) return error;
     return {};

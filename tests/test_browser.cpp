@@ -7,12 +7,106 @@
 #include "ais2api/browser.hpp"
 #include "../browser/cdp.hpp"
 #include "../browser/rpc_error.hpp"
+#include "../browser/google_auth.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <future>
 #include <thread>
 
 using namespace ais2api;
+TEST_CASE("Google authorization signs synthetic cookies with exact SHA1 hashes", "[google-auth]") {
+    browser_detail::GoogleAuthorizationCache cache;
+    auto cookies = [] { return json::array{
+        json::object{{"name", "SAPISID"}, {"value", "main"}},
+        json::object{{"name", "__Secure-1PAPISID"}, {"value", "one"}},
+        json::object{{"name", "__Secure-3PAPISID"}, {"value", "three"}}}; };
+    CHECK(cache.authorization(cookies, 1000) ==
+        "SAPISIDHASH 1000_5ad6c62f8abc233b0ecd01af67be382176ab72f7 "
+        "SAPISID1PHASH 1000_282bb37481778fc55df8d7abb9b09a07d2ee28da "
+        "SAPISID3PHASH 1000_6edd2b3b30552dd953e82d9b7cb4dc7dfc275dab");
+    cache.clear();
+    CHECK(cache.authorization([] { return json::array{json::object{{"name", "__Secure-1PAPISID"}, {"value", "one"}}}; }, 1000) ==
+        "SAPISIDHASH 1000_282bb37481778fc55df8d7abb9b09a07d2ee28da "
+        "SAPISID1PHASH 1000_282bb37481778fc55df8d7abb9b09a07d2ee28da "
+        "SAPISID3PHASH 1000_282bb37481778fc55df8d7abb9b09a07d2ee28da");
+    cache.clear();
+    CHECK(cache.authorization([] { return json::array{json::object{{"name", "SAPISID"}, {"value", "main"}}}; }, 1000) ==
+        "SAPISIDHASH 1000_5ad6c62f8abc233b0ecd01af67be382176ab72f7 "
+        "SAPISID1PHASH 1000_5ad6c62f8abc233b0ecd01af67be382176ab72f7 "
+        "SAPISID3PHASH 1000_5ad6c62f8abc233b0ecd01af67be382176ab72f7");
+}
+
+TEST_CASE("Google authorization refreshes on TTL expiry missing cookies and isolation", "[google-auth]") {
+    browser_detail::GoogleAuthorizationCache cache;
+    const auto now = Clock::now();
+    int calls = 0;
+    json::array cookies{json::object{{"name", "SAPISID"}, {"value", "main"}, {"expires", 1100}}};
+    auto refresh = [&] { ++calls; return cookies; };
+    REQUIRE_FALSE(cache.authorization(refresh, 1000, now).empty());
+    CHECK_FALSE(cache.authorization(refresh, 1001, now + std::chrono::seconds(59)).empty());
+    CHECK(calls == 1);
+    CHECK_FALSE(cache.authorization(refresh, 1002, now + std::chrono::seconds(60)).empty());
+    CHECK(calls == 2);
+    CHECK(cache.authorization(refresh, 1100, now + std::chrono::seconds(61)).empty());
+    CHECK(calls == 3);
+    CHECK(cache.authorization(refresh, 1101, now + std::chrono::seconds(62)).empty());
+    CHECK(calls == 4);
+    cookies = {json::object{{"name", "SAPISID"}, {"value", "main"}},
+               json::object{{"name", "__Secure-3PAPISID"}, {"value", "three"}, {"expires", 1200}}};
+    REQUIRE_FALSE(cache.authorization(refresh, 1199, now + std::chrono::seconds(63)).empty());
+    CHECK(calls == 5);
+    CHECK_FALSE(cache.authorization(refresh, 1200, now + std::chrono::seconds(64)).empty());
+    CHECK(calls == 6);
+    cache.clear(); cookies = {json::object{{"name", "unrelated"}, {"value", "ignored"}}, json::object{{"name", "SAPISID"}, {"value", ""}}};
+    CHECK(cache.authorization(refresh, 1201, now + std::chrono::seconds(65)).empty());
+    CHECK(calls == 7);
+    cookies = {json::object{{"name", "SAPISID"}, {"value", "main"}, {"expires", 0}}};
+    CHECK(cache.authorization(refresh, 1202, now + std::chrono::seconds(66)).empty());
+    CHECK(calls == 8);
+    cookies = {json::object{{"name", "SAPISID"}, {"value", "main"}, {"expires", -1}}};
+    CHECK_FALSE(cache.authorization(refresh, 1203, now + std::chrono::seconds(67)).empty());
+    CHECK(calls == 9);
+}
+
+TEST_CASE("Google authorization propagates cancellation and tolerates refresh errors", "[google-auth]") {
+    browser_detail::GoogleAuthorizationCache cache;
+    const auto now = Clock::now();
+    auto failed = []() -> json::array { throw Error(502, "cdp_failed", "Synthetic failure"); };
+    CHECK(cache.authorization(failed, 1000, now).empty());
+    auto cookies = [] { return json::array{json::object{{"name", "SAPISID"}, {"value", "main"}, {"expires", 1100}}}; };
+    const auto expected = cache.authorization(cookies, 1000, now);
+    REQUIRE_FALSE(expected.empty());
+    CHECK(cache.authorization(failed, 1000, now + std::chrono::seconds(60)) == expected);
+    try {
+        cache.authorization([]() -> json::array { throw Error(499, "cancelled", "Synthetic cancellation"); }, 1000, now + std::chrono::seconds(61));
+        FAIL("Expected cancellation");
+    } catch (const Error& error) { CHECK(error.code == "cancelled"); }
+    CHECK(cache.authorization(failed, 1100, now + std::chrono::seconds(62)).empty());
+}
+
+TEST_CASE("Google authorization replaces rotated cookies and never resurrects removed credentials", "[google-auth]") {
+    browser_detail::GoogleAuthorizationCache cache;
+    const auto now = Clock::now();
+    json::array cookies{json::object{{"name", "SAPISID"}, {"value", "main"}, {"httpOnly", true}}};
+    auto refresh = [&] { return cookies; };
+    const auto first = cache.authorization(refresh, 1000, now);
+    REQUIRE_FALSE(first.empty());
+    cookies = {json::object{{"name", "SAPISID"}, {"value", "rotated"}},
+               json::object{{"name", "__Secure-1PAPISID"}, {"value", "rotated-one"}},
+               json::object{{"name", "__Secure-3PAPISID"}, {"value", "rotated-three"}}};
+    CHECK(cache.authorization(refresh, 1000, now + std::chrono::seconds(59)) == first);
+    CHECK(cache.authorization(refresh, 1000, now + std::chrono::seconds(60)) ==
+        "SAPISIDHASH 1000_d7f3071ec191694f8737f36b487393a2c0784a74 "
+        "SAPISID1PHASH 1000_bde977b8ade6faebd21d740edf3b73812d19620b "
+        "SAPISID3PHASH 1000_caa233cd7c71647c95dadf105d97ec7763f5ba62");
+    cookies = {};
+    CHECK(cache.authorization(refresh, 1000, now + std::chrono::seconds(120)).empty());
+    auto failed = []() -> json::array { throw Error(502, "cdp_failed", "Synthetic failure"); };
+    CHECK(cache.authorization(failed, 1000, now + std::chrono::seconds(121)).empty());
+    cookies = {json::object{{"name", "__Secure-3PAPISID"}, {"value", "third-party-only"}}};
+    CHECK(cache.authorization(refresh, 1000, now + std::chrono::seconds(122)).empty());
+}
+
 namespace {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -219,6 +313,28 @@ TEST_CASE("generated tool arguments cannot masquerade as RPC errors") {
     json::array candidate{json::value(content)};
     json::array wire{json::value(json::array{json::value(candidate)})};
     CHECK_FALSE(browser_detail::rpc_error(wire));
+}
+
+TEST_CASE("RPC recovery metadata distinguishes route glitches quota windows and ordinary errors", "[upstream-policy]") {
+    auto route = browser_detail::rpc_text_error(R"([[5,"Ambiguous request for service '' and method '/GenerativeService.GenerateContent'"]])");
+    REQUIRE(route); CHECK(route->status == 404); CHECK(route->code == "transient_rpc_route");
+    CHECK(std::string(route->what()).find("GenerativeService") == std::string::npos);
+    for (auto message : {"Ambiguous request for service ListModels", "GenerateContent model was not found"}) {
+        auto ordinary = browser_detail::rpc_status_error(404, 0, message);
+        REQUIRE(ordinary); CHECK(ordinary->code == "upstream_error");
+    }
+    for (const auto& [message, scope] : std::vector<std::pair<std::string, std::string>>{
+             {"Quota per minute exceeded", "minute"}, {"quota PerDay exceeded", "day"}, {"quota exhausted", "unknown"}}) {
+        auto limited = browser_detail::rpc_error(json::object{{"error", {{"code", 429}, {"message", message}}}}, 900);
+        REQUIRE(limited); CHECK(limited->quota_scope == scope); CHECK(limited->retry_after == 900);
+        CHECK(std::string(limited->what()).find(message) == std::string::npos);
+    }
+    auto status = browser_detail::rpc_error(json::object{{"error", {{"status", "NOT_FOUND"}, {"message", "Ambiguous request for service GenerateContent"}}}});
+    REQUIRE(status); CHECK(status->code == "transient_rpc_route");
+    auto details = browser_detail::rpc_text_error(R"({"error":{"code":429,"message":"Resource exhausted","details":[{"quotaId":"GenerateRequestsPerMinutePerModel"}]}})");
+    REQUIRE(details); CHECK(details->quota_scope == "minute");
+    auto wire_details = browser_detail::rpc_text_error(R"([[8,"Resource exhausted",[{"quotaId":"GenerateRequestsPerDayPerModel"}]]])");
+    REQUIRE(wire_details); CHECK(wire_details->quota_scope == "day");
 }
 
 TEST_CASE("snapshot hash follows encoded contents including expanded attachments") {

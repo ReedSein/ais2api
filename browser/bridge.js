@@ -12,6 +12,7 @@
   const fail = message => { throw new Error(message); };
   const snapshotInvocations = new Map();
   const snapshotWrappers = new WeakSet();
+  const benefit = { tier: 'unknown', authUser: null, expires: 0, retryAt: 0, pending: null, controller: null };
   function selectSnapshotService() {
     if (state.snapshotCall || !state.template) return;
     const ticket = state.template.body[4];
@@ -260,30 +261,98 @@
     if (typeof value !== 'string' || !value.length) fail('browser_incompatible: snapshot service returned no ticket');
     return value;
   }
-  async function authenticatedHeaders(captured, expectedAuthUser) {
+  function authenticatedHeaders(captured, expectedAuthUser, authorization) {
     if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser))
       fail('browser_incompatible: invalid request auth_user');
+    if (new URL(location.href).origin !== 'https://aistudio.google.com')
+      fail('identity_mismatch: unexpected authentication origin');
+    const sameUser = value => /^\d+$/.test(value) && BigInt(value) === BigInt(expectedAuthUser);
+    if (new URL(captured.url).searchParams.getAll('authuser').some(value => !sameUser(value)))
+      fail('identity_mismatch: captured request auth_user differs from verified account');
     const headers = {};
+    let capturedAuthorization = '';
     for (const [key, value] of Object.entries(captured.headers)) {
       const lower = key.toLowerCase();
-      if (!['host', 'content-length', 'authorization', 'x-goog-authuser'].includes(lower)) headers[lower] = value;
+      if (lower === 'x-goog-authuser' && !sameUser(value))
+        fail('identity_mismatch: captured request auth_user differs from verified account');
+      if (lower === 'authorization' && typeof value === 'string' && value.trim()) capturedAuthorization = value;
+      if (!['host', 'content-length', 'authorization', 'x-goog-authuser', 'x-aistudio-g1-tier'].includes(lower)) headers[lower] = value;
     }
-    const cookies = new Map(String(document.cookie || '').split(';').map(field => {
-      const equal = field.indexOf('=');
-      return equal < 0 ? ['', ''] : [field.slice(0, equal).trim(), field.slice(equal + 1).trim()];
-    }));
-    const sapisid = cookies.get('SAPISID') || cookies.get('__Secure-3PAPISID');
-    if (!sapisid) fail('browser_incompatible: current SAPISID cookie unavailable');
-    const timestamp = Math.floor(Date.now() / 1000);
-    const origin = new URL(location.href).origin;
-    if (origin !== 'https://aistudio.google.com') fail('identity_mismatch: unexpected authentication origin');
-    const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(timestamp + ' ' + sapisid + ' ' + origin));
-    const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
-    headers.authorization = 'SAPISIDHASH ' + timestamp + '_' + hash;
+    // The native host signs current CDP cookies. As in the reference transport,
+    // use only this page's captured Authorization when a fresh one is unavailable.
+    const selected = typeof authorization === 'string' && authorization.trim() ? authorization : capturedAuthorization;
+    if (!selected) fail('browser_incompatible: current signing cookies and captured Authorization unavailable');
+    headers.authorization = selected;
     headers['x-goog-authuser'] = expectedAuthUser;
     return headers;
   }
-  async function discoverModels(expectedAuthUser) {
+  async function benefitHeaders(captured, authUser, authorization, signal) {
+    const headers = authenticatedHeaders(captured, authUser, authorization);
+    const url = new URL(captured.url);
+    url.pathname = url.pathname.replace(/\/(ListModels|GenerateContent)$/, '/GetAiStudioBenefitTier');
+    const source = new URL(captured.url);
+    source.pathname = source.pathname.replace(/\/GenerateContent$/, '/ListModels');
+    if (!isDiscovery(source)) fail('browser_incompatible: invalid benefit endpoint');
+    const account = BigInt(authUser).toString();
+    if (benefit.authUser !== null && benefit.authUser !== account) fail('identity_mismatch: benefit account changed within page context');
+    benefit.authUser = account;
+    if (signal?.aborted) fail('cancelled');
+    if (Date.now() >= benefit.expires && Date.now() >= benefit.retryAt && !benefit.pending) {
+      benefit.tier = 'unknown';
+      const controller = new AbortController();
+      benefit.controller = controller;
+      const cancel = () => controller.abort();
+      signal?.addEventListener('abort', cancel, { once: true });
+      benefit.pending = (async () => {
+        const timer = setTimeout(() => controller.abort(), 8000);
+        let reader;
+        try {
+          const response = await nativeFetch(url.href, { method: 'POST', headers: { ...headers }, credentials: 'include', redirect: 'error', body: '[]', signal: controller.signal });
+          if (!response.ok || !response.body) throw new Error('benefit_unavailable');
+          reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let text = '', size = 0;
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            size += value.byteLength;
+            if (size > 8192) throw new Error('benefit_invalid');
+            text += decoder.decode(value, { stream: true });
+          }
+          text = (text + decoder.decode()).trim().replace(/^\)\]\}'/, '').trim().replace(/^\[,/, '[null,');
+          const raw = JSON.parse(text);
+          if (!Array.isArray(raw)) throw new Error('benefit_invalid');
+          const code = raw[0] === undefined || raw[0] === null ? 0 : raw[0];
+          if (!Number.isInteger(code) || code < 0 || code > 3) throw new Error('benefit_invalid');
+          if (controller.signal.aborted) throw new Error('benefit_unavailable');
+          benefit.tier = ['free', 'pro', 'ultra', 'plus'][code];
+          benefit.expires = Date.now() + 600000;
+          benefit.retryAt = 0;
+        } catch (_) {
+          benefit.tier = 'unknown';
+          benefit.expires = 0;
+          benefit.retryAt = Date.now() + 30000;
+        } finally {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', cancel);
+          if (reader) { try { await reader.cancel(); } catch (_) {} }
+          benefit.controller = null;
+        }
+      })();
+      try { await benefit.pending; } finally { benefit.pending = null; }
+    } else if (benefit.pending) {
+      await new Promise((resolve, reject) => {
+        const cancel = () => reject(new Error('cancelled'));
+        signal?.addEventListener('abort', cancel, { once: true });
+        benefit.pending.then(() => { signal?.removeEventListener('abort', cancel); resolve(); });
+      });
+    }
+    if (signal?.aborted) fail('cancelled');
+    const tierHeader = { plus: 'TIER0', pro: 'TIER1', ultra: 'TIER2' }[benefit.tier];
+    if (tierHeader && Date.now() < benefit.expires) headers['x-aistudio-g1-tier'] = tierHeader;
+    return headers;
+  }
+  async function discoverModels(expectedAuthUser, authorization) {
     if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser)) fail('browser_incompatible: invalid discovery auth_user');
     for (let attempt = 0; !state.discoveryRequest && attempt < 20; ++attempt)
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -296,7 +365,7 @@
     if ((headers['x-goog-authuser'] !== undefined && !sameUser(headers['x-goog-authuser'])) ||
         url.searchParams.getAll('authuser').some(value => !sameUser(value)))
       fail('identity_mismatch: captured ListModels auth_user differs from verified account');
-    const authenticated = await authenticatedHeaders(captured, expectedAuthUser);
+    const authenticated = await benefitHeaders(captured, expectedAuthUser, authorization);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
@@ -340,14 +409,15 @@
   function start(args) {
     abort();
     const chunkBytes = Number.isSafeInteger(args.chunkBytes) && args.chunkBytes > 0 ? Math.min(32768, args.chunkBytes) : 32768;
-    const t = { controller: new AbortController(), pending: null, sequence: 0, credit: null, done: false, error: '', errorBody: '', status: 0, retryAfter: 0 };
+    const t = { controller: new AbortController(), pending: null, sequence: 0, credit: null, done: false, error: '', errorBody: '', status: 0, retryAfter: 0, benefitTier: 'unknown' };
     state.transfer = t;
     void (async () => {
       let reader;
       try {
         const authUser = args.authUser === undefined ? new URL(location.href).searchParams.get('authuser') || '0' : args.authUser;
-        const headers = await authenticatedHeaders(state.template, authUser);
+        const headers = await benefitHeaders(state.template, authUser, args.authorization, t.controller.signal);
         if (t.controller.signal.aborted) fail('cancelled');
+        t.benefitTier = Date.now() < benefit.expires ? benefit.tier : 'unknown';
         const response = await nativeFetch(state.template.url, { method: 'POST', credentials: 'include', headers, body: args.body, signal: t.controller.signal });
         t.status = response.status;
         const retry = response.headers.get('retry-after');
@@ -403,9 +473,9 @@
   }
   globalThis.__ais2bridge = {
     identity, bootstrap, finishBootstrap, run, snapshot, start, ack, abort, discoverModels,
-    poll: () => { const t = state.transfer; return t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter } : null; },
-    capability: () => ({ template: state.template ? { body: state.template.body } : null, snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
+    poll: () => { const t = state.transfer; return t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter, benefitTier: t.benefitTier } : null; },
+    capability: () => ({ benefitTier: Date.now() < benefit.expires ? benefit.tier : 'unknown', template: state.template ? { body: state.template.body } : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
     models: () => state.models,
-    dispose: () => { abort(); clearInterval(installTimer); }
+    dispose: () => { abort(); benefit.controller?.abort(); clearInterval(installTimer); }
   };
 })()

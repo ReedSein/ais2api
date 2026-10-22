@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "../browser/rate_policy.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sqlite3.h>
@@ -28,6 +29,116 @@ json::object credential(std::string value = "private-cookie") {
             {"origins", json::array{}}};
 }
 } // namespace
+TEST_CASE("Pacific quota dates follow modern DST boundaries", "[quota-policy]") {
+    using namespace std::chrono;
+    using browser_detail::pacific_quota_day;
+    const auto seconds_at = [](year_month_day date, int hour, int minute = 0) {
+        return duration_cast<seconds>((sys_days{date} + hours{hour} + minutes{minute}).time_since_epoch()).count();
+    };
+    const auto march = sys_days{2026y / March / 8}.time_since_epoch().count();
+    CHECK(pacific_quota_day(seconds_at(2026y / March / 8, 7, 59)) == march - 1);
+    CHECK(pacific_quota_day(seconds_at(2026y / March / 8, 8)) == march);
+    CHECK(pacific_quota_day(seconds_at(2026y / March / 8, 9, 59)) == march);
+    CHECK(pacific_quota_day(seconds_at(2026y / March / 8, 10)) == march);
+    CHECK(pacific_quota_day(seconds_at(2026y / March / 9, 7)) == march + 1);
+    const auto november = sys_days{2026y / November / 1}.time_since_epoch().count();
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 6, 59)) == november - 1);
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 7)) == november);
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 8, 59)) == november);
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 1, 9)) == november);
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 7, 59)) == november);
+    CHECK(pacific_quota_day(seconds_at(2026y / November / 2, 8)) == november + 1);
+}
+
+TEST_CASE("model quota cooldowns isolate counters and preserve drip recovery", "[quota-policy]") {
+    Directory d;
+    Store store(d.path);
+    const auto imported = store.import_accounts(credential());
+    const auto id = string_or(imported[0].as_object(), "id");
+    auto verified = store.account(id);
+    verified.email = "quota-test@example.com";
+    store.put_account(verified);
+    sqlite3* database = nullptr;
+    REQUIRE(sqlite3_open((d.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+    struct Close { sqlite3* db; ~Close() { sqlite3_close(db); } } close{database};
+    auto execute = [&](const char* sql) { REQUIRE(sqlite3_exec(database, sql, nullptr, nullptr, nullptr) == SQLITE_OK); };
+    auto scalar = [&](const char* sql) {
+        sqlite3_stmt* statement = nullptr;
+        REQUIRE(sqlite3_prepare_v2(database, sql, -1, &statement, nullptr) == SQLITE_OK);
+        struct Finalize { sqlite3_stmt* p; ~Finalize() { sqlite3_finalize(p); } } finalize{statement};
+        REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+        return sqlite3_column_int64(statement, 0);
+    };
+    auto delay_is = [&](int expected) {
+        auto delay = scalar("SELECT until FROM failures WHERE model='m'") - unix_seconds();
+        CHECK(delay >= expected - 2); CHECK(delay <= expected);
+    };
+    store.failure(id, "m", "rate_limit_minute"); delay_is(60);
+    store.failure(id, "m", "rate_limit_minute"); delay_is(60);
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 0);
+    CHECK_FALSE(store.choose("m")); REQUIRE(store.choose("other"));
+    store.failure(id, "m", "rate_limit_day"); delay_is(60);
+    store.failure(id, "m", "rate_limit_model"); delay_is(60);
+    store.failure(id, "m", "rate_limit_day"); delay_is(300);
+    execute("UPDATE failures SET until=0");
+    store.success(id, "m", {});
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 3);
+    store.failure(id, "m", "rate_limit_model"); delay_is(300);
+    store.failure(id, "m", "rate_limit_model"); delay_is(600);
+    store.failure(id, "m", "rate_limit_minute", 3600); delay_is(3600);
+    store.failure(id, "m", "rate_limit_minute"); delay_is(3600);
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 5);
+    store.failure(id, "m", "permission_temporary");
+    auto refreshed = store.merge_verified_accounts({store.account(id)});
+    REQUIRE(refreshed.size() == 1);
+    CHECK(string_or(refreshed[0].as_object(), "id") == id);
+    CHECK(store.accounts().size() == 1);
+    CHECK_FALSE(store.choose("m"));
+    delay_is(3600);
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 5);
+    execute("UPDATE quota_counters SET day=day-1,cooldown_until=0");
+    store.failure(id, "m", "rate_limit_day"); delay_is(60);
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 1);
+    execute("UPDATE failures SET until=0");
+    store.success(id, "m", {});
+    CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
+    store.failure(id, "m", "transient");
+    store.failure(id, "m", "transient");
+    store.failure(id, "m", "rate_limit_day"); delay_is(60);
+    CHECK(scalar("SELECT count FROM quota_counters WHERE model='m'") == 1);
+    store.failure(id, "other", "rate_limit_day");
+    store.clear_cooldown(id, "m");
+    CHECK(scalar("SELECT COUNT(*) FROM quota_counters WHERE model='m'") == 0);
+    CHECK(scalar("SELECT COUNT(*) FROM quota_counters WHERE model='other'") == 1);
+    store.reset_account(id);
+    CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
+    store.failure(id, "m", "permission_temporary"); delay_is(300);
+    refreshed = store.merge_verified_accounts({store.account(id)});
+    REQUIRE(refreshed.size() == 1);
+    CHECK(string_or(refreshed[0].as_object(), "id") == id);
+    CHECK(store.accounts().size() == 1);
+    REQUIRE(store.choose("m"));
+    CHECK(store.choose("m")->id == id);
+    store.clear_cooldown(id);
+    store.failure(id, "m", "rate_limit_day", 100000); delay_is(86400);
+    store.remove_account(id);
+    CHECK(scalar("SELECT COUNT(*) FROM quota_counters") == 0);
+}
+
+TEST_CASE("existing version one stores add quota counters on reopen", "[quota-policy]") {
+    Directory d;
+    std::string id;
+    { Store store(d.path); id = string_or(store.import_accounts(credential())[0].as_object(), "id"); }
+    sqlite3* database = nullptr;
+    REQUIRE(sqlite3_open((d.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(database, "DROP TABLE quota_counters; CREATE TABLE quota_counters(account TEXT REFERENCES accounts(id) ON DELETE CASCADE,model TEXT,count INTEGER NOT NULL,day INTEGER NOT NULL,PRIMARY KEY(account,model))", nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(database);
+    Store reopened(d.path);
+    CHECK_NOTHROW(reopened.failure(id, "m", "rate_limit_day"));
+    CHECK_FALSE(reopened.choose("m"));
+    CHECK(reopened.choose("other"));
+}
+
 TEST_CASE("configuration merges partial limits and rejects unsafe types") {
     Directory d;
     auto file = d.path / "config.json";

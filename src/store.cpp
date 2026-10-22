@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "../browser/rate_policy.hpp"
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -322,7 +323,9 @@ struct Store::Impl {
                          "INTEGER DEFAULT 0);CREATE TABLE IF NOT EXISTS settings(k TEXT "
                          "PRIMARY KEY,v TEXT);CREATE TABLE IF NOT EXISTS failures(account "
                          "TEXT REFERENCES accounts(id) ON DELETE CASCADE,model TEXT,until "
-                         "INTEGER,count INTEGER,PRIMARY KEY(account,model));CREATE TABLE IF "
+                         "INTEGER,count INTEGER,PRIMARY KEY(account,model));CREATE TABLE IF NOT EXISTS "
+                         "quota_counters(account TEXT REFERENCES accounts(id) ON DELETE CASCADE,"
+                         "model TEXT,count INTEGER NOT NULL,day INTEGER NOT NULL,cooldown_until INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(account,model));CREATE TABLE IF "
                          "NOT EXISTS sticky(model TEXT PRIMARY KEY,account TEXT REFERENCES "
                          "accounts(id) ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS "
                          "stats(account TEXT,model TEXT,ok INTEGER DEFAULT 0,failed INTEGER "
@@ -335,6 +338,10 @@ struct Store::Impl {
                          "KEY(principal,call_id));CREATE INDEX IF NOT EXISTS tools_lru ON "
                          "tools(touched);CREATE INDEX IF NOT EXISTS tools_expiry ON "
                          "tools(created);PRAGMA user_version=1;");
+                bool quota_deadline = false;
+                { Statement columns(db, "PRAGMA table_info(quota_counters)");
+                  while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
+                if (!quota_deadline) exec(db, "ALTER TABLE quota_counters ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0");
                 ready.set_value();
             } catch (...) {
                 ready.set_exception(std::current_exception());
@@ -455,9 +462,14 @@ json::array Store::merge_verified_accounts(const std::vector<Account> &input) {
                 impl_->put(a);
                 Statement reset(impl_->db, "UPDATE accounts SET expired=0 WHERE id=?");
                 reset.text(1, a.id); reset.row();
-                // '*' is the rate-limit cooldown and must survive credential refresh.
+                // Credential replacement unlocks auth, preserving quota windows and counters.
                 Statement failures(impl_->db, "DELETE FROM failures WHERE account=? AND model<>'*'");
                 failures.text(1, a.id); failures.row();
+                Statement quota(impl_->db, "INSERT INTO failures(account,model,until,count) "
+                                          "SELECT account,model,cooldown_until,0 FROM quota_counters "
+                                          "WHERE account=? AND cooldown_until>? ON CONFLICT(account,model) "
+                                          "DO UPDATE SET until=MAX(failures.until,excluded.until)");
+                quota.text(1, a.id); quota.integer(2, unix_seconds()); quota.row();
                 out.push_back(summary(a));
             }
             exec(impl_->db, "COMMIT");
@@ -595,6 +607,8 @@ void Store::reset_account(std::string_view id) {
             Statement f(impl_->db, "DELETE FROM failures WHERE account=?");
             f.text(1, id);
             f.row();
+            Statement quota(impl_->db, "DELETE FROM quota_counters WHERE account=?");
+            quota.text(1, id); quota.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");
@@ -670,6 +684,10 @@ void Store::clear_cooldown(std::string_view id, std::string_view model) {
             clear.text(1, id);
             if (!model.empty()) clear.text(2, model);
             clear.row();
+            Statement quota(impl_->db, model.empty() ? "DELETE FROM quota_counters WHERE account=?" : "DELETE FROM quota_counters WHERE account=? AND model=?");
+            quota.text(1, id);
+            if (!model.empty()) quota.text(2, model);
+            quota.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");
@@ -697,17 +715,46 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 prior.text(1, id);
                 prior.text(2, m);
                 int count = prior.row() ? sqlite3_column_int(prior.p, 0) : 0;
-                auto delay = std::min<unsigned>(
-                    600, std::max<unsigned>(retry, 60u << std::clamp(count, 0, 4)));
+                const bool minute = kind == "rate_limit_minute";
+                const bool quota_error = minute || kind == "rate_limit_day" || kind == "rate_limit_model";
+                unsigned base_delay = std::min<unsigned>(600, 60u << std::clamp(count, 0, 4));
+                const auto current_time = unix_seconds();
+                const auto day = browser_detail::pacific_quota_day(current_time);
+                int quota_count = 0;
+                std::int64_t quota_deadline = 0;
+                if (quota_error) {
+                    Statement prior_quota(impl_->db, "SELECT count,day,cooldown_until FROM quota_counters WHERE account=? AND model=?");
+                    prior_quota.text(1, id); prior_quota.text(2, m);
+                    if (prior_quota.row()) {
+                        quota_deadline = sqlite3_column_int64(prior_quota.p, 2);
+                        if (sqlite3_column_int64(prior_quota.p, 1) == day)
+                            quota_count = sqlite3_column_int(prior_quota.p, 0);
+                    }
+                    if (!minute) quota_count = std::min(quota_count, 4) + 1;
+                    base_delay = minute || quota_count <= 2 ? 60u : quota_count <= 4 ? 300u : 600u;
+                } else {
+                    if (kind == "permission_temporary") base_delay = 300;
+                    Statement active_quota(impl_->db, "SELECT cooldown_until FROM quota_counters WHERE account=? AND model=?");
+                    active_quota.text(1, id); active_quota.text(2, m);
+                    if (active_quota.row()) quota_deadline = sqlite3_column_int64(active_quota.p, 0);
+                }
+                const auto delay = std::max(base_delay, std::min(retry, 86400u));
                 auto until =
-                    (kind == "permission" || kind == "403") ? INT64_MAX : unix_seconds() + delay;
+                    (kind == "permission" || kind == "403") ? INT64_MAX : current_time + delay;
+                until = std::max(until, quota_deadline);
+                if (quota_error) {
+                    Statement save_quota(impl_->db, "INSERT INTO quota_counters(account,model,count,day,cooldown_until) VALUES(?,?,?,?,?) ON CONFLICT(account,model) DO UPDATE SET count=excluded.count,day=excluded.day,cooldown_until=excluded.cooldown_until");
+                    save_quota.text(1, id); save_quota.text(2, m);
+                    save_quota.integer(3, quota_count); save_quota.integer(4, day);
+                    save_quota.integer(5, until); save_quota.row();
+                }
                 Statement s(impl_->db,
                             "INSERT INTO failures VALUES(?,?,?,?) ON CONFLICT(account,model) "
                             "DO UPDATE SET until=excluded.until,count=excluded.count");
                 s.text(1, id);
                 s.text(2, m);
                 s.integer(3, until);
-                s.integer(4, count + 1);
+                s.integer(4, quota_error ? count : std::min(count, 1000000) + 1);
                 s.row();
             }
             Statement st(impl_->db, "INSERT INTO stats(account,model,failed) VALUES(?,?,1) ON "
@@ -751,6 +798,11 @@ void Store::success(std::string_view id, std::string_view model, const json::obj
             reset.text(2, model);
             reset.integer(3, unix_seconds());
             reset.row();
+            Statement quota(impl_->db, "DELETE FROM quota_counters WHERE account=? AND model=? AND (count<3 OR day<>?)");
+            quota.text(1, id); quota.text(2, model);
+            quota.integer(3, browser_detail::pacific_quota_day(unix_seconds())); quota.row();
+            Statement quota_success(impl_->db, "UPDATE quota_counters SET cooldown_until=0 WHERE account=? AND model=?");
+            quota_success.text(1, id); quota_success.text(2, model); quota_success.row();
             exec(impl_->db, "COMMIT");
         } catch (...) {
             exec(impl_->db, "ROLLBACK");

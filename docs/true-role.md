@@ -40,7 +40,7 @@ assistant 可使用 `reasoning_content`、`content` 与 `thought_signature`（�
 
 ## 浏览器链路与验证边界
 
-浏览器就绪后，网关对最终 JSPB contents 计算 SHA-256：每个文本或内联数据贡献对应值，其余部件贡献空串，按单空格连接；展开的函数结果附件也计入。每次请求重新调用已捕获的页面快照服务，不复用 BotGuard 票据。发出请求时使用当前页面 Cookie 重新计算 SAPISIDHASH，并填写已验证账号的 X-Goog-AuthUser。鉴权数据不会作为 thoughtSignature 返回。
+浏览器就绪后，网关对最终 JSPB contents 计算 SHA-256：每个文本或内联数据贡献对应值，其余部件贡献空串，按单空格连接；展开的函数结果附件也计入。每次请求重新调用已捕获的页面快照服务，不复用 BotGuard 票据。生成和模型查询通过当前隔离页面的 CDP Cookie 缓存，以新时间戳计算 SAPISIDHASH、SAPISID1PHASH、SAPISID3PHASH，支持 HttpOnly Cookie。缓存缺失、Cookie 到期或超过 60 秒时刷新，切号或关闭时清除；无法新签名时回退该页面捕获的 Authorization，两者皆无则本地失败。填写已验证账号的 X-Goog-AuthUser，并拒绝捕获头中的账号冲突。鉴权数据仅驻留内存，不会写入日志或作为 thoughtSignature 返回。
 
 预热继续拦截 SavePrompt/CreatePrompt，并尽力启用 Temporary chat；成功或失败后停止探针、恢复输入框。临时聊天控件和页面结构可能随上游变化。
 

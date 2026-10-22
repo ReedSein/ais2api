@@ -4,6 +4,8 @@
 
 ## 已执行
 
+Google 搜索与内置工具转换的后续修复和验证见 [专项报告](reports/grounding-tools-2026-10-22.md)。本轮没有可用的已导入账号，未进行真实 Google 搜索验收。
+
 | 范围 | 环境与结果 | 能证明的范围 |
 |---|---|---|
 | C++ 构建 | Windows x64、MSVC 14.51、C++20、Release、静态运行库，成功 | 本机编译及链接 |
@@ -61,7 +63,7 @@ Cookie 推送使用独立的 `cookie_import_key`，默认空值禁用。导入�
 
 ## 当前明确限制
 
-thinkingBudget、includeThoughts、强制函数调用 ANY/required/named、VALIDATED 和 strict JSON Schema 没有已核实的私有协议映射，当前明确拒绝。thinkingLevel、原生思考块与逐块签名已有编解码。不能据此声称所有 Gemini 参数或 OpenAI 可选字段完整支持；详见 [协议合同](protocol.md)。
+thinkingBudget 和 seed 没有已核实的私有协议映射，为兼容 Gemini 客户端接受合法值但忽略，并记录字段名；不保证预算或随机种子生效，thinkingBudget=0 也不关闭模型思考。includeThoughts=false 在网关隐藏思考文本，保留签名、工具调用和 usage。强制函数调用 ANY/required/named、VALIDATED 和 strict JSON Schema 仍明确拒绝。thinkingLevel、原生思考块与逐块签名已有编解码。不能据此声称所有 Gemini 参数或 OpenAI 可选字段完整支持；详见 [协议合同](protocol.md)。
 
 当前只允许一个驻留上下文和一个生成任务；队列与资源限额可配置，尚无多驻留上下文并发调度。统计保存账号/模型的调用计数及 usage；阶段耗时与字节量写入脱敏日志。日志不写正文、Cookie、API Key 或签名。
 

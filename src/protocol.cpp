@@ -76,6 +76,95 @@ void keys(const json::object &o, std::initializer_list<std::string_view> allowed
                       std::string_view(kv.key().data(), kv.key().size())) == allowed.end())
             invalid(std::string(where) + ": unsupported field " + std::string(kv.key()));
 }
+std::string upper(std::string value) {
+    for (auto &c : value)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return value;
+}
+// Proto JSON accepts both the field name and its lowerCamelCase spelling.
+// Only visit protocol objects: tool arguments, responses and schema property
+// names belong to the caller and must never be rewritten.
+void aliases(json::object &o, std::initializer_list<std::string_view> names) {
+    for (auto name : names) {
+        std::string snake;
+        for (auto c : name) {
+            if (std::isupper(static_cast<unsigned char>(c))) {
+                snake += '_';
+                snake += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            } else snake += c;
+        }
+        if (auto p = o.if_contains(snake)) {
+            if (o.if_contains(name))
+                invalid("Conflicting Gemini field spellings: " + std::string(name));
+            auto value = std::move(*p);
+            o.erase(snake);
+            o[name] = std::move(value);
+        }
+    }
+}
+void canonical_content(json::value &value);
+void canonical_parts(json::value &value) {
+    if (!value.is_array()) invalid("parts must be an array");
+    for (auto &part : value.as_array()) {
+        if (!part.is_object()) invalid("part must be an object");
+        auto &p = part.as_object();
+        aliases(p, {"inlineData", "fileData", "functionCall", "functionResponse",
+                    "executableCode", "codeExecutionResult", "thoughtSignature"});
+        for (auto key : {"inlineData", "fileData"})
+            if (auto data = p.if_contains(key); data && data->is_object())
+                aliases(data->as_object(), {"mimeType", "fileUri"});
+        if (auto response = p.if_contains("functionResponse"); response && response->is_object())
+            if (auto parts = response->as_object().if_contains("parts"))
+                canonical_parts(*parts);
+    }
+}
+void canonical_content(json::value &value) {
+    if (value.is_object())
+        if (auto parts = value.as_object().if_contains("parts"); parts && parts->is_array())
+            canonical_parts(*parts);
+}
+void canonical_gemini(json::object &o) {
+    aliases(o, {"systemInstruction", "generationConfig", "toolConfig", "safetySettings"});
+    if (auto contents = o.if_contains("contents"); contents && contents->is_array())
+        for (auto &content : contents->as_array()) canonical_content(content);
+    if (auto system = o.if_contains("systemInstruction")) canonical_content(*system);
+    if (auto generation = o.if_contains("generationConfig"); generation && generation->is_object()) {
+        auto &g = generation->as_object();
+        aliases(g, {"stopSequences", "maxOutputTokens", "topP", "topK", "responseMimeType",
+                    "responseSchema", "presencePenalty", "frequencyPenalty", "responseLogprobs",
+                    "responseModalities", "thinkingConfig", "mediaResolution", "imageConfig",
+                    "candidateCount"});
+        if (auto t = g.if_contains("thinkingConfig"); t && t->is_object())
+            aliases(t->as_object(), {"includeThoughts", "thinkingBudget", "thinkingLevel"});
+        if (auto image = g.if_contains("imageConfig"); image && image->is_object())
+            aliases(image->as_object(), {"aspectRatio", "imageSize"});
+    }
+    if (auto config = o.if_contains("toolConfig"); config && config->is_object()) {
+        aliases(config->as_object(), {"functionCallingConfig", "includeServerSideToolInvocations"});
+        if (auto f = config->as_object().if_contains("functionCallingConfig"); f && f->is_object())
+            aliases(f->as_object(), {"allowedFunctionNames"});
+    }
+    if (auto tools = o.if_contains("tools"); tools && tools->is_array())
+        for (auto &tool : tools->as_array()) {
+            if (!tool.is_object()) continue;
+            auto &t = tool.as_object();
+            aliases(t, {"functionDeclarations", "codeExecution", "googleSearch",
+                        "googleSearchRetrieval", "googleMaps", "urlContext"});
+            if (auto search = t.if_contains("googleSearch"); search && search->is_object()) {
+                aliases(search->as_object(), {"searchTypes"});
+                if (auto types = search->as_object().if_contains("searchTypes"); types && types->is_object())
+                    aliases(types->as_object(), {"webSearch", "imageSearch"});
+            }
+            if (auto retrieval = t.if_contains("googleSearchRetrieval"); retrieval && retrieval->is_object()) {
+                aliases(retrieval->as_object(), {"dynamicRetrievalConfig"});
+                if (auto dynamic = retrieval->as_object().if_contains("dynamicRetrievalConfig"); dynamic && dynamic->is_object())
+                    aliases(dynamic->as_object(), {"dynamicThreshold"});
+            }
+            if (auto functions = t.if_contains("functionDeclarations"); functions && functions->is_array())
+                for (auto &f : functions->as_array())
+                    if (f.is_object()) aliases(f.as_object(), {"parametersJsonSchema"});
+        }
+}
 std::string model_name(std::string model, const Config &config) {
     if (auto p = config.model_aliases.if_contains(model)) {
         if (!p->is_string())
@@ -287,8 +376,13 @@ void validate_generation(const json::object &g) {
     keys(g,
          {"stopSequences", "maxOutputTokens", "temperature", "topP", "topK", "responseMimeType",
           "responseSchema", "presencePenalty", "frequencyPenalty", "responseLogprobs", "logprobs",
-          "responseModalities", "thinkingConfig", "mediaResolution", "imageConfig"},
+          "responseModalities", "thinkingConfig", "mediaResolution", "imageConfig", "candidateCount", "seed"},
          "generationConfig");
+    if (auto p = g.if_contains("candidateCount"); p &&
+        (!(p->is_int64() || p->is_uint64()) || number(*p) != 1))
+        invalid("Only candidateCount=1 is supported");
+    if (auto p = g.if_contains("seed"); p && !(p->is_int64() || p->is_uint64()))
+        invalid("seed must be an integer");
     for (auto key : {"temperature", "topP", "presencePenalty", "frequencyPenalty"})
         if (auto p = g.if_contains(key)) {
             if (!p->is_number())
@@ -332,7 +426,7 @@ json::array generation_wire(const json::object &g) {
     if (auto p = g.if_contains("responseModalities")) {
         json::array modes;
         for (auto &v : array(*p, "responseModalities")) {
-            auto s = str(v);
+            auto s = upper(str(v));
             if (s == "TEXT")
                 modes.push_back(1);
             else if (s == "IMAGE")
@@ -340,24 +434,30 @@ json::array generation_wire(const json::object &g) {
             else
                 invalid("Unsupported response modality");
         }
+        // AI Studio encodes image output first, followed by the optional text flag.
+        if (std::find(modes.begin(), modes.end(), json::value(2)) != modes.end())
+            modes = std::find(modes.begin(), modes.end(), json::value(1)) != modes.end()
+                ? json::array{2, 1} : json::array{2};
         put(a, 14, modes);
     }
     if (auto p = g.if_contains("thinkingConfig")) {
         auto &t = object(*p, "thinkingConfig");
         keys(t, {"includeThoughts", "thinkingBudget", "thinkingLevel"}, "thinkingConfig");
         json::array t_wire{1, nullptr, nullptr, 3};
-        if (t.if_contains("includeThoughts") || t.if_contains("thinkingBudget"))
-            invalid("thinkingBudget/includeThoughts have no verified mapping in this private "
-                    "upstream; use thinkingLevel");
+        if (auto include = t.if_contains("includeThoughts"); include && !include->is_bool())
+            invalid("includeThoughts must be boolean");
+        if (auto budget = t.if_contains("thinkingBudget"); budget &&
+            (!(budget->is_int64() || budget->is_uint64()) || number(*budget, -2) < -1))
+            invalid("thinkingBudget must be an integer greater than or equal to -1");
         if (auto b = t.if_contains("thinkingLevel")) {
             static const std::map<std::string, int> m{
                 {"LOW", 1}, {"MEDIUM", 2}, {"HIGH", 3}, {"MINIMAL", 4}};
-            auto it = m.find(str(*b));
+            auto it = m.find(upper(str(*b)));
             if (it == m.end())
                 invalid("Invalid thinkingLevel");
             put(t_wire, 3, it->second);
+            put(a, 16, t_wire);
         }
-        put(a, 16, t_wire);
     }
     if (auto p = g.if_contains("mediaResolution")) {
         static const std::map<std::string, int> m{{"MEDIA_RESOLUTION_LOW", 1},
@@ -497,11 +597,51 @@ json::object decode_part(const json::array &a) {
         return {};
     return p;
 }
-json::array tool_wire(const json::array &tools, const json::object *config) {
+bool image_model(std::string_view model) {
+    std::string normalized(model);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return normalized.find("image") != std::string::npos;
+}
+
+// Merge only protocol defaults; nested function arguments and schemas are caller data.
+void merge_request_defaults(json::object &request, const json::object &defaults) {
+    for (auto &kv : defaults) {
+        auto existing = request.if_contains(kv.key());
+        if (!existing) request[kv.key()] = kv.value();
+        else if (kv.key() == "generationConfig" && existing->is_object() && kv.value().is_object()) {
+            auto &generation = existing->as_object();
+            for (auto &parameter : kv.value().as_object()) {
+                auto current = generation.if_contains(parameter.key());
+                if (!current) generation[parameter.key()] = parameter.value();
+                else if (parameter.key() == "thinkingConfig" && current->is_object() && parameter.value().is_object())
+                    for (auto &thinking : parameter.value().as_object())
+                        if (!current->as_object().if_contains(thinking.key()))
+                            current->as_object()[thinking.key()] = thinking.value();
+            }
+        }
+    }
+}
+
+void validate_model_tools(const json::array &tools, std::string model) {
+    std::transform(model.begin(), model.end(), model.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool image = image_model(model);
+    for (auto &item : tools) {
+        auto &tool = object(item, "tool");
+        for (auto name : {"codeExecution", "googleMaps", "urlContext"})
+            if (tool.if_contains(name) &&
+                (image || (std::string_view(name) != "codeExecution" && !model.starts_with("gemini-"))))
+                invalid(std::string(name) + " is not supported for model " + model);
+    }
+}
+json::array tool_wire(const json::array &tools, const json::object *config, bool image = false) {
     std::string mode = "AUTO";
     std::set<std::string> allowed;
     if (config) {
-        keys(*config, {"functionCallingConfig"}, "toolConfig");
+        keys(*config, {"functionCallingConfig", "includeServerSideToolInvocations"}, "toolConfig");
+        if (auto include = config->if_contains("includeServerSideToolInvocations"); include && !include->is_bool())
+            invalid("includeServerSideToolInvocations must be boolean");
         if (auto p = config->if_contains("functionCallingConfig")) {
             auto &f = object(*p, "functionCallingConfig");
             keys(f, {"mode", "allowedFunctionNames"}, "functionCallingConfig");
@@ -522,6 +662,12 @@ json::array tool_wire(const json::array &tools, const json::object *config) {
     if (mode == "NONE")
         return {};
     json::array out;
+    json::array functions;
+    bool search_web = false, search_image = false;
+    auto builtin = [&](json::array value) {
+        if (std::find(out.begin(), out.end(), json::value(value)) == out.end())
+            out.push_back(std::move(value));
+    };
     for (auto &item : tools) {
         auto &t = object(item, "tool");
         keys(t,
@@ -529,7 +675,6 @@ json::array tool_wire(const json::array &tools, const json::object *config) {
               "googleMaps", "urlContext"},
              "tool");
         if (auto declarations = t.if_contains("functionDeclarations")) {
-            json::array functions;
             for (auto &declaration : array(*declarations, "functionDeclarations")) {
                 auto &f = object(declaration, "function declaration");
                 keys(f, {"name", "description", "parameters", "parametersJsonSchema"},
@@ -553,45 +698,71 @@ json::array tool_wire(const json::array &tools, const json::object *config) {
                 trim(entry);
                 functions.push_back(entry);
             }
-            if (!functions.empty())
-                out.push_back(json::array{nullptr, functions});
         }
-        for (auto key : {"codeExecution", "googleSearchRetrieval", "googleMaps", "urlContext"})
+        for (auto key : {"codeExecution", "googleMaps", "urlContext"})
             if (auto p = t.if_contains(key))
                 keys(object(*p, key), {}, key);
         if (t.if_contains("codeExecution"))
-            out.push_back(single(json::array{}));
+            builtin(single(json::array{}));
+        if (auto retrieval = t.if_contains("googleSearchRetrieval")) {
+            auto &options = object(*retrieval, "googleSearchRetrieval");
+            keys(options, {"dynamicRetrievalConfig"}, "googleSearchRetrieval");
+            if (auto dynamic = options.if_contains("dynamicRetrievalConfig")) {
+                auto &d = object(*dynamic, "dynamicRetrievalConfig");
+                keys(d, {"mode", "dynamicThreshold"}, "dynamicRetrievalConfig");
+                if (auto m = d.if_contains("mode"); m &&
+                    (!m->is_string() || (str(*m) != "MODE_DYNAMIC" && str(*m) != "MODE_UNSPECIFIED")))
+                    invalid("Unsupported dynamic retrieval mode");
+                if (auto threshold = d.if_contains("dynamicThreshold")) {
+                    if (!threshold->is_number())
+                        invalid("dynamicThreshold must be between 0 and 1");
+                    auto value = threshold->to_number<double>();
+                    if (!std::isfinite(value) || value < 0 || value > 1)
+                        invalid("dynamicThreshold must be between 0 and 1");
+                }
+            }
+            // AI Studio exposes modern Google Search; the legacy dynamic
+            // retrieval threshold has no corresponding verified wire control.
+            search_web = true;
+        }
         if (auto search = t.if_contains("googleSearch")) {
             auto &options = object(*search, "googleSearch");
             keys(options, {"searchTypes"}, "googleSearch");
-            bool web = true, image = false;
+            bool web = true, images = false;
             if (auto types = options.if_contains("searchTypes")) {
                 auto &types_object = object(*types, "searchTypes");
                 keys(types_object, {"webSearch", "imageSearch"}, "searchTypes");
-                web = types_object.if_contains("webSearch") != nullptr;
-                image = types_object.if_contains("imageSearch") != nullptr;
+                auto enabled = [&](const char *key) {
+                    auto value = types_object.if_contains(key);
+                    return value && !value->is_null();
+                };
+                web = enabled("webSearch");
+                images = enabled("imageSearch");
                 for (auto &type : types_object)
-                    keys(object(type.value(), "search type"), {}, "search type");
+                    if (!type.value().is_null())
+                        keys(object(type.value(), "search type"), {}, "search type");
             }
-            if (image)
-                out.push_back(json::parse(web ? "[null,null,null,[null,[[],[]]]]"
-                                              : "[null,null,null,[null,[null,[]]]]")
-                                  .as_array());
-            else
-                out.push_back(json::parse("[null,null,null,[null,[[]]]]").as_array());
-        } else if (t.if_contains("googleSearchRetrieval"))
-            out.push_back(json::parse("[null,null,null,[null,[[]]]]").as_array());
+            search_web = search_web || !image || web || !images;
+            search_image = search_image || (image && images);
+        }
         if (t.if_contains("googleMaps")) {
             json::array a;
             put(a, 10, json::array{});
-            out.push_back(a);
+            builtin(std::move(a));
         }
         if (t.if_contains("urlContext")) {
             json::array a;
             put(a, 7, json::array{});
-            out.push_back(a);
+            builtin(std::move(a));
         }
     }
+    if (search_web || search_image)
+        out.push_back(json::parse(search_image
+                                     ? (search_web ? "[null,null,null,[null,[[],[]]]]"
+                                                   : "[null,null,null,[null,[null,[]]]]")
+                                     : "[null,null,null,[null,[[]]]]").as_array());
+    if (!functions.empty())
+        out.insert(out.begin(), json::array{nullptr, std::move(functions)});
     if (mode == "ANY" && out.empty())
         invalid("No tools match tool choice");
     return out;
@@ -727,26 +898,46 @@ json::array encode_schema(const json::object &s) {
 
 Request normalize_gemini(std::string model, const json::object &input, bool stream,
                          const Config &config) {
-    keys(input,
+    auto canonical = input;
+    canonical_gemini(canonical);
+    keys(canonical,
          {"contents", "systemInstruction", "generationConfig", "tools", "toolConfig",
           "safetySettings", "ais2api"},
          "Gemini request");
     Request r;
     r.model = model_name(std::move(model), config);
     r.stream = stream;
-    r.gemini = input;
+    r.gemini = std::move(canonical);
     if (auto p = r.gemini.if_contains("ais2api")) {
         auto envelope = object(*p, "ais2api");
         keys(envelope, {"gemini"}, "ais2api");
         r.gemini.erase("ais2api");
-        if (auto ext = envelope.if_contains("gemini"))
-            apply_extension(r.gemini, object(*ext, "ais2api.gemini"));
+        if (auto ext = envelope.if_contains("gemini")) {
+            auto extension = object(*ext, "ais2api.gemini");
+            canonical_gemini(extension);
+            apply_extension(r.gemini, extension);
+        }
     }
     if (auto d = config.model_defaults.if_contains(r.model)) {
-        for (auto &kv : object(*d, "model defaults"))
-            if (!r.gemini.if_contains(kv.key()))
-                r.gemini[kv.key()] = kv.value();
+        auto defaults = object(*d, "model defaults");
+        canonical_gemini(defaults);
+        merge_request_defaults(r.gemini, defaults);
     }
+    const bool image = image_model(r.model);
+    json::object family_generation{{"thinkingConfig", json::object{{"thinkingLevel", image ? "MINIMAL" : "HIGH"}}}};
+    if (image) family_generation["responseModalities"] = json::array{"IMAGE"};
+    json::object family_defaults{{"generationConfig", family_generation}};
+    auto family = r.model;
+    std::transform(family.begin(), family.end(), family.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!image && (family.starts_with("gemini-") || family.starts_with("gemma-"))) {
+        json::array safety;
+        for (auto category : {"HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                              "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"})
+            safety.push_back(json::object{{"category", category}, {"threshold", "OFF"}});
+        family_defaults["safetySettings"] = safety;
+    }
+    merge_request_defaults(r.gemini, family_defaults);
     auto contents = r.gemini.if_contains("contents");
     if (!contents)
         invalid("contents is required");
@@ -755,17 +946,39 @@ Request normalize_gemini(std::string model, const json::object &input, bool stre
         content_wire(object(*p, "systemInstruction"), true);
     if (auto p = r.gemini.if_contains("generationConfig"))
         generation_wire(object(*p, "generationConfig"));
+    if (auto g = r.gemini.if_contains("generationConfig")) {
+        auto &generation = g->as_object();
+        if (generation.if_contains("seed")) r.ignored_parameters.push_back("generationConfig.seed");
+        if (auto p = generation.if_contains("thinkingConfig")) {
+            auto &thinking = p->as_object();
+            if (auto include = thinking.if_contains("includeThoughts"))
+                r.include_thoughts = include->as_bool();
+            if (thinking.if_contains("thinkingBudget"))
+                r.ignored_parameters.push_back("generationConfig.thinkingConfig.thinkingBudget");
+        }
+    }
     const json::object *tc = nullptr;
     if (auto p = r.gemini.if_contains("toolConfig"))
         tc = &object(*p, "toolConfig");
-    if (auto p = r.gemini.if_contains("tools"))
-        tool_wire(array(*p, "tools"), tc);
+    if (auto p = r.gemini.if_contains("tools")) {
+        const auto &tools = array(*p, "tools");
+        if (!tool_wire(tools, tc, image_model(r.model)).empty())
+            validate_model_tools(tools, r.model);
+    }
     else if (tc)
         tool_wire({}, tc);
+    if (tc && tc->if_contains("includeServerSideToolInvocations"))
+        r.ignored_parameters.push_back("toolConfig.includeServerSideToolInvocations");
+    if (auto tools = r.gemini.if_contains("tools"))
+        for (auto &tool : tools->as_array())
+            if (auto retrieval = tool.is_object() ? tool.as_object().if_contains("googleSearchRetrieval") : nullptr; retrieval && retrieval->is_object() &&
+                retrieval->as_object().if_contains("dynamicRetrievalConfig"))
+                r.ignored_parameters.push_back("tools.googleSearchRetrieval.dynamicRetrievalConfig");
     return r;
 }
 
-json::array encode_request(const Request &r, const json::array &base, std::string_view snapshot) {
+json::array encode_request(const Request &r, const json::array &base, std::string_view snapshot,
+                           std::string_view timezone) {
     json::array out = base;
     put(out, 0, json::value("models/" + r.model));
     auto c = r.gemini.if_contains("contents");
@@ -774,7 +987,7 @@ json::array encode_request(const Request &r, const json::array &base, std::strin
     put(out, 1, encode_contents(array(*c, "contents")));
     put(out, 4, json::value(snapshot));
     put(out, 10, 1);
-    for (auto i : {2, 3, 5, 6, 7, 11})
+    for (auto i : {2, 3, 5, 6, 7, 11, 13})
         put(out, i, nullptr);
     if (auto p = r.gemini.if_contains("generationConfig"))
         put(out, 3, generation_wire(object(*p, "generationConfig")));
@@ -784,9 +997,12 @@ json::array encode_request(const Request &r, const json::array &base, std::strin
     if (auto p = r.gemini.if_contains("toolConfig"))
         tc = &object(*p, "toolConfig");
     if (auto p = r.gemini.if_contains("tools")) {
-        auto tools = tool_wire(array(*p, "tools"), tc);
-        if (!tools.empty())
+        auto tools = tool_wire(array(*p, "tools"), tc, image_model(r.model));
+        if (!tools.empty()) {
             put(out, 6, tools);
+            if (!image_model(r.model))
+                put(out, 13, json::array{json::array{nullptr, nullptr, timezone.empty() ? "UTC" : timezone}, nullptr, 1});
+        }
     }
     if (auto p = r.gemini.if_contains("safetySettings")) {
         static const std::map<std::string, int> categories{{"HARM_CATEGORY_HARASSMENT", 7},
@@ -804,14 +1020,50 @@ json::array encode_request(const Request &r, const json::array &base, std::strin
             keys(s, {"category", "threshold"}, "safety setting");
             auto ci = categories.find(string_or(s, "category"));
             auto ti = thresholds.find(string_or(s, "threshold"));
+            // The retired civic category is still sent by both clients. The
+            // web API has no such filter; an explicit disabled setting is a no-op.
+            if (string_or(s, "category") == "HARM_CATEGORY_CIVIC_INTEGRITY" &&
+                (string_or(s, "threshold") == "OFF" || string_or(s, "threshold") == "BLOCK_NONE"))
+                continue;
             if (ci == categories.end() || ti == thresholds.end())
                 invalid("Unsupported safety setting");
             settings.push_back(json::array{nullptr, nullptr, ci->second, ti->second});
         }
         put(out, 2, settings);
     }
+    if (image_model(r.model)) {
+        put(out, 2, nullptr);
+        if (out[3].is_array()) {
+            auto &generation = out[3].as_array();
+            for (auto index : {7, 13, 17})
+                if (generation.size() > static_cast<std::size_t>(index)) generation[index] = nullptr;
+            trim(generation);
+        }
+    }
     trim(out);
     return out;
+}
+
+void filter_thoughts(json::object &event) {
+    auto candidates = event.if_contains("candidates");
+    if (!candidates || !candidates->is_array()) return;
+    for (auto &candidate : candidates->as_array()) {
+        if (!candidate.is_object()) continue;
+        auto content = candidate.as_object().if_contains("content");
+        if (!content || !content->is_object()) continue;
+        auto parts = content->as_object().if_contains("parts");
+        if (!parts || !parts->is_array()) continue;
+        auto &items = parts->as_array();
+        for (auto it = items.begin(); it != items.end();) {
+            if (!it->is_object() || !bool_or(it->as_object(), "thought") ||
+                !it->as_object().if_contains("text")) { ++it; continue; }
+            auto &part = it->as_object();
+            part.erase("text");
+            part.erase("thought");
+            if (part.empty()) it = items.erase(it);
+            else ++it;
+        }
+    }
 }
 
 json::object decode_chunk(const json::value &wire) {
@@ -1501,8 +1753,11 @@ Request normalize_openai(const json::object &input, const Config &config, Store 
     if (auto p = input.if_contains("ais2api")) {
         auto &ext = object(*p, "ais2api");
         keys(ext, {"gemini"}, "ais2api");
-        if (auto g = ext.if_contains("gemini"))
-            apply_extension(body, object(*g, "ais2api.gemini"));
+        if (auto g = ext.if_contains("gemini")) {
+            auto extension = object(*g, "ais2api.gemini");
+            canonical_gemini(extension);
+            apply_extension(body, extension);
+        }
     }
     auto request = normalize_gemini(model, body, bool_or(input, "stream"), config);
     request.protocol = Protocol::openai;

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <tuple>
 
 using namespace ais2api;
 namespace net = boost::asio;
@@ -45,7 +46,9 @@ struct BackendState {
     std::atomic<bool> cancelled{false};
     std::mutex mutex;
     json::object request;
+    json::array wire;
     std::string account_id;
+    std::vector<std::string> attempted_accounts;
     std::vector<std::string> probed_accounts;
 };
 
@@ -55,11 +58,26 @@ public:
 
     void generate(const Request& request, const Account& account, const EventSink& emit,
                   std::stop_token cancel) override {
-        state_->calls.fetch_add(1);
+        const auto attempt = state_->calls.fetch_add(1) + 1;
         {
             std::lock_guard lock(state_->mutex);
             state_->request = request.gemini;
+            state_->wire = encode_request(request, {}, "!synthetic");
             state_->account_id = account.id;
+            state_->attempted_accounts.push_back(account.id);
+        }
+        if ((request.model == "synthetic-route-retry" && attempt < 3) || request.model == "synthetic-route-always")
+            throw Error(404, "transient_rpc_route", "Synthetic upstream routing failure");
+        if ((request.model == "synthetic-empty-once" && attempt == 1) || request.model == "synthetic-empty-always")
+            throw Error(502, "upstream_no_content", "Synthetic empty response");
+        if (request.model == "synthetic-ordinary-not-found")
+            throw Error(404, "upstream_error", "Synthetic model missing");
+        if (request.model == "synthetic-unknown-tier")
+            throw Error(403, "benefit_tier_unconfirmed", "Synthetic unknown account benefit");
+        if (request.model == "synthetic-model-rate" && attempt == 1) {
+            Error error(429, "rate_limit", "Synthetic model quota");
+            error.quota_scope = "minute";
+            throw error;
         }
         if (request.model == "synthetic-cancel") {
             // emit waits for downstream acknowledgment and may itself throw on
@@ -96,12 +114,15 @@ public:
             return;
         }
         emit(text_event("hello "));
+        if (request.model == "synthetic-unfinished") return;
         if (request.model == "synthetic-after-content-error")
             throw Error(502, "synthetic_upstream_failure", "Synthetic failure after content");
         emit(text_event("world"));
         auto finished = finish_event();
         if (request.model == "synthetic-length")
             finished.at("candidates").as_array()[0].as_object()["finishReason"] = "MAX_TOKENS";
+        if (request.model == "synthetic-unspecified")
+            finished.at("candidates").as_array()[0].as_object()["finishReason"] = "FINISH_REASON_UNSPECIFIED";
         emit(finished);
     }
 
@@ -206,13 +227,18 @@ struct GenerationServer {
     }
 
     http::response<http::string_body> call(std::string target, std::string body,
-                                         http::verb method = http::verb::post) {
+                                         http::verb method = http::verb::post,
+                                         std::string auth_header = "Authorization") {
         net::io_context io;
         tcp::socket socket(io);
         socket.connect({net::ip::make_address("127.0.0.1"), config.port});
         receive_timeout(socket);
         auto outgoing = request(std::move(target), std::move(body));
         outgoing.method(method);
+        if (auth_header != "Authorization") {
+            outgoing.erase(http::field::authorization);
+            if (!auth_header.empty()) outgoing.set(auth_header, key);
+        }
         http::write(socket, outgoing);
         boost::beast::flat_buffer input;
         http::response_parser<http::string_body> parser;
@@ -275,6 +301,101 @@ TEST_CASE("Gemini unary HTTP preserves multiple turns and aggregates synthetic e
         REQUIRE_FALSE(server.state->account_id.empty());
     }
     REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("RikkaHub and SillyTavern native request shapes work over HTTP", "[generation][http][gemini-clients]") {
+    GenerationServer server;
+    for (bool rikka : {true, false}) {
+        for (bool streaming : {false, true}) {
+            INFO("RikkaHub=" << rikka << ", streaming=" << streaming);
+            auto body = json::parse(R"({"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+                "systemInstruction":{"parts":[{"text":"rules"}]},
+                "safetySettings":[
+                    {"category":"HARM_CATEGORY_HARASSMENT","threshold":"OFF"},
+                    {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"OFF"},
+                    {"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"OFF"},
+                    {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"OFF"},
+                    {"category":"HARM_CATEGORY_CIVIC_INTEGRITY","threshold":"OFF"}]})").as_object();
+            body["generationConfig"] = rikka
+                ? json::parse(R"({"temperature":0.7,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"low","thinkingBudget":-1}})")
+                : json::parse(R"({"candidateCount":1,"maxOutputTokens":128,"seed":42,"thinkingConfig":{"includeThoughts":false,"thinkingBudget":0},"responseModalities":["text","image"]})");
+            if (!rikka)
+                body["tools"] = json::parse(R"([{"function_declarations":[{"name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}]},{"google_search":{}}])");
+            auto target = std::string("/v1beta/models/gemini-synthetic-grounding:") +
+                          (streaming ? "streamGenerateContent?alt=sse" : "generateContent");
+            if (!rikka) target += (streaming ? "&key=" : "?key=") + server.key;
+            auto response = server.call(target, json::serialize(body), http::verb::post,
+                                        rikka ? "x-goog-api-key" : "");
+            REQUIRE(response.result_int() == 200);
+            json::object result;
+            if (streaming) {
+                REQUIRE(response[http::field::content_type].starts_with("text/event-stream"));
+                for (const auto &record : sse_records(response.body())) {
+                    REQUIRE(record != "[DONE]");
+                    merge_event(result, json::parse(record).as_object(), 32768);
+                }
+            } else result = json::parse(response.body()).as_object();
+            auto &candidate = result.at("candidates").as_array()[0].as_object();
+            REQUIRE(candidate.at("content").as_object().at("parts").as_array()[0].as_object().at("text") == "hello world");
+            REQUIRE(candidate.at("finishReason") == "STOP");
+            std::lock_guard lock(server.state->mutex);
+            REQUIRE(server.state->wire.at(2).as_array().size() == 4);
+            if (!rikka) REQUIRE(server.state->wire.at(6).as_array().size() == 2);
+        }
+    }
+    REQUIRE(server.state->calls == 4);
+}
+
+TEST_CASE("Client grounding options reach AI Studio wire over unary and SSE HTTP", "[generation][http][grounding]") {
+    GenerationServer server;
+    const std::vector<std::string> options{
+        R"("tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]},{"googleSearch":{}},{"urlContext":{}}],"toolConfig":{"includeServerSideToolInvocations":true})",
+        R"("tools":[{"google_search":{}},{"code_execution":{}},{"google_search":{}}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}})",
+        R"("tools":[{"google_search_retrieval":{"dynamic_retrieval_config":{"mode":"MODE_DYNAMIC","dynamic_threshold":0.3}}}])"
+    };
+    for (std::size_t client = 0; client < options.size(); ++client) {
+        for (bool streaming : {false, true}) {
+            INFO("client=" << client << ", streaming=" << streaming);
+            auto body = std::string(R"({"contents":[{"parts":[{"text":"search the web"}]}],)") + options[client] + "}";
+            auto target = std::string("/v1beta/models/gemini-synthetic-grounding:") +
+                          (streaming ? "streamGenerateContent?alt=sse" : "generateContent");
+            auto response = server.call(target, body);
+            REQUIRE(response.result_int() == 200);
+            if (streaming) REQUIRE_FALSE(sse_records(response.body()).empty());
+            else REQUIRE(json::parse(response.body()).as_object().if_contains("candidates"));
+            std::lock_guard lock(server.state->mutex);
+            auto &wire = server.state->wire;
+            REQUIRE(wire.at(13) == json::parse(R"([[null,null,"UTC"],null,1])"));
+            auto &tools = wire.at(6).as_array();
+            REQUIRE(tools.size() == (client == 0 ? 3 : client == 1 ? 2 : 1));
+            REQUIRE(std::count(tools.begin(), tools.end(), json::parse("[null,null,null,[null,[[]]]]")) == 1);
+        }
+    }
+    REQUIRE(server.state->calls == 6);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("includeThoughts filters text in unary and SSE while keeping signatures", "[generation][http][gemini-clients]") {
+    GenerationServer server;
+    for (bool streaming : {false, true}) {
+        for (bool include : {false, true}) {
+            auto body = json::parse(R"({"contents":[{"parts":[{"text":"question"}]}]})").as_object();
+            body["generationConfig"] = json::object{{"thinkingConfig", json::object{{"includeThoughts", include}}}};
+            auto target = std::string("/v1beta/models/synthetic-native-parts:") +
+                          (streaming ? "streamGenerateContent?alt=sse" : "generateContent");
+            auto response = server.call(target, json::serialize(body));
+            REQUIRE(response.result_int() == 200);
+            json::object result;
+            if (streaming)
+                for (const auto &record : sse_records(response.body()))
+                    merge_event(result, json::parse(record).as_object(), 32768);
+            else result = json::parse(response.body()).as_object();
+            REQUIRE((json::serialize(result).find("thinking") != std::string::npos) == include);
+            REQUIRE(json::serialize(result).find("answer") != std::string::npos);
+            REQUIRE(json::serialize(result).find("synthetic-original-signature") != std::string::npos);
+            REQUIRE(result.at("usageMetadata").as_object().at("totalTokenCount") == 7);
+        }
+    }
 }
 
 TEST_CASE("HTTP signatures survive streaming aggregation and next turn history", "[generation][http][true-role]") {
@@ -555,6 +676,62 @@ TEST_CASE("An upstream 502 after first content is a terminal SSE error without r
     REQUIRE(response.body().find("[DONE]") == std::string::npos);
     REQUIRE(server.state->calls == 1);
     REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Recoverable route and first empty responses retry the same account within the attempt budget", "[generation][http][upstream-policy]") {
+    for (const auto& [model, calls, status] : std::vector<std::tuple<std::string, unsigned, unsigned>>{
+             {"synthetic-route-retry", 3, 200}, {"synthetic-route-always", 3, 404},
+             {"synthetic-empty-once", 2, 200}, {"synthetic-empty-always", 2, 502},
+             {"synthetic-ordinary-not-found", 1, 404}, {"synthetic-unknown-tier", 1, 403}}) {
+        GenerationServer server;
+        auto response = server.call("/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"question"}]}]})");
+        INFO(model);
+        REQUIRE(response.result_int() == status);
+        REQUIRE(server.state->calls == calls);
+        const auto& attempts = server.state->attempted_accounts;
+        REQUIRE(attempts.size() == calls);
+        for (const auto& account : attempts) CHECK(account == attempts.front());
+        Store store(server.config.data_dir);
+        auto available = store.choose(model);
+        REQUIRE(available); CHECK(available->id == attempts.front());
+        CHECK_FALSE(server.failed);
+    }
+}
+
+TEST_CASE("Quota failover cools only the failed model on the actual attempt account", "[generation][http][upstream-policy]") {
+    GenerationServer server;
+    const std::string model = "synthetic-model-rate";
+    auto response = server.call("/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"question"}]}]})");
+    REQUIRE(response.result_int() == 200); REQUIRE(server.state->calls == 2);
+    const auto& attempts = server.state->attempted_accounts;
+    REQUIRE(attempts.size() == 2); REQUIRE(attempts[0] != attempts[1]);
+    Store store(server.config.data_dir);
+    CHECK_FALSE(store.choose(model, {attempts[1]}));
+    auto other = store.choose("different-model", {attempts[1]});
+    REQUIRE(other); CHECK(other->id == attempts[0]);
+}
+
+TEST_CASE("An unfinished response cannot succeed or restart after visible content", "[generation][http][upstream-policy]") {
+    for (const std::string model : {"synthetic-unfinished", "synthetic-unspecified"}) {
+        for (bool stream : {false, true}) {
+            GenerationServer server;
+            auto response = server.call("/v1beta/models/" + model + (stream ? ":streamGenerateContent" : ":generateContent"),
+                                        R"({"contents":[{"parts":[{"text":"question"}]}]})");
+            INFO(model); INFO(stream);
+            REQUIRE(server.state->calls == 1);
+            if (stream) {
+                REQUIRE(response.result_int() == 200);
+                auto records = sse_records(response.body());
+                REQUIRE_FALSE(records.empty());
+                const auto error = json::parse(records.back()).as_object().at("error").as_object();
+                CHECK(error.at("reason") == "incomplete_upstream");
+                CHECK(response.body().find("[DONE]") == std::string::npos);
+            } else {
+                REQUIRE(response.result_int() == 502);
+                CHECK(response.body().find("incomplete_upstream") != std::string::npos);
+            }
+        }
+    }
 }
 
 TEST_CASE("Disconnecting an HTTP stream cancels the active generation backend", "[generation][http]") {

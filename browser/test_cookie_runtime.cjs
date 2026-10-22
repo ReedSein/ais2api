@@ -175,9 +175,25 @@ async function main() {
     const stored = await cdp.call('Storage.getCookies', { browserContextId });
     assert.equal(stored.cookies.find(cookie => cookie.name === 'HSID').httpOnly, true);
     assert.equal(stored.cookies.find(cookie => cookie.name === 'SAPISID').httpOnly, false);
+    // Native authorization must see rotated HttpOnly signing cookies through
+    // the selected page session, without reading another account's store.
+    await cdp.call('Storage.setCookies', { browserContextId, cookies: [
+      { name: 'SAPISID', value: 'synthetic-rotated-httponly', domain: '.google.com', path: '/', secure: true, httpOnly: true }
+    ] });
+    const other = await cdp.call('Target.createBrowserContext', { disposeOnDetach: true });
+    await cdp.call('Storage.setCookies', { browserContextId: other.browserContextId, cookies: [
+      { name: 'SAPISID', value: 'synthetic-other-account', domain: '.google.com', path: '/', secure: true, httpOnly: true }
+    ] });
+    const signing = await call('Network.getCookies', { urls: ['https://aistudio.google.com/'] });
+    const signingCookie = signing.cookies.find(cookie => cookie.name === 'SAPISID');
+    assert.equal(signingCookie.value, 'synthetic-rotated-httponly');
+    assert.equal(signingCookie.httpOnly, true);
+    const pageCookies = await call('Runtime.evaluate', { expression: 'document.cookie', returnByValue: true });
+    assert.equal(pageCookies.result.value.includes('SAPISID='), false);
+    await cdp.call('Target.disposeBrowserContext', { browserContextId: other.browserContextId });
     if (interceptionError) throw interceptionError;
     await cdp.call('Target.disposeBrowserContext', { browserContextId });
-    console.log('PASS: offline browser cookie attributes and identity without a textarea (C++ converter tested separately)');
+    console.log('PASS: offline browser cookie attributes, identity and isolated HttpOnly signing-cookie refresh');
   } finally {
     if (cdp) {
       try { await cdp.call('Browser.close'); } catch (_) { /* Browser.close may close its own socket. */ }
