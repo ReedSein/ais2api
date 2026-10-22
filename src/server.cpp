@@ -11,6 +11,7 @@
 #include "ais2api/logs.hpp"
 #include "ais2api/log_sources.hpp"
 #include "ais2api/responses.hpp"
+#include "ais2api/webui.hpp"
 #include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -1046,6 +1047,26 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     std::string target(request.target());
     auto path = target.substr(0, target.find('?'));
     state.openai = path.starts_with("/v1/");
+    if (request.method() == http::verb::get || request.method() == http::verb::head) {
+        if (auto asset = webui::find(path)) {
+            http::response<http::string_body> response(http::status::ok, 11);
+            response.set(http::field::server, "ais2api");
+            response.set(http::field::content_type, asset->content_type);
+            response.set(http::field::cache_control, asset->immutable ? "public, max-age=31536000, immutable" : "no-cache");
+            response.set("X-Content-Type-Options", "nosniff");
+            response.set("X-Frame-Options", "DENY");
+            response.set("Referrer-Policy", "no-referrer");
+            response.set("Content-Security-Policy",
+                "default-src 'self'; connect-src 'self' http: https:; img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+            response.keep_alive(false);
+            if (request.method() == http::verb::get) response.body().assign(asset->body);
+            response.content_length(asset->body.size());
+            stream.expires_after(15s);
+            co_await http::async_write(stream, response, net::use_awaitable);
+            co_return;
+        }
+    }
     if (path.starts_with("/api/admin/v1/") && path != "/api/admin/v1/accounts/probe-import") {
         co_await handle_admin(stream, service, state, request, path.substr(13));
         co_return;
@@ -1072,14 +1093,17 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         const bool admin = path.starts_with("/api/admin/");
         if (admin) { admin_origin(import_cfg, request, state); state.category = "management"; }
         if ((admin ? import_cfg.admin_key : import_cfg.cookie_import_key).empty())
-            throw Error(403, "cookie_import_disabled", "Set cookie_import_key in config.json to enable userscript import");
+            throw Error(403, admin ? "admin_disabled" : "cookie_import_disabled",
+                admin ? "Set admin_key in config.json to enable management API" :
+                        "Set cookie_import_key in config.json to enable userscript import");
         const auto authorization = request[http::field::authorization];
         std::string_view provided;
         if (authorization.starts_with("Bearer "))
             provided = {authorization.data() + 7, authorization.size() - 7};
         const auto principal = admin ? import_cfg.authenticate_admin(provided) : import_cfg.authenticate_cookie_import(provided);
         if (!principal)
-            throw Error(401, "cookie_import_authentication", "A valid Cookie import key is required");
+            throw Error(401, admin ? "admin_authentication" : "cookie_import_authentication",
+                admin ? "A valid management key is required" : "A valid Cookie import key is required");
         const auto origin = request[http::field::origin];
         if (!admin && !origin.empty() && origin != "https://aistudio.google.com")
             throw Error(403, "cookie_import_origin", "Cookie import requires the AI Studio userscript");

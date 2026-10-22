@@ -22,6 +22,10 @@ Termux 后端包同样保留构建环境中已安装软件包提供的 `share/do
 
 部分拆分的 Termux 动态库包未提供版权文件时，产物中的 `dependency_notices` 将其明确记为 `external-system-package`，表示由系统包管理器另行分发；可取得的声明仍保留。此项不适用于嵌入程序的 Boost/libc++ 代码及实验静态归档，它们的声明必须存在。
 
+## Web 管理界面
+
+可选 WebUI 的源码位于 `webui/`，构建依赖及完整性摘要由 `webui/package-lock.json` 锁定。嵌入程序的 Vue、Vue Router 与 Microsoft Fluent System Icons 均采用 MIT 许可；原始版权声明和许可文本保留在 `webui/public/THIRD_PARTY_LICENSES.txt`，同时嵌入 `/THIRD_PARTY_LICENSES.txt` 并安装到 `share/licenses/ais2api-webui/`。Vite、TypeScript、vue-tsc 等仅用于构建，不作为运行服务依赖。
+
 ## 浏览器
 
 CloakBrowser/Chromium 二进制不纳入后端源码仓库。精简包按锁定清单从官方渠道下载浏览器；可选 `Browser-Local` 包供本机个人或内部使用，包含未修改的浏览器及其单独许可。浏览器没有改为 MPL 2.0。

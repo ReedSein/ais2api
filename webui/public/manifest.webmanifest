@@ -1,0 +1,9 @@
+{
+  "name": "ais2api 控制台",
+  "short_name": "ais2api",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#202020",
+  "theme_color": "#0067c0",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

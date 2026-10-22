@@ -10,6 +10,7 @@ data/
 
 # Local tools, editor state and compiled files
 dist/
+node_modules/
 .vs/
 .vscode/
 CMakeUserPresets.json

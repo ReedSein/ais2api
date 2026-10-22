@@ -1,6 +1,6 @@
 # Command-line interface
 
-The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and service control are available through the CLI and the optional, independently authenticated [management API](management-api.md). There is no built-in Web frontend. The userscript Cookie import endpoint has its own credential; see [userscript setup](userscript.md).
+The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and service control are available through the CLI and the optional, independently authenticated [management API](management-api.md). Builds with `AIS2API_BUILD_WEBUI=ON` also provide an [embedded Web console](webui.md) at `/`. The userscript Cookie import endpoint has its own credential; see [userscript setup](userscript.md).
 
 `--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. The configured API key is in `config.json`; the management API can create additional persisted generation keys. CLI output redacts secrets. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
 

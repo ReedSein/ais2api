@@ -6,6 +6,7 @@
 
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
+#include "ais2api/webui.hpp"
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -34,7 +35,7 @@ struct LiveServer {
     }
     ~LiveServer(){try{local_call(config,{{"command","stop"}});}catch(...){}if(thread.joinable())thread.join();std::error_code ec;fs::remove_all(directory,ec);}
     http::response<http::string_body> call(http::verb method,std::string target,std::string body={},std::string auth={}){
-        net::io_context io;tcp::socket socket(io);socket.connect({net::ip::make_address("127.0.0.1"),config.port});http::request<http::string_body> request(method,target,11);request.set(http::field::host,"127.0.0.1");request.set(http::field::content_type,"application/json");if(!auth.empty())request.set(http::field::authorization,"Bearer "+auth);request.body()=std::move(body);request.prepare_payload();http::write(socket,request);boost::beast::flat_buffer input;http::response<http::string_body> response;http::read(socket,input,response);return response;
+        net::io_context io;tcp::socket socket(io);socket.connect({net::ip::make_address("127.0.0.1"),config.port});http::request<http::string_body> request(method,target,11);request.set(http::field::host,"127.0.0.1");request.set(http::field::content_type,"application/json");if(!auth.empty())request.set(http::field::authorization,"Bearer "+auth);request.body()=std::move(body);request.prepare_payload();http::write(socket,request);boost::beast::flat_buffer input;http::response_parser<http::string_body> response;response.skip(method==http::verb::head);http::read(socket,input,response);return response.release();
     }
 };
 }
@@ -54,11 +55,58 @@ TEST_CASE("HTTP exposes data routes and enforces authentication without Google",
     auto models=server.call(http::verb::get,"/v1/models",{},server.key);REQUIRE(models.result_int()==200);auto data=json::parse(models.body()).as_object().at("data").as_array();REQUIRE(data.size()==1);REQUIRE(string_or(data[0].as_object(),"id")=="test-explicit-model");
     REQUIRE(server.call(http::verb::get,"/v1/models/test-explicit-model",{},server.key).result_int()==200);
     REQUIRE(server.call(http::verb::get,"/v1beta/models/test-explicit-model",{},server.key).result_int()==200);
-    for(auto route:{"/api/accounts","/accounts","/config","/stats","/api-keys","/v1/responses","/"})REQUIRE(server.call(http::verb::get,route,{},server.key).result_int()==404);
+    for(auto route:{"/api/accounts","/api-keys","/v1/responses"})REQUIRE(server.call(http::verb::get,route,{},server.key).result_int()==404);
+    for(auto route:{"/accounts","/config","/stats","/"})REQUIRE(server.call(http::verb::get,route,{},server.key).result_int()==(webui::enabled()?200:404));
     auto missing=server.call(http::verb::post,"/v1beta/models/test-explicit-model:generateContent",R"({"contents":[{"role":"user","parts":[{"text":"hello"}]}]})",server.key);REQUIRE(missing.result_int()==503);REQUIRE(missing.body().find("no_account")!=std::string::npos);
     auto malformed=server.call(http::verb::post,"/v1/chat/completions","{",server.key);REQUIRE(malformed.result_int()==400);
     auto large=server.call(http::verb::post,"/v1/chat/completions",std::string(5000,'x'),server.key);REQUIRE(large.result_int()==413);
     REQUIRE_FALSE(server.failure);
+}
+
+TEST_CASE("Embedded console serves history routes without exposing API or filesystem paths", "[http][webui]") {
+    LiveServer server;
+    if (!webui::enabled()) {
+        REQUIRE(server.call(http::verb::get, "/").result_int() == 404);
+        REQUIRE_FALSE(webui::find("/index.html"));
+        return;
+    }
+    const auto root = server.call(http::verb::get, "/");
+    REQUIRE(root.result_int() == 200);
+    REQUIRE(root[http::field::content_type] == "text/html; charset=utf-8");
+    REQUIRE(root[http::field::cache_control] == "no-cache");
+    REQUIRE(root["X-Content-Type-Options"] == "nosniff");
+    REQUIRE(root["Content-Security-Policy"].find("frame-ancestors 'none'") != std::string_view::npos);
+    REQUIRE(root.body().find("<div id=\"app\">") != std::string::npos);
+    for (auto route : {"/login", "/accounts", "/models", "/keys", "/stats", "/logs", "/config", "/diagnostics", "/settings"}) {
+        const auto response = server.call(http::verb::get, std::string(route) + "?test=1");
+        REQUIRE(response.result_int() == 200);
+        REQUIRE(response.body() == root.body());
+    }
+    auto head = server.call(http::verb::head, "/");
+    REQUIRE(head.result_int() == 200);
+    REQUIRE(head.body().empty());
+    REQUIRE(head[http::field::content_length] == std::to_string(root.body().size()));
+    const auto start = root.body().find("/assets/");
+    REQUIRE(start != std::string::npos);
+    const auto end = root.body().find('"', start);
+    REQUIRE(end != std::string::npos);
+    const auto asset = root.body().substr(start, end - start);
+    const auto script = server.call(http::verb::get, asset);
+    REQUIRE(script.result_int() == 200);
+    REQUIRE(script[http::field::content_type] == "text/javascript; charset=utf-8");
+    REQUIRE(script[http::field::cache_control] == "public, max-age=31536000, immutable");
+    REQUIRE_FALSE(script.body().empty());
+    head = server.call(http::verb::head, asset);
+    REQUIRE(head.body().empty());
+    REQUIRE(head[http::field::content_length] == std::to_string(script.body().size()));
+    REQUIRE(server.call(http::verb::get, "/THIRD_PARTY_LICENSES.txt").result_int() == 200);
+    for (auto path : {"/config.json", "/src/main.ts", "/assets/missing.js", "/../config.json",
+                      "/%2e%2e/config.json", "/assets/../index.html", "/unknown", "/api/missing", "/v1/missing"}) {
+        REQUIRE(server.call(http::verb::get, path).result_int() == 404);
+    }
+    REQUIRE(server.call(http::verb::post, "/login").result_int() == 404);
+    REQUIRE(server.call(http::verb::get, "/api/admin/v1/status").result_int() == 403);
+    REQUIRE(server.call(http::verb::get, "/v1/models").result_int() == 401);
 }
 
 TEST_CASE("HTTP model contracts provide Gemini display names and preserve metadata","[http][models]"){

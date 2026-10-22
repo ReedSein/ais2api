@@ -2,7 +2,7 @@
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](LICENSE)
 
-面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini、OpenAI Chat Completions 与 Responses 数据接口，账号和运行状态可通过 CLI 或独立鉴权的管理 API 操作；支持可选的 userscript Cookie 导入，尚未内置 Web 管理页面。管理 API 提供实时完整日志，供前端管理面板开发使用。
+面向 Windows、Linux 和 Termux 的 C++20 AI Studio 网页会话网关。提供 Gemini、OpenAI Chat Completions 与 Responses 数据接口，账号和运行状态可通过 CLI、管理 API 或可选内置的 WebUI 操作；支持 userscript Cookie 导入。WebUI 在构建时打包进可执行文件，运行时不需要 Node.js 或额外前端目录。管理 API 提供实时完整日志。构建和登录说明见 [WebUI 文档](docs/webui.md)。
 
 **这是待真实账号验收的开发版本。** 离线协议测试、浏览器脚本测试和本机服务测试不代表 Google 网页适配、账号权限、生图或三端部署已经验证。具体结果与未完成门槛见 [验证记录](docs/validation.md)。
 
@@ -82,7 +82,7 @@ Google 提供商的搜索、代码执行、URL context 等内置工具会转换�
 
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 
-Responses 使用无状态完整历史模式，不提供服务端响应存储、`previous_response_id` 续接及后台任务。不提供 Files、embeddings、独立图片/音频接口和网页控制台。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口。`fileData`、强制工具执行和协议合同以外的参数会明确报错。
+Responses 使用无状态完整历史模式，不提供服务端响应存储、`previous_response_id` 续接及后台任务。不提供 Files、embeddings、独立图片/音频接口。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口；启用 WebUI 构建后，根路径 `/` 提供管理控制台。`fileData`、强制工具执行和协议合同以外的参数会明确报错。
 
 ## 前端管理 API
 

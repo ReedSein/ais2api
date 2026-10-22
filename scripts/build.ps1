@@ -12,13 +12,14 @@ param(
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo')][string]$Configuration = 'Release',
     [ValidateRange(1, 256)][int]$Jobs = 2,
     [switch]$Package,
+    [switch]$WebUI,
     [switch]$SkipTests,
     [switch]$Help
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($Help) {
-    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-BrowserBundleDirectory PATH] [-Configuration Release] [-Jobs 2] [-Package] [-SkipTests]'
+    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-BrowserBundleDirectory PATH] [-Configuration Release] [-Jobs 2] [-Package] [-WebUI] [-SkipTests]'
     Write-Output 'Requires Visual Studio C++ tools, Git and CMake/Ninja. New dependencies go under build/deps; existing .tools is not changed.'
     return
 }
@@ -54,7 +55,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $VcpkgRoot 'vcpkg.exe'))) {
     Invoke-Checked (Join-Path $VcpkgRoot 'bootstrap-vcpkg.bat') @('-disableMetrics')
 }
 $testing = if ($SkipTests) { 'OFF' } else { 'ON' }
-Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", '-DVCPKG_TARGET_TRIPLET=x64-windows-static', "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory")
+$webUiBuild = if ($WebUI) { 'ON' } else { 'OFF' }
+Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", '-DVCPKG_TARGET_TRIPLET=x64-windows-static', "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", "-DAIS2API_BUILD_WEBUI=$webUiBuild")
 Invoke-Checked cmake.exe @('--build', $BuildDirectory, '--parallel', "$Jobs")
 if (-not $SkipTests) { Invoke-Checked ctest.exe @('--test-dir', $BuildDirectory, '--output-on-failure') }
 Invoke-Checked cmake.exe @('--install', $BuildDirectory)

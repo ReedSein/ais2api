@@ -14,6 +14,7 @@ Usage: sh scripts/build.sh [linux|termux] [options]
   --install-deps       install Termux host packages (changes shared packages)
   --package            create desktop CPack TGZ after tests
   --browser-bundle PATH include a verified local browser (desktop only)
+  --webui              build and embed the WebUI (requires Node.js 20.19+ or 22.12+)
   --sanitizers         enable desktop Linux ASan/UBSan
   --fuzzer             build Clang libFuzzer target (also enables sanitizers)
   --skip-tests         omit test targets (Termux also skips Catch2 preparation)
@@ -25,7 +26,7 @@ EOF
 }
 target=linux
 case "${1:-}" in linux|termux) target=$1; shift ;; esac
-packages=0; package=0; sanitize=OFF; fuzz=OFF; testing=ON; jobs=2; build_dir=; browser_bundle=
+packages=0; package=0; sanitize=OFF; fuzz=OFF; testing=ON; webui=OFF; jobs=2; build_dir=; browser_bundle=
 [ "$target" != termux ] || jobs=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -35,6 +36,7 @@ while [ "$#" -gt 0 ]; do
     --sanitizers) sanitize=ON; shift ;;
     --fuzzer) fuzz=ON; sanitize=ON; shift ;;
     --skip-tests) testing=OFF; shift ;;
+    --webui) webui=ON; shift ;;
     --build-dir|--jobs|--browser-bundle)
       [ "$#" -ge 2 ] || { echo "Missing argument: $1" >&2; exit 2; }
       case "$1" in --build-dir) build_dir=$2 ;; --jobs) jobs=$2 ;; --browser-bundle) browser_bundle=$2 ;; esac
@@ -82,7 +84,7 @@ if [ "$target" = termux ]; then
     cmake --install "$deps/catch2-build"
     prefix_path="$deps/catch2-install;$PREFIX"
   fi
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_BUILD_WEBUI="$webui" -DCMAKE_PREFIX_PATH="$prefix_path" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" -DCMAKE_INSTALL_PREFIX="$build_dir/install"
 else
   [ "$(uname -m)" = x86_64 ] || { echo 'This desktop preset targets Linux x86_64.' >&2; exit 1; }
   [ "$packages" -eq 0 ] || { echo 'Install Linux build prerequisites using your OS package manager; see docs/platforms.md.' >&2; exit 2; }
@@ -97,7 +99,7 @@ else
   actual=$(git -C "$vcpkg_root" rev-parse HEAD)
   [ "$actual" = "$baseline" ] || { echo 'VCPKG_ROOT must match the manifest baseline; existing checkout was left unchanged.' >&2; exit 1; }
   [ -f "$vcpkg_root/vcpkg" ] || "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
-  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-linux -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
+  cmake -S "$project" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" -DBUILD_TESTING="$testing" -DAIS2API_SANITIZE="$sanitize" -DAIS2API_BUILD_FUZZER="$fuzz" -DAIS2API_BUILD_WEBUI="$webui" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-linux -DCMAKE_INSTALL_PREFIX="$build_dir/install" -DAIS2API_BROWSER_BUNDLE_DIR="$browser_bundle"
 fi
 cmake --build "$build_dir" --parallel "$jobs"
 if [ "$testing" = ON ]; then ctest --test-dir "$build_dir" --output-on-failure; fi

@@ -2,6 +2,8 @@
 
 The management base URL is `http://127.0.0.1:18451/api/admin/v1`. The machine-readable contract is [management.openapi.json](../schemas/management.openapi.json). Management controls real local service state; readiness, account probes and diagnostics do not prove that upstream generation succeeds.
 
+An optional [embedded Web console](webui.md) uses these same endpoints from the service root `/`; same-origin access needs no `admin_origins` entry.
+
 ## Authentication and browser access
 
 Set an independent `admin_key` in config.json. Empty disables HTTP management. Send `Authorization: Bearer <admin_key>` on every request, including log streams. Generation API keys and managed generation keys do not grant management access. Secrets are never accepted through a URL query parameter. Configuration and diagnostics redact secrets; account responses omit Cookie and browser storage credentials.
