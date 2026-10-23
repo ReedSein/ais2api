@@ -24,6 +24,7 @@ function harness(options = {}) {
   const context = vm.createContext({
     crypto: require('node:crypto').webcrypto,
     Request, Response, URL, TextDecoder, TextEncoder, Blob, DOMException, Event, Uint8Array, AbortController, btoa, XMLHttpRequest: FakeXHR,
+    KeyboardEvent: class extends Event { constructor(type, init = {}) { super(type, init); const { bubbles, cancelable, ...keys } = init; Object.assign(this, keys); } },
     Date: class extends Date { static now() { return options.now ? options.now() : Date.now(); } },
     setInterval: callback => { context.install = callback; return 1; }, clearInterval() {},
     setTimeout: (fn, ms) => setTimeout(fn, options.fastDiscoveryWait && ms === 100 ? 0 : options.fastDiscoveryTimeout && ms === 10000 ? 5 : options.fastBenefitTimeout && ms === 8000 ? 5 : ms), clearTimeout,
@@ -43,6 +44,7 @@ function harness(options = {}) {
         if (options.discoveryFetch) return options.discoveryFetch(input, init);
         return new Response(JSON.stringify([[['models/live-model', null, null, 'Live Model', 'Returned by RPC', 123, 45, ['generateContent']]]]));
       }
+      if (options.stall) return new Response(new ReadableStream({ type: 'bytes', pull: () => new Promise(() => {}) }));
       return new Response(new ReadableStream({
         type: 'bytes',
         pull(controller) {
@@ -451,7 +453,7 @@ test('bootstrap restores the original editor and stops the probe', () => {
   const input = new Textarea(); let stopped = 0, temporary = 0;
   h.context.HTMLTextAreaElement = Textarea;
   h.context.document.querySelector = () => input;
-  h.context.document.querySelectorAll = () => [
+  h.context.document.querySelectorAll = selector => selector !== 'button' ? [] : [
     { disabled: false, innerText: 'Temporary chat', getAttribute: name => name === 'aria-pressed' ? 'false' : null, click() { ++temporary; } },
     { disabled: false, innerText: 'Stop', getAttribute: () => null, click() { ++stopped; } }
   ];
@@ -463,6 +465,141 @@ test('bootstrap restores the original editor and stops the probe', () => {
   assert.equal(stopped, 1);
   h.bridge.finishBootstrap();
   assert.equal(stopped, 1);
+  h.bridge.dispose();
+});
+
+test('a repeated bootstrap drops the stale template and captures a fresh one', async () => {
+  const h = harness();
+  class Textarea extends EventTarget { constructor() { super(); this.original = ''; } }
+  Object.defineProperty(Textarea.prototype, 'value', { get() { return this.original; }, set(value) { this.original = value; } });
+  h.context.HTMLTextAreaElement = Textarea;
+  const input = new Textarea();
+  h.context.document.querySelector = () => input;
+  await h.capture();
+  assert.equal(h.bridge.capability().snapshot, true);
+  assert.equal(h.bridge.bootstrap(), true);
+  // The host polls capability() until a new capture; the old one must not count.
+  assert.equal(h.bridge.capability().template, null);
+  assert.equal(h.bridge.capability().snapshot, false);
+  await assert.rejects(h.bridge.snapshot('content-hash'), /snapshot service or live template unavailable/);
+  await h.capture();
+  assert.equal(h.bridge.capability().snapshot, true);
+  assert.equal(await h.bridge.snapshot('content-hash'), 'ticket:content-hash');
+  h.bridge.finishBootstrap();
+  assert.equal(h.fetches(), 0, 'bootstrap generation must not reach upstream');
+  h.bridge.dispose();
+});
+
+function flakySnapshots() {
+  // The page's snapshot export fails while `failures` is positive.
+  const control = { failures: 0, calls: 0 };
+  control.exports = { adapter(service, hash) {
+    ++control.calls;
+    if (control.failures > 0) { --control.failures; return control.mode === 'empty' ? Promise.resolve('') : Promise.reject(new Error('synthetic busy page')); }
+    return service.snapshot(hash);
+  } };
+  return control;
+}
+
+test('snapshot retries a failing or empty page snapshot up to three times', async () => {
+  for (const mode of ['reject', 'empty']) {
+    const control = flakySnapshots(); control.mode = mode;
+    const h = harness({ exports: control.exports }); await h.capture();
+    control.calls = 0; control.failures = 2;
+    assert.equal(await h.bridge.snapshot('content-hash'), 'ticket:content-hash', mode);
+    assert.equal(control.calls, 3, mode);
+    control.calls = 0; control.failures = 3;
+    await assert.rejects(h.bridge.snapshot('content-hash'), /snapshot service returned no ticket/);
+    assert.equal(control.calls, 3, mode);
+    h.bridge.dispose();
+  }
+});
+
+function page(h, { buttons = [], dialogs = [] } = {}) {
+  class Textarea extends EventTarget { constructor() { super(); this.value = ''; this.events = []; } focus() { this.focused = true; } dispatchEvent(event) { this.events.push(event); return super.dispatchEvent(event); } }
+  const input = new Textarea();
+  h.context.HTMLTextAreaElement = class {};
+  Object.defineProperty(h.context.HTMLTextAreaElement.prototype, 'value', { set(value) { this._value = value; }, get() { return this._value; } });
+  h.context.document.querySelector = selector => selector === 'textarea' ? input : null;
+  h.context.document.querySelectorAll = selector => selector === 'button' ? [...buttons, ...dialogs.flatMap(d => d.buttons)] :
+    selector.includes('[role="dialog"]') ? dialogs : [];
+  return input;
+}
+function control(text, extra = {}) {
+  return { disabled: false, innerText: text, clicks: 0, getAttribute: name => extra[name] ?? null, click() { ++this.clicks; } };
+}
+function dialog(buttons) {
+  return { buttons, events: [], querySelectorAll: selector => selector === 'button' ? buttons : [], dispatchEvent(event) { this.events.push(event); return true; } };
+}
+
+test('bootstrap dismisses blocking dialogs without agreeing to anything', () => {
+  const h = harness();
+  const notice = dialog([control('Learn more'), control('Got it')]);
+  const terms = dialog([control('I agree'), control('Continue'), control('Accept all')]);
+  const run = control('Run Ctrl+Enter');
+  page(h, { buttons: [run], dialogs: [notice, terms] });
+  assert.equal(h.bridge.bootstrap(), true);
+  assert.equal(notice.buttons[1].clicks, 1);
+  assert.equal(notice.buttons[0].clicks, 0);
+  // Consent-like buttons are never pressed; Escape is the only fallback.
+  for (const button of terms.buttons) assert.equal(button.clicks, 0, button.innerText);
+  assert.equal(terms.events.length, 1);
+  assert.equal(terms.events[0].key, 'Escape');
+  assert.equal(h.bridge.run(), true);
+  assert.equal(run.clicks, 1);
+  h.bridge.finishBootstrap();
+  h.bridge.dispose();
+});
+
+test('run falls back to the editor submit shortcut when no Run button exists', () => {
+  const h = harness();
+  const unrelated = control('Share');
+  const input = page(h, { buttons: [unrelated, { ...control('Run'), disabled: true }] });
+  assert.equal(h.bridge.bootstrap(), true);
+  assert.equal(h.bridge.run(), 'shortcut');
+  assert.equal(input.focused, true);
+  assert.equal(unrelated.clicks, 0);
+  const keys = input.events.filter(event => event.key === 'Enter');
+  assert.deepEqual(keys.map(event => event.type), ['keydown', 'keyup']);
+  for (const event of keys) assert.ok(event.ctrlKey || event.metaKey);
+  // Without an editor there is nothing to submit.
+  h.context.document.querySelector = () => null;
+  assert.equal(h.bridge.run(), false);
+  h.bridge.finishBootstrap();
+  h.bridge.dispose();
+});
+
+test('next acknowledges and returns as soon as the relay has a chunk or ends', async () => {
+  const h = harness(); await h.capture();
+  assert.equal(await h.bridge.next(0, 1000), null, 'no transfer yet');
+  h.bridge.start({ body: '[]' });
+  const sequences = [];
+  let state, sequence = 0, began = Date.now();
+  while (!(state = await h.bridge.next(sequence, 1000)).done) {
+    assert.ok(state.pending, 'a wait that returns early carries a chunk');
+    sequence = state.pending.sequence;
+    sequences.push(sequence);
+  }
+  assert.deepEqual(sequences, [1, 2, 3]);
+  assert.equal(state.error, '');
+  assert.ok(Date.now() - began < 900, 'chunks must not wait for the full timeout');
+  await assert.rejects(h.bridge.next(7, 10), /invalid_credit/);
+  h.bridge.dispose();
+});
+
+test('next waits at most its limit on a stalled stream and wakes on abort', async () => {
+  const h = harness({ stall: true }); await h.capture();
+  h.bridge.start({ body: '[]' });
+  let began = Date.now();
+  let state = await h.bridge.next(0, 80);
+  assert.equal(state.pending, null); assert.equal(state.done, false);
+  assert.ok(Date.now() - began >= 60);
+  began = Date.now();
+  const waiting = h.bridge.next(0, 1000);
+  await tick();
+  h.bridge.abort();
+  await waiting;
+  assert.ok(Date.now() - began < 900, 'abort must wake the waiting host');
   h.bridge.dispose();
 });
 
@@ -643,4 +780,56 @@ test('relay records benefit tier at send time even after cache expiry or refresh
   await unknown.capture(); unknown.bridge.start({ body: '[]' }); await waitPending(unknown);
   assert.equal(unknown.bridge.poll().benefitTier, 'unknown');
   unknown.bridge.abort(); await waitDone(unknown); unknown.bridge.dispose();
+});
+
+test('uploaded pieces reach upstream as one Blob with the captured content type', async () => {
+  let sent;
+  const h = harness({ observeFetch: (_url, init) => { sent = init; } });
+  await h.capture();
+  const pieces = ['["你好', ' 😀', 'x'.repeat(70000) + '"]'];
+  pieces.forEach((piece, index) => assert.equal(h.bridge.append('upload-1', piece), index + 1));
+  h.bridge.start({ upload: 'upload-1' }); await waitPending(h);
+  assert.ok(sent.body instanceof Blob, 'the body must stay a Blob, not a page string');
+  assert.equal(await sent.body.text(), pieces.join(''));
+  assert.equal(sent.body.size, Buffer.byteLength(pieces.join('')));
+  assert.equal(sent.headers['content-type'], 'application/json+protobuf');
+  h.bridge.abort(); await waitDone(h); h.bridge.dispose();
+});
+
+test('an uploaded body gets the same default content type as a string body', async () => {
+  const seen = [];
+  const h = harness({ observeFetch: (_url, init) => { seen.push(init); } });
+  // An XHR template carries only the headers the page set: here no type.
+  const xhr = new h.context.XMLHttpRequest();
+  xhr.open('POST', generationUrl);
+  xhr.setRequestHeader('Authorization', 'SAPISIDHASH synthetic-xhr');
+  xhr.send('["models/actual-page-model",null,null,null,"actual-ticket"]');
+  await tick();
+  await h.context.default_MakerSuite.adapter({ snapshot: () => 'actual-ticket' }, 'a'.repeat(64));
+  h.bridge.append('upload-2', '[]');
+  h.bridge.start({ upload: 'upload-2' }); await waitPending(h);
+  assert.equal(seen[0].headers['content-type'], 'text/plain;charset=UTF-8');
+  // For a string body fetch adds the same type itself.
+  h.bridge.start({ body: '[]' }); await waitPending(h);
+  assert.equal('content-type' in seen[1].headers, false);
+  assert.equal(new Request(generationUrl, { method: 'POST', body: '[]' }).headers.get('content-type'), 'text/plain;charset=UTF-8');
+  h.bridge.abort(); await waitDone(h); h.bridge.dispose();
+});
+
+test('a body upload is used once and never mixes pieces from another upload', async () => {
+  const h = harness(); await h.capture();
+  assert.throws(() => h.bridge.append('', 'x'), /invalid upload chunk/);
+  assert.throws(() => h.bridge.append('upload-3', 7), /invalid upload chunk/);
+  assert.throws(() => h.bridge.start({ upload: 'upload-3' }), /upload missing/);
+  h.bridge.append('stale', 'old');
+  h.bridge.append('upload-4', 'new');
+  assert.throws(() => h.bridge.start({ upload: 'stale' }), /upload missing/, 'a new upload replaces unfinished pieces');
+  h.bridge.append('upload-5', '[]');
+  h.bridge.abort();
+  assert.throws(() => h.bridge.start({ upload: 'upload-5' }), /upload missing/, 'abort drops a pending upload');
+  h.bridge.append('upload-6', '[]');
+  h.bridge.start({ upload: 'upload-6' }); await waitPending(h);
+  h.bridge.abort(); await waitDone(h);
+  assert.throws(() => h.bridge.start({ upload: 'upload-6' }), /upload missing/, 'an upload is consumed by start');
+  h.bridge.dispose();
 });

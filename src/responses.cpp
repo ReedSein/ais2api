@@ -577,7 +577,8 @@ ResponsesStream::ResponsesStream(std::string model, std::string id, json::object
       options_(std::move(options)), limit_(limit), created_(unix_seconds()), store_(store) {
     if (!limit_)
         bad("Responses stream limit must be positive");
-    if (json::serialize(options_).size() > limit_)
+    options_bytes_ = json_size(options_);
+    if (options_bytes_ > limit_)
         throw Error(413, "response_too_large", "Responses options exceed configured object limit");
 }
 json::object ResponsesStream::event(std::string_view type, json::object fields) {
@@ -599,20 +600,119 @@ json::array ResponsesStream::start() {
     return {event("response.created", {{"response", r}}),
             event("response.in_progress", {{"response", r}})};
 }
+namespace {
+std::int64_t candidate_index(const json::object &candidate) {
+    auto index = candidate.if_contains("index");
+    if (!index) return 0;
+    if (index->is_int64()) return index->as_int64();
+    if (index->is_uint64() && index->as_uint64() <= static_cast<std::uint64_t>(INT64_MAX))
+        return static_cast<std::int64_t>(index->as_uint64());
+    return 0;
+}
+} // namespace
+const json::array *ResponsesStream::first_parts(const json::object &aggregate) {
+    auto candidates = aggregate.if_contains("candidates");
+    if (!candidates || !candidates->is_array() || candidates->as_array().empty() ||
+        !candidates->as_array()[0].is_object())
+        return nullptr;
+    auto content = candidates->as_array()[0].as_object().if_contains("content");
+    if (!content || !content->is_object()) return nullptr;
+    auto parts = content->as_object().if_contains("parts");
+    return parts && parts->is_array() ? &parts->as_array() : nullptr;
+}
+// A delta that only carries one plain text part for the first candidate, which
+// merge_event joins onto that candidate's last part. The Responses output reads
+// nothing from a candidate but its index, content and finish reason, and a
+// finish reason only changes the final status, so the join changes exactly one
+// item: its text and its last native part grow by the text. Everything is
+// checked before merging; once planned, merging and applying cannot fail.
+std::optional<ResponsesStream::Append> ResponsesStream::plan_append(const json::object &delta) const {
+    auto incoming = delta.if_contains("candidates");
+    if (!incoming || !incoming->is_array() || incoming->as_array().size() != 1 ||
+        !incoming->as_array()[0].is_object())
+        return {};
+    const auto &candidate = incoming->as_array()[0].as_object();
+    const auto *parts = first_parts(aggregate_);
+    if (!parts || parts->empty() || !parts->back().is_object() ||
+        candidate_index(candidate) != candidate_index(aggregate_.at("candidates").as_array()[0].as_object()))
+        return {};
+    auto content = candidate.if_contains("content");
+    if (!content || !content->is_object()) return {};
+    auto incoming_parts = content->as_object().if_contains("parts");
+    if (!incoming_parts || !incoming_parts->is_array() || incoming_parts->as_array().size() != 1 ||
+        !incoming_parts->as_array()[0].is_object())
+        return {};
+    const auto &part = incoming_parts->as_array()[0].as_object();
+    const auto &last = parts->back().as_object();
+    if (!joins_text(last, part) || (part.if_contains("thought") && !part.at("thought").is_bool()))
+        return {};
+    Append plan{std::string_view(part.at("text").as_string()), bool_or(part, "thought")};
+    const auto id = id_ + (plan.thought ? "_reasoning" : "_message");
+    while (plan.index < output_.size() && string_or(output_[plan.index].as_object(), "id") != id) ++plan.index;
+    if (plan.index == output_.size()) return {};
+    const auto &item = output_[plan.index].as_object();
+    auto list = item.if_contains(plan.thought ? "summary" : "content");
+    if (!list || !list->is_array() || list->as_array().empty() || !list->as_array()[0].is_object()) return {};
+    auto text = list->as_array()[0].as_object().if_contains("text");
+    if (!text || !text->is_string()) return {};
+    if (auto ext = item.if_contains("ais2api")) {
+        // The item's last native part must be the part this delta extends.
+        const auto &native = ext->as_object().at("gemini_content").as_object().at("parts").as_array();
+        if (native.empty() || !native.back().is_object()) return {};
+        auto native_text = native.back().as_object().if_contains("text");
+        if (!native_text || !native_text->is_string() ||
+            native_text->as_string().size() != last.at("text").as_string().size())
+            return {};
+        plan.native = true;
+    }
+    plan.growth = 2 * json::serialize(json::value(plan.text)).size();
+    const auto merge_growth = merge_growth_bound(delta, 1, 1);
+    if (aggregate_bound_ > limit_ || merge_growth > limit_ - aggregate_bound_ ||
+        aggregate_bound_ + merge_growth + output_bound_ + plan.growth + options_bytes_ > limit_)
+        return {};
+    return plan;
+}
+void ResponsesStream::apply_append(const Append &plan, json::array &events) {
+    auto &item = output_[plan.index].as_object();
+    const auto id = string_or(item, "id");
+    if (!plan.text.empty()) {
+        item.at(plan.thought ? "summary" : "content").as_array()[0].as_object().at("text").as_string().append(plan.text);
+        if (plan.native)
+            item.at("ais2api").as_object().at("gemini_content").as_object().at("parts").as_array()
+                .back().as_object().at("text").as_string().append(plan.text);
+    }
+    output_bound_ += plan.growth;
+    if (plan.text.empty()) return;
+    json::object fields{{"item_id", id}, {"output_index", plan.index}, {"delta", plan.text}};
+    fields[plan.thought ? "summary_index" : "content_index"] = 0;
+    events.push_back(event(plan.thought ? "response.reasoning_summary_text.delta"
+                                        : "response.output_text.delta",
+                           fields));
+}
 json::array ResponsesStream::push(const json::object &delta) {
     if (ended_)
         return {};
     auto events = start();
+    if (incremental)
+        if (auto plan = plan_append(delta)) {
+            merge_event(aggregate_, delta, limit_, &aggregate_bound_);
+            apply_append(*plan, events);
+            return events;
+        }
+    // Undo log for output_: appended count and replaced items. Conversion can
+    // reject the merged aggregate, and fail() converts it again.
     auto prior_aggregate = aggregate_;
-    auto prior_output = output_;
+    const auto prior_bound = aggregate_bound_;
+    const auto prior_size = output_.size();
+    std::vector<std::pair<std::size_t, json::value>> replaced;
     const auto prior_sequence = sequence_;
     try {
-        merge_event(aggregate_, delta, limit_);
+        merge_event(aggregate_, delta, limit_, &aggregate_bound_);
         auto r = response();
-        auto next = r.at("output").as_array();
+        auto &next = r.at("output").as_array();
         // Preserve discovery order even if reasoning arrives after visible output.
         for (auto &v : next) {
-            auto item = v.as_object();
+            auto item = std::move(v.as_object());
             auto id = string_or(item, "id");
             std::size_t index = 0;
             for (; index < output_.size(); ++index)
@@ -662,18 +762,24 @@ json::array ResponsesStream::push(const json::object &delta) {
                           fields));
             }
             item["status"] = "in_progress";
-            output_[index] = item;
+            if (index < prior_size) replaced.emplace_back(index, std::move(output_[index]));
+            output_[index] = std::move(item);
         }
-        if (json::serialize(aggregate_).size() + json::serialize(output_).size() +
-                json::serialize(options_).size() >
-            limit_) {
-            throw Error(413, "response_too_large",
-                        "Responses stream exceeds configured object limit");
+        // The aggregate share uses merge_event's upper bound; measure exactly
+        // only when that bound could cross the limit.
+        output_bound_ = json_size(output_);
+        if (aggregate_bound_ + output_bound_ + options_bytes_ > limit_) {
+            aggregate_bound_ = json_size(aggregate_);
+            if (aggregate_bound_ + output_bound_ + options_bytes_ > limit_)
+                throw Error(413, "response_too_large",
+                            "Responses stream exceeds configured object limit");
         }
         return events;
     } catch (...) {
         aggregate_ = std::move(prior_aggregate);
-        output_ = std::move(prior_output);
+        aggregate_bound_ = prior_bound;
+        for (auto &[index, item] : replaced) output_[index] = std::move(item);
+        output_.resize(prior_size);
         sequence_ = prior_sequence;
         throw;
     }

@@ -117,6 +117,10 @@ ais2api stop
 
 `api_key` 默认为空，且没有有效的管理面板创建密钥时，受保护接口拒绝访问，`/health` 仍可用且 `/ready` 未就绪。密钥最长 4096 个可见 ASCII 字符，不含空白。编辑密钥后执行 `config reload` 或重启，后续请求使用新密钥，设为空可撤销该配置密钥；管理面板创建的其他密钥需分别撤销。`config show` 隐藏密钥，配置文件保存原值，应按凭据保护。`keys list` 仅返回配置来源及配置状态等元数据；`keys create/revoke` 返回 `reason=keys_managed_in_config`，提示编辑配置。旧数据库密钥记录保留，但不再授权 HTTP；管理 API 新建的密钥存于独立表，可创建、改名、撤销，创建时仅返回一次原始密钥。Windows 端口保留范围可能动态变化，必要时修改 `port` 或使用 `--port PORT`。
 
+上游代理 `proxy` 同时用于浏览器和服务端下载。浏览器（Chromium）不能直接使用带用户名密码的代理，也不支持 SOCKS 认证；这类代理需要开启**本机转发代理**：`"browser_proxy_relay": true`（控制台「配置 → 网络」，或 `AIS2API_BROWSER_PROXY_RELAY=true`、`--browser-proxy-relay=true`），重启后生效。开启后浏览器只连接 ais2api 在 `127.0.0.1` 随机端口开的转发代理，由它向上游 `http://` 或 `socks5://` 代理认证，凭据不会出现在浏览器命令行中；转发只允许 `CONNECT` 到 443 端口，目标域名由上游代理解析。未开启时配置带凭据的代理，请求会直接以 `proxy_auth_unsupported` 失败。代理或网络不通时请求以 `proxy_failed` / `network_failed` 失败，不会让账号进入冷却。
+
+内存紧张的设备可以开启可选的**空闲时回收浏览器**：在 `config.json` 设置 `"browser_idle_seconds": 900`（或在控制台「配置 → 浏览器与存储」中设置，也可用 `AIS2API_BROWSER_IDLE_SECONDS`、`--browser-idle-seconds`），连续这么多秒没有任何请求时关闭浏览器以释放内存，关闭前写回 Cookie。默认 `0`（关闭），可设 10–86400 秒，保存或 `config reload` 后立即生效。代价是之后的第一个请求要重新启动浏览器、打开页面并引导，会明显变慢。
+
 配置优先级为默认值 → 配置文件 → `AIS2API_*` 环境变量 → CLI。`--config PATH` 和 `--data-dir PATH` 可用于完全隔离的安装。配置 schema 位于 [schemas/config.schema.json](schemas/config.schema.json)。启动端口、数据目录、浏览器和传输限额的变动需要重启；热更新会在校验完整配置后生效。
 
 后台服务在线时，CLI 使用当前用户专属的命名管道或 Unix socket；离线操作必须先获得实例锁。API Key 保存在 `config.json`，Cookie 保存在访问权限受限的 SQLite 数据库中，未宣称应用层加密。备份和浏览器资料应视为凭据。

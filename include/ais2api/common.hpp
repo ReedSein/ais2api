@@ -55,6 +55,23 @@ inline std::int64_t unix_seconds() {
 }
 std::string random_hex(std::size_t bytes);
 std::string sha256(std::string_view input);
+// Incremental SHA-256 for inputs that are not contiguous in memory.
+class Sha256 {
+  public:
+    Sha256();
+    ~Sha256();
+    Sha256(const Sha256 &) = delete;
+    Sha256 &operator=(const Sha256 &) = delete;
+    void update(std::string_view input);
+    std::string finish();
+  private:
+    void *context_;
+};
+// Exact byte length of json::serialize() output, without producing it.
+std::size_t json_size(const json::value &value);
+std::size_t json_size(const json::object &object);
+std::size_t json_size(const json::array &array);
+std::size_t json_size(json::string_view text);
 void atomic_write(const fs::path &path, std::string_view contents, bool secret = false);
 std::string read_file(const fs::path &path, std::size_t limit = 32 * 1024 * 1024);
 void secure_directory(const fs::path &path);

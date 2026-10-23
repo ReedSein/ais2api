@@ -7,6 +7,7 @@
 #include "ais2api/config.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/bundle.hpp"
+#include "ais2api/proxy.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
@@ -143,8 +144,10 @@ json::object Config::to_json(bool portable_paths) const {
           {"data_dir", stored_path(data_dir, config_file, portable_paths)},
           {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
           {"proxy", proxy},
+          {"browser_proxy_relay", browser_proxy_relay},
           {"headless", headless},
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
+          {"browser_idle_seconds", browser_idle_seconds},
           {"limits",
            {{"request_bytes", limits.request_bytes},
             {"object_bytes", limits.object_bytes},
@@ -211,7 +214,9 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   }
   for (auto pair :
        {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
-        {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"}}) {
+        {"AIS2API_BROWSER_PROXY_RELAY", "browser_proxy_relay"},
+        {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
+        {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first)) {
       try {
@@ -275,7 +280,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "headless", "ignore_unsupported_parameters", "limits", "model_aliases",
+             "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters", "browser_idle_seconds", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -311,12 +316,19 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   else if (!explicit_browser)
     c.browser_executable = bundled_browser(Config::default_directory());
   c.proxy = text("proxy");
+  if (!o.at("browser_proxy_relay").is_bool())
+    throw Error(400, "invalid_config", "browser_proxy_relay must be boolean");
+  c.browser_proxy_relay = o.at("browser_proxy_relay").as_bool();
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");
   c.headless = o.at("headless").as_bool();
   if (!o.at("ignore_unsupported_parameters").is_bool())
     throw Error(400, "invalid_config", "ignore_unsupported_parameters must be boolean");
   c.ignore_unsupported_parameters = o.at("ignore_unsupported_parameters").as_bool();
+  const auto idle = number(o.at("browser_idle_seconds"));
+  if (idle > 86400)
+    throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
+  c.browser_idle_seconds = static_cast<unsigned>(idle);
   if (!o.at("limits").is_object() || !o.at("model_aliases").is_object() ||
       !o.at("configured_models").is_array() ||
       !o.at("model_defaults").is_object())
@@ -365,7 +377,8 @@ Config Config::patched(const json::object& patch) const {
 bool restart_required(const Config& previous, const Config& next) {
   return next.bind != previous.bind || next.port != previous.port ||
     next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
-    next.proxy != previous.proxy || next.headless != previous.headless ||
+    next.proxy != previous.proxy || next.browser_proxy_relay != previous.browser_proxy_relay ||
+    next.headless != previous.headless ||
     next.limits.generation_seconds != previous.limits.generation_seconds ||
     next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||
     next.limits.object_bytes != previous.limits.object_bytes || next.limits.relay_bytes != previous.limits.relay_bytes;
@@ -431,6 +444,15 @@ void Config::validate() const {
         return ch < 33 || ch > 126;
       }))
     throw Error(400, "invalid_config", "cookie_import_key must be empty or at most 4096 visible ASCII characters without whitespace");
+  // Only the relay needs a single parseable proxy URL; the direct path keeps
+  // passing other forms (such as Chromium proxy rules) through unchanged.
+  if (browser_proxy_relay && !proxy.empty()) {
+    const auto endpoint = parse_proxy(proxy);
+    if (!endpoint || !relay_supports(*endpoint))
+      throw Error(400, "invalid_config", "browser_proxy_relay needs proxy as http://[user:password@]host:port or socks5://[user:password@]host:port");
+  }
+  if (browser_idle_seconds && (browser_idle_seconds < 10 || browser_idle_seconds > 86400))
+    throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");
   if (!cookie_import_max_accounts || cookie_import_max_accounts > 32 ||
       !cookie_import_timeout_seconds || cookie_import_timeout_seconds > 240)
     throw Error(400, "invalid_config", "Cookie import permits 1..32 accounts and a 1..240 second timeout");

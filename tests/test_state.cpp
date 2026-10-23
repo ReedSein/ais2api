@@ -553,3 +553,84 @@ TEST_CASE("fingerprints follow account lifetime and back-fill older stores", "[f
     CHECK(seed >= 10000);
     CHECK(reopened.fingerprint(id).seed == seed);
 }
+
+TEST_CASE("An auth cooldown admits one probe attempt only when no account is usable", "[auth-probe]") {
+    Directory d;
+    Store store(d.path);
+    const auto a = string_or(store.import_accounts(credential("first"))[0].as_object(), "id");
+    sqlite3* database = nullptr;
+    REQUIRE(sqlite3_open((d.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+    struct Close { sqlite3* db; ~Close() { sqlite3_close(db); } } close{database};
+    auto expire_cooldowns = [&] {
+        REQUIRE(sqlite3_exec(database, "UPDATE failures SET until=0", nullptr, nullptr, nullptr) == SQLITE_OK);
+    };
+    store.failure(a, "m", "auth");
+    // Readiness and model discovery never consume the probe.
+    CHECK_FALSE(store.choose("m"));
+    auto probe = store.choose("m", {}, true);
+    REQUIRE(probe); CHECK(probe->id == a);
+    // One probe per cooldown, whether it is still running or failed again.
+    CHECK_FALSE(store.choose("m", {}, true));
+    store.failure(a, "m", "auth");
+    CHECK_FALSE(store.choose("m", {}, true));
+    CHECK_FALSE(store.choose("other", {}, true));
+    // A new cooldown after the old one ran out grants a new probe.
+    expire_cooldowns();
+    REQUIRE(store.choose("m"));
+    store.failure(a, "m", "auth");
+    REQUIRE(store.choose("m", {}, true));
+    // A completed generation clears the auth cooldown before it expires.
+    store.success(a, "m", {});
+    REQUIRE(store.choose("m"));
+
+    SECTION("quota, permission and expiry are never bypassed") {
+        store.failure(a, "m", "auth");
+        store.failure(a, "m", "rate_limit_minute");
+        CHECK_FALSE(store.choose("m", {}, true));
+        store.failure(a, "m2", "permission_temporary");
+        CHECK_FALSE(store.choose("m2", {}, true));
+        // The probe was not spent on the blocked models.
+        REQUIRE(store.choose("other", {}, true));
+        store.failure(a, "m", "login_expired");
+        expire_cooldowns();
+        store.failure(a, "m", "auth");
+        CHECK_FALSE(store.choose("other", {}, true));
+    }
+    SECTION("an available account is preferred and keeps the probe unspent") {
+        const auto b = string_or(store.import_accounts(credential("second"))[0].as_object(), "id");
+        store.failure(a, "m", "auth");
+        auto chosen = store.choose("m", {}, true);
+        REQUIRE(chosen); CHECK(chosen->id == b);
+        auto fallback = store.choose("m", {b}, true);
+        REQUIRE(fallback); CHECK(fallback->id == a);
+        CHECK_FALSE(store.choose("m", {b}, true));
+    }
+}
+
+TEST_CASE("Alternating models stay on the current account until it cannot serve one", "[routing]") {
+    Directory d;
+    Store store(d.path);
+    const auto a = string_or(store.import_accounts(credential("first"))[0].as_object(), "id");
+    const auto b = string_or(store.import_accounts(credential("second"))[0].as_object(), "id");
+    // Each model remembers a different account; the last success is current.
+    store.success(a, "x", {});
+    store.success(b, "y", {});
+    for (int i = 0; i < 3; ++i) {
+        CHECK(store.choose("x")->id == b);
+        CHECK(store.choose("y")->id == b);
+    }
+    // Only a cooldown on the current account moves that model, preferring the
+    // account that last served it; the new account then becomes current.
+    store.failure(b, "x", "rate_limit_model");
+    CHECK(store.choose("x")->id == a);
+    CHECK(store.choose("y")->id == b);
+    store.success(a, "x", {});
+    CHECK(store.choose("y")->id == a);
+    // An explicit selection takes effect immediately and becomes current.
+    store.select_account(b);
+    CHECK(store.choose("y")->id == b);
+    CHECK(string_or(store.rotation_status(), "next_account_id") == b);
+    CHECK(store.rotate_account() == a);
+    CHECK(store.choose("y")->id == a);
+    CHECK(string_or(store.rotation_status(), "next_account_id") == a);
+}

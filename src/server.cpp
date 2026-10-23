@@ -100,12 +100,27 @@ class Service {
     void log(json::object record) {
         // Keep fsync and stderr backpressure off the single HTTP reactor.
         // Admission pauses on backlog; all already admitted work keeps its logs.
+        // Records queued while the writer is busy share one open and one flush.
         pending_logs_.fetch_add(1);
-        net::post(log_writer_, [this, record = std::move(record)]() mutable {
-            try { journal_.append(std::move(record)); }
-            catch (...) { logging_healthy_ = false; }
-            pending_logs_.fetch_sub(1);
-        });
+        bool idle = false;
+        {
+            std::lock_guard lock(log_queue_mutex_);
+            idle = log_queue_.empty();
+            log_queue_.push_back(std::move(record));
+        }
+        if (idle) net::post(log_writer_, [this] { drain_logs(); });
+    }
+    void drain_logs() {
+        std::vector<json::object> batch;
+        {
+            std::lock_guard lock(log_queue_mutex_);
+            batch.swap(log_queue_);
+        }
+        const auto count = static_cast<unsigned>(batch.size());
+        if (!count) return;
+        try { journal_.append(std::move(batch)); }
+        catch (...) { logging_healthy_ = false; }
+        pending_logs_.fetch_sub(count);
     }
     void forget_operation(const std::string& id) {
         std::lock_guard lock(operations_mutex_);
@@ -357,6 +372,8 @@ class Service {
     logs::Journal journal_;
     net::thread_pool log_writer_{1};
     std::atomic<unsigned> pending_logs_{0};
+    std::mutex log_queue_mutex_;
+    std::vector<json::object> log_queue_;
     std::atomic<bool> logging_healthy_{true};
     Store store_;
     std::unique_ptr<GenerationBackend> gateway_;
@@ -372,12 +389,26 @@ class Service {
     std::stop_source shutdown_;
     std::jthread worker_;
     void work_loop(std::stop_token token) {
+        // All browser work runs on this thread, so its idle time is the
+        // browser's. `used`: a task ran since the browser was last released.
+        auto last_work = Clock::now();
+        bool used = false;
         while (!token.stop_requested()) {
             Task task;
+            const auto idle = std::chrono::seconds(config().browser_idle_seconds);
             {
                 std::unique_lock lock(queue_mutex_);
-                available_.wait(
-                    lock, [&] { return token.stop_requested() || stopping_ || !queue_.empty(); });
+                // Wake at least every 30 s so a reloaded setting takes effect.
+                auto wake = Clock::now() + 30s;
+                if (used && idle.count()) wake = std::min(wake, last_work + idle);
+                if (!available_.wait_until(lock, wake, [&] { return token.stop_requested() || stopping_ || !queue_.empty(); })) {
+                    lock.unlock();
+                    if (used && idle.count() && Clock::now() >= last_work + idle) {
+                        used = false;
+                        release_idle_browser(idle);
+                    }
+                    continue;
+                }
                 if (token.stop_requested() || stopping_)
                     break;
                 task = std::move(queue_.front());
@@ -388,7 +419,15 @@ class Service {
             } catch (...) {
                 task.cancel();
             }
+            last_work = Clock::now();
+            used = true;
         }
+    }
+    void release_idle_browser(std::chrono::seconds idle) {
+        try {
+            if (gateway_->release_idle())
+                log({{"event", "browser_idle_released"}, {"idle_seconds", idle.count()}});
+        } catch (...) {}
     }
     json::object maintenance(const json::object &command) {
         auto cfg = config();
@@ -601,7 +640,7 @@ class Service {
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
                 trace.attempts = attempt + 1;
                 check_cancel(token);
-                auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded);
+                auto account = retry_account ? std::exchange(retry_account, std::nullopt) : store_.choose(request.model, excluded, true);
                 if (!account) {
                     if (previous)
                         throw *previous;
@@ -674,6 +713,15 @@ class Service {
                         }
                         continue;
                     }
+                    case FailureAction::refresh_template:
+                        if (last) throw;
+                        // The page captures a new template on the next attempt;
+                        // the request keeps its single session recovery.
+                        log({{"event", "template_refresh"}, {"request_id", work->id},
+                             {"account_id", account->id}, {"code", e.code}});
+                        gateway_->clear_template();
+                        retry_account = account;
+                        continue;
                     case FailureAction::rebuild_session:
                     case FailureAction::restart_browser: {
                         recovered = true;
@@ -824,19 +872,21 @@ net::awaitable<void> json_sse(beast::tcp_stream &stream, const json::object &obj
         co_await net::async_write(stream, http::make_chunk(net::buffer(part.data(), part.size())),
                                   net::use_awaitable);
     };
-    if (named) {
-        const auto name = "event: " + string_or(object, "type") + "\n";
-        co_await write(name);
-    }
-    co_await write("data: ");
+    // One HTTP chunk per event (more only for events larger than the relay
+    // window), so a client never waits on a partial event.
+    std::string pending = named ? "event: " + string_or(object, "type") + "\ndata: " : "data: ";
     json::serializer serializer;
     serializer.reset(&object);
     std::vector<char> block(std::max<std::size_t>(1, std::min<std::size_t>(16384, window)));
     while (!serializer.done()) {
-        auto part = serializer.read(block.data(), block.size());
-        co_await write(part);
+        pending.append(serializer.read(block.data(), block.size()));
+        if (pending.size() >= block.size()) {
+            co_await write(pending);
+            pending.clear();
+        }
     }
-    co_await write("\n\n");
+    pending += "\n\n";
+    co_await write(pending);
 }
 net::awaitable<std::optional<json::object>> next_event(const std::shared_ptr<Work> &work,
                                                        unsigned queue_seconds) {
@@ -1416,8 +1466,9 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         });
     if (!work->stream) {
         json::object aggregate;
+        std::size_t aggregate_bound = 2;
         while (auto event = co_await next_event(work, cfg.limits.queue_seconds)) {
-            merge_event(aggregate, *event, cfg.limits.object_bytes);
+            merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
             work->pipe->acknowledge();
         }
         auto output = responses ? responses_response(aggregate, work->model, work->id,
@@ -1544,6 +1595,9 @@ net::awaitable<void> accept_loop(tcp::acceptor &acceptor, Service &service) {
         auto socket = co_await acceptor.async_accept(net::redirect_error(net::use_awaitable, ec));
         if (ec)
             co_return;
+        // Streamed events are small writes; do not let Nagle hold them back
+        // waiting for the client's delayed ACK.
+        socket.set_option(tcp::no_delay(true), ec);
         if (live_connections.fetch_add(1) >= 32 || service.log_backlogged()) {
             live_connections.fetch_sub(1);
             socket.close(ec);

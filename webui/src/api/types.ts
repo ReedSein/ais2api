@@ -138,8 +138,10 @@ export interface Config {
   data_dir?: string
   browser_executable?: string
   proxy?: string
+  browser_proxy_relay?: boolean
   headless?: boolean
   ignore_unsupported_parameters?: boolean
+  browser_idle_seconds?: number
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>
   model_defaults?: Record<string, unknown>
@@ -206,4 +208,6 @@ export interface BrowserDiagnostics {
   cookieRefresh?: string
   /** Identity the running browser process was launched with. */
   fingerprint?: { seed: number; platform: string; timezone: string; locale: string } | null
+  /** How the browser reaches the configured proxy, and the relay's latest upstream failure. */
+  proxy?: { mode: 'none' | 'direct' | 'relay' | string; relayError?: string }
 }

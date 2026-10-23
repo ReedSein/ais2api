@@ -28,10 +28,12 @@ TEST_CASE("Caller and environment failures never touch account state", "[upstrea
     }
 }
 
-TEST_CASE("Route glitches and the first empty reply retry the same session", "[upstream-policy][recovery]") {
+TEST_CASE("Route glitches retry the same session and the first empty reply refreshes its template", "[upstream-policy][recovery]") {
     CHECK(decide(404, "transient_rpc_route", 2).action == FailureAction::retry_same);
-    CHECK(decide(502, "upstream_no_content", 0).action == FailureAction::retry_same);
+    CHECK(decide(502, "upstream_no_content", 0).action == FailureAction::refresh_template);
     CHECK(decide(502, "upstream_no_content", 1).action == FailureAction::fail);
+    // A template refresh is not the request's session recovery.
+    CHECK(decide(502, "upstream_no_content", 0, true).action == FailureAction::refresh_template);
 }
 
 TEST_CASE("Quota errors cool the model by scope", "[upstream-policy][recovery]") {

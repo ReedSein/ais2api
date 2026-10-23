@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <array>
+#include <charconv>
 #include <fstream>
 #include <memory>
 #ifdef _WIN32
@@ -82,6 +83,61 @@ std::string sha256(std::string_view input) {
     if (EVP_Digest(input.data(), input.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1)
         throw Error(500, "digest", "SHA-256 failed");
     return hex(digest.data(), size);
+}
+Sha256::Sha256() : context_(EVP_MD_CTX_new()) {
+    if (!context_ || EVP_DigestInit_ex(static_cast<EVP_MD_CTX *>(context_), EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(static_cast<EVP_MD_CTX *>(context_));
+        throw Error(500, "digest", "SHA-256 failed");
+    }
+}
+Sha256::~Sha256() { EVP_MD_CTX_free(static_cast<EVP_MD_CTX *>(context_)); }
+void Sha256::update(std::string_view input) {
+    if (!input.empty() && EVP_DigestUpdate(static_cast<EVP_MD_CTX *>(context_), input.data(), input.size()) != 1)
+        throw Error(500, "digest", "SHA-256 failed");
+}
+std::string Sha256::finish() {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned size = 0;
+    if (EVP_DigestFinal_ex(static_cast<EVP_MD_CTX *>(context_), digest.data(), &size) != 1)
+        throw Error(500, "digest", "SHA-256 failed");
+    return hex(digest.data(), size);
+}
+// Mirrors Boost.JSON's escaping: \b \t \n \f \r \" \\ take two bytes, other
+// control characters \u00XX six; everything else, including UTF-8, is copied.
+std::size_t json_size(json::string_view text) {
+    static constexpr auto extra = [] {
+        std::array<unsigned char, 256> table{};
+        for (int c = 0; c < 0x20; ++c) table[c] = 5;
+        for (unsigned char c : {'\b', '\t', '\n', '\f', '\r', '"', '\\'}) table[c] = 1;
+        return table;
+    }();
+    std::size_t size = text.size() + 2;
+    for (unsigned char c : text) size += extra[c];
+    return size;
+}
+std::size_t json_size(const json::array &array) {
+    std::size_t size = array.empty() ? 2 : array.size() + 1;
+    for (const auto &item : array) size += json_size(item);
+    return size;
+}
+std::size_t json_size(const json::object &object) {
+    std::size_t size = object.empty() ? 2 : 2 * object.size() + 1;
+    for (const auto &item : object) size += json_size(item.key()) + json_size(item.value());
+    return size;
+}
+std::size_t json_size(const json::value &value) {
+    char digits[24];
+    switch (value.kind()) {
+    case json::kind::null: return 4;
+    case json::kind::bool_: return value.get_bool() ? 4 : 5;
+    case json::kind::int64: return std::to_chars(digits, digits + sizeof digits, value.get_int64()).ptr - digits;
+    case json::kind::uint64: return std::to_chars(digits, digits + sizeof digits, value.get_uint64()).ptr - digits;
+    case json::kind::double_: return json::serialize(value).size();
+    case json::kind::string: return json_size(json::string_view(value.get_string()));
+    case json::kind::array: return json_size(value.get_array());
+    case json::kind::object: return json_size(value.get_object());
+    }
+    return json::serialize(value).size();
 }
 void secure_directory(const fs::path &path) {
     if (fs::is_symlink(fs::symlink_status(path)))

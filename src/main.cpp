@@ -97,10 +97,12 @@ Arguments parse_arguments(int argc, char **argv) {
             result.overrides[found->second] = value;
         else if (option == "--port")
             result.overrides["port"] = unsigned_integer(value);
-        else if (option == "--headless") {
+        else if (option == "--browser-idle-seconds")
+            result.overrides["browser_idle_seconds"] = unsigned_integer(value);
+        else if (option == "--headless" || option == "--browser-proxy-relay") {
             if (value != "true" && value != "false")
-                usage_error("--headless requires true or false");
-            result.overrides["headless"] = value == "true";
+                usage_error(option + " requires true or false");
+            result.overrides[option == "--headless" ? "headless" : "browser_proxy_relay"] = value == "true";
         } else if (auto found = limit_options.find(option); found != limit_options.end()) {
             if (!result.overrides.if_contains("limits"))
                 result.overrides["limits"] = json::object{};
@@ -122,7 +124,8 @@ void help() {
                  "  stats | models list | config show | config validate | config reload\n"
                  "  operations status ID\n\n"
                  "Global options: --config PATH --data-dir PATH --bind ADDRESS --port PORT\n"
-                 "  --browser PATH --proxy URL --headless=true|false\n"
+                 "  --browser PATH --proxy URL --browser-proxy-relay=true|false\n"
+                 "  --headless=true|false --browser-idle-seconds N\n"
                  "  --request-bytes N --object-bytes N --relay-bytes N --queue-size N\n"
                  "  --queue-seconds N --generation-seconds N --stream-idle-seconds N\n"
                  "  --max-attempts N\n"

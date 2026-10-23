@@ -8,7 +8,7 @@ import { api, describeError } from '../api/client'
 import type { BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
-import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel } from '../utils/browser'
+import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel, proxyModeLabel } from '../utils/browser'
 import { formatBytes, formatDuration } from '../utils/format'
 
 interface Diagnostics {
@@ -167,6 +167,14 @@ const capabilityList = computed(() =>
                 #{{ browser.fingerprint.seed || '—' }} · {{ browser.fingerprint.platform }} · {{ browser.fingerprint.timezone }} ·
                 {{ browser.fingerprint.locale }}
               </strong>
+            </div>
+            <div v-if="browser.proxy">
+              <span class="t-caption t-secondary">浏览器代理</span>
+              <strong>{{ proxyModeLabel(browser.proxy.mode) }}</strong>
+            </div>
+            <div v-if="browser.proxy?.relayError" class="wide">
+              <span class="t-caption t-secondary">转发代理最近的错误</span>
+              <strong class="t-critical">{{ browser.proxy.relayError }}</strong>
             </div>
             <div v-if="browser.cookieRefresh">
               <span class="t-caption t-secondary" title="会话中被 Google 轮换的 Cookie 会写回账号，延长凭据有效期">Cookie 写回</span>

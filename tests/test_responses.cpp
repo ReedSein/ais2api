@@ -301,3 +301,65 @@ TEST_CASE("Responses sanitizer preserves malformed built-in configuration", "[re
         REQUIRE_THROWS_AS(responses_to_chat(input), Error);
     }
 }
+TEST_CASE("Incremental Responses text deltas match full recomputation event for event",
+          "[responses][stream-performance]") {
+    const auto chunks = [](std::initializer_list<const char*> values) {
+        std::vector<json::object> result;
+        for (auto value : values) result.push_back(read(value));
+        return result;
+    };
+    const std::vector<std::vector<json::object>> streams{
+        chunks({R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hel"}]}}]})",
+                R"({"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]}}],"usageMetadata":{"promptTokenCount":2}})",
+                R"({"candidates":[{"index":0,"content":{"parts":[{"text":" wor\"ld\n"}]}}],"modelVersion":"v"})",
+                R"({"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}]})",
+                R"({"candidates":[{"content":{"role":"model","parts":[{"text":"!"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}})"}),
+        chunks({R"({"candidates":[{"content":{"parts":[{"text":"think ","thought":true}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"more","thought":true}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"answer"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" goes","thought":false}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"late thought","thought":true}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" on"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"text-sig"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" after"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" signed"}]}}],"usageMetadata":{"thoughtsTokenCount":4}})"}),
+        chunks({R"({"candidates":[{"content":{"parts":[{"text":"look","thoughtSignature":"s1"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"ing"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"AQID"}}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"caption"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" text"}]},"safetyRatings":[{"category":"x"}]}]})",
+                R"({"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{"q":"v"}}}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":"after call"}]}}]})",
+                R"({"candidates":[{"content":{"parts":[{"text":" continues"}]},"finishReason":"MAX_TOKENS"}]})"}),
+        chunks({R"({"candidates":[{"index":1,"content":{"parts":[{"text":"second"}]}}]})",
+                R"({"candidates":[{"index":0,"content":{"parts":[{"text":"first"}]}}]})",
+                R"({"candidates":[{"index":1,"content":{"parts":[{"text":" more"}]}}]})",
+                R"({"candidates":[{"index":0,"content":{"parts":[{"text":" more"}]}},{"index":1,"content":{"parts":[{"text":"!"}]}}]})",
+                R"({"candidates":[{"index":0,"content":{"parts":[{"text":" end","extra":1}]}}]})"})};
+    // created_at is a wall-clock second; it is not part of the comparison.
+    const auto normalize = [](json::array events) {
+        for (auto& value : events)
+            if (auto response = value.as_object().if_contains("response"))
+                response->as_object().erase("created_at");
+        return json::serialize(events);
+    };
+    for (std::size_t limit : {std::size_t{65536}, std::size_t{900}, std::size_t{1400}}) {
+        for (std::size_t s = 0; s < streams.size(); ++s) {
+            INFO("stream " << s << " limit " << limit);
+            ResponsesStream fast("m", "resp_diff", {}, limit), full("m", "resp_diff", {}, limit);
+            full.incremental = false;
+            bool failed = false;
+            for (const auto& delta : streams[s]) {
+                std::string fast_events, full_events, fast_error, full_error;
+                try { fast_events = normalize(fast.push(delta)); } catch (const Error& e) { fast_error = e.code; }
+                try { full_events = normalize(full.push(delta)); } catch (const Error& e) { full_error = e.code; }
+                CHECK(fast_events == full_events);
+                REQUIRE(fast_error == full_error);
+                if (!fast_error.empty()) { failed = true; break; }
+            }
+            const Error error(413, "response_too_large", "too big");
+            CHECK(normalize(failed ? fast.fail(error) : fast.finish()) ==
+                  normalize(failed ? full.fail(error) : full.finish()));
+        }
+    }
+}

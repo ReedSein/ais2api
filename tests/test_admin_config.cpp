@@ -58,6 +58,27 @@ TEST_CASE("unsupported parameter compatibility config persists and updates witho
     }
     CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
 }
+TEST_CASE("idle browser release is off by default and updates without restart", "[config][admin][idle-release]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.browser_idle_seconds == 0);
+    CHECK(cfg.browser_idle_seconds == 0);
+    CHECK(cfg.to_json().at("browser_idle_seconds") == 0);
+    auto enabled = cfg.patched({{"browser_idle_seconds", 900}});
+    CHECK(enabled.browser_idle_seconds == 900);
+    CHECK_FALSE(restart_required(cfg, enabled));
+    enabled.save();
+    CHECK(Config::load(cfg.config_file).browser_idle_seconds == 900);
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("browser_idle_seconds") == 900);
+    CHECK(Config::load(cfg.config_file, {{"browser_idle_seconds", 0}}).browser_idle_seconds == 0);
+    for (const auto& valid : json::array{0, 10, 86400})
+        CHECK_NOTHROW(cfg.patched({{"browser_idle_seconds", valid}}));
+    for (const auto& invalid : json::array{1, 9, 86401, -1, 4294967296LL, true, "900", nullptr, 1.5})
+        CHECK_THROWS_AS(cfg.patched({{"browser_idle_seconds", invalid}}), Error);
+    Config direct = cfg;
+    direct.browser_idle_seconds = 5;
+    CHECK_THROWS_AS(direct.validate(), Error);
+}
 TEST_CASE("management config authentication and origins are independent", "[config][admin]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");

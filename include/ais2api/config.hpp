@@ -35,8 +35,15 @@ struct Config {
     fs::path config_file;
     fs::path browser_executable;
     std::string proxy;
+    // Route the browser through a local relay that authenticates to `proxy`
+    // (http:// or socks5://, with or without credentials). Without it the
+    // browser uses `proxy` directly and cannot use one with credentials.
+    bool browser_proxy_relay = false;
     bool headless = true;
     bool ignore_unsupported_parameters = false;
+    // Optional memory saving: stop the browser after this many seconds without
+    // work (0 = keep it running). The next request starts it again.
+    unsigned browser_idle_seconds = 0;
     Limits limits;
     json::object model_aliases;
     json::array configured_models;

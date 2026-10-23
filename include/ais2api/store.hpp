@@ -60,7 +60,10 @@ public:
     // nullopt leaves a field unchanged; an empty string restores the host default.
     BrowserFingerprint set_fingerprint_region(std::string_view id, std::optional<std::string> timezone,
                                               std::optional<std::string> locale);
-    std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {});
+    // With `auth_probe`, when no account is available, one account blocked only
+    // by an `auth` cooldown is admitted for a single attempt per cooldown period.
+    std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},
+                                  bool auth_probe = false);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
     void success(std::string_view account, std::string_view model, const json::object& usage);
     json::object stats();

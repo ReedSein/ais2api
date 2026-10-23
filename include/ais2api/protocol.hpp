@@ -27,7 +27,18 @@ json::array encode_request(const Request& request, const json::array& base_templ
 json::object decode_chunk(const json::value& wire_chunk);
 void filter_thoughts(json::object& event);
 bool has_content(const json::object& event);
-void merge_event(json::object& aggregate, const json::object& event, std::size_t byte_limit);
+// Merges one streamed event into `aggregate`, failing without changes when the
+// result would exceed `byte_limit` serialized bytes. A caller merging a whole
+// stream passes `size_bound`, an upper bound on the aggregate's serialized size
+// (2 for an empty object) that this function maintains, to avoid re-measuring
+// the aggregate on every event.
+void merge_event(json::object& aggregate, const json::object& event, std::size_t byte_limit,
+                 std::size_t* size_bound = nullptr);
+// Whether merging appends part `b` to the preceding part `a` as one text part.
+bool joins_text(const json::object& a, const json::object& b);
+// The size_bound growth merge_event allows for an event with these counts of
+// candidates and content parts.
+std::size_t merge_growth_bound(const json::object& event, std::size_t candidates, std::size_t parts);
 json::object openai_response(const json::object& gemini, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 json::object openai_delta(const json::object& gemini_delta, std::string_view model, std::string_view id, Store* store = nullptr, std::string_view principal = {});
 class WireStreamParser {

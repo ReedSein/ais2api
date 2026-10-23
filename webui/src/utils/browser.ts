@@ -14,6 +14,7 @@ const PHASES: Record<string, string> = {
   ready: '就绪',
   snapshot_ticket: '获取请求快照',
   request_authorization: '请求授权',
+  generation_upload: '上传请求内容',
   generation_start: '开始生成',
   generation_read: '读取生成输出',
   generation_complete: '生成完成',
@@ -22,6 +23,7 @@ const PHASES: Record<string, string> = {
 const STATUSES: Record<string, { text: string; tone: 'success' | 'caution' | 'critical' | 'neutral' }> = {
   not_started: { text: '未启动', tone: 'neutral' },
   closed: { text: '已关闭', tone: 'neutral' },
+  idle_closed: { text: '空闲已回收', tone: 'neutral' },
   busy: { text: '忙碌', tone: 'neutral' },
   browser_ready: { text: '浏览器已连接', tone: 'neutral' },
   account_ready: { text: '账号已就绪', tone: 'neutral' },
@@ -43,6 +45,9 @@ const COOKIE_REFRESH: Record<string, string> = {
   failed: '写回失败（沿用已保存的 Cookie）',
   not_attempted: '尚未执行',
 }
+
+const PROXY_MODES: Record<string, string> = { none: '不使用代理', direct: '浏览器直连代理', relay: '本机转发代理' }
+export const proxyModeLabel = (mode: string | undefined) => (mode ? (PROXY_MODES[mode] ?? mode) : '—')
 
 export const cookieRefreshLabel = (value: string | undefined) => (value ? (COOKIE_REFRESH[value] ?? value) : '—')
 

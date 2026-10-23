@@ -4,6 +4,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 using namespace ais2api;
 namespace {
 struct LogDirectory {
@@ -98,4 +104,118 @@ TEST_CASE("Journal bounds page bytes without losing complete records", "[logs]")
         more = bool_or(page, "has_more");
     }
     CHECK(total == 10);
+}
+
+TEST_CASE("Journal rotates without breaking cursors or losing a following reader", "[logs]") {
+    LogDirectory dir;
+    std::vector<std::int64_t> seen;
+    std::string cursor = "0";
+    auto follow = [&](logs::Journal& journal) {
+        for (bool more = true; more;) {
+            auto page = journal.read(cursor, 7);
+            for (const auto& entry : page.at("entries").as_array()) {
+                const auto& record = entry.as_object().at("record").as_object();
+                if (string_or(record, "event") == "test") seen.push_back(record.at("sequence").as_int64());
+            }
+            const auto next = string_or(page, "next_cursor");
+            CHECK(std::stoull(next) >= std::stoull(cursor));
+            cursor = next;
+            more = bool_or(page, "has_more");
+        }
+    };
+    {
+        logs::Journal journal(dir.path, 4096);
+        for (int i = 0; i < 300; ++i) {
+            journal.append({{"event", "test"}, {"sequence", i}, {"message", std::string(40, 'x')}});
+            if (i % 25 == 0) follow(journal);
+        }
+        follow(journal);
+    }
+    REQUIRE(seen.size() == 300);
+    for (std::size_t i = 0; i < seen.size(); ++i) CHECK(seen[i] == static_cast<std::int64_t>(i));
+    CHECK(fs::file_size(dir.path / "management.log") <= 4096 + 512);
+    CHECK(fs::exists(dir.path / "management.1.log"));
+    // A reopened journal keeps the cursor space; a stale cursor resumes at the
+    // oldest retained record instead of failing.
+    logs::Journal journal(dir.path, 4096);
+    journal.append({{"event", "test"}, {"sequence", 300}});
+    follow(journal);
+    CHECK(seen.back() == 300);
+    auto oldest = journal.read("0", 500);
+    auto entries = oldest.at("entries").as_array();
+    REQUIRE_FALSE(entries.empty());
+    CHECK(string_or(entries[0].as_object().at("record").as_object(), "event") == "journal_rotated");
+    CHECK(std::stoull(string_or(entries[0].as_object(), "cursor")) > 0);
+    std::size_t total = 0;
+    for (std::string at = "0";;) {
+        auto page = journal.read(at, 500);
+        total += page.at("entries").as_array().size();
+        at = string_or(page, "next_cursor");
+        if (!bool_or(page, "has_more")) break;
+    }
+    CHECK(total > 0);
+    try { journal.read(std::to_string(std::stoull(cursor) + 1)); FAIL("cursor off a line boundary accepted"); }
+    catch (const Error& error) { CHECK(error.status == 400); }
+}
+TEST_CASE("Journal writes a batch with one call and reports oversized records", "[logs]") {
+    LogDirectory dir;
+    logs::Journal journal(dir.path);
+    std::vector<json::object> batch;
+    batch.push_back({{"event", "first"}});
+    batch.push_back({{"message", std::string(logs::Journal::max_record_bytes, 'x')}});
+    batch.push_back({{"event", "second"}});
+    CHECK_THROWS_AS(journal.append(std::move(batch)), Error);
+    auto entries = journal.read().at("entries").as_array();
+    REQUIRE(entries.size() == 2);
+    CHECK(string_or(entries[1].as_object().at("record").as_object(), "event") == "second");
+}
+TEST_CASE("Journal trims service.log when it is this process's stderr", "[logs]") {
+    LogDirectory dir;
+    fs::create_directories(dir.path);
+    const auto service = dir.path / "service.log";
+    const std::string filler(5000, 's');
+    // Opened append-only like the spawned service's inherited output.
+#ifdef _WIN32
+    HANDLE file = CreateFileW(service.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(file != INVALID_HANDLE_VALUE);
+    auto put = [&](std::string_view data) {
+        DWORD written = 0;
+        REQUIRE(WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr));
+    };
+    put(filler);
+    HANDLE saved = GetStdHandle(STD_ERROR_HANDLE);
+    SetStdHandle(STD_ERROR_HANDLE, file);
+    logs::Journal journal(dir.path, 4096);
+    SetStdHandle(STD_ERROR_HANDLE, saved);
+#else
+    const int file = ::open(service.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0600);
+    REQUIRE(file >= 0);
+    auto put = [&](std::string_view data) { REQUIRE(::write(file, data.data(), data.size()) == static_cast<ssize_t>(data.size())); };
+    put(filler);
+    const int saved = ::dup(STDERR_FILENO);
+    ::dup2(file, STDERR_FILENO);
+    logs::Journal journal(dir.path, 4096);
+    ::dup2(saved, STDERR_FILENO);
+    ::close(saved);
+#endif
+    journal.append({{"event", "trim"}});
+    CHECK(fs::file_size(dir.path / "service.1.log") == filler.size());
+    CHECK(fs::file_size(service) == 0);
+    // The append-only writer continues at the new end of the file.
+    put("next\n");
+    CHECK(fs::file_size(service) == 5);
+#ifdef _WIN32
+    CloseHandle(file);
+#else
+    ::close(file);
+#endif
+    // Not the stderr target: never touched.
+    LogDirectory other;
+    fs::create_directories(other.path);
+    atomic_write(other.path / "service.log", filler);
+    logs::Journal unrelated(other.path, 4096);
+    unrelated.append({{"event", "trim"}});
+    CHECK(fs::file_size(other.path / "service.log") == filler.size());
+    CHECK_FALSE(fs::exists(other.path / "service.1.log"));
 }

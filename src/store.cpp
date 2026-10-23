@@ -371,6 +371,13 @@ struct Store::Impl {
                 { Statement columns(db, "PRAGMA table_info(quota_counters)");
                   while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
                 if (!quota_deadline) exec(db, "ALTER TABLE quota_counters ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0");
+                // `kind` records the Store::failure kind; `probed` marks an auth
+                // cooldown whose single probe attempt was already admitted.
+                bool failure_kind = false, failure_probed = false;
+                { Statement columns(db, "PRAGMA table_info(failures)");
+                  while (columns.row()) { failure_kind |= columns.str(1) == "kind"; failure_probed |= columns.str(1) == "probed"; } }
+                if (!failure_kind) exec(db, "ALTER TABLE failures ADD COLUMN kind TEXT NOT NULL DEFAULT ''");
+                if (!failure_probed) exec(db, "ALTER TABLE failures ADD COLUMN probed INTEGER NOT NULL DEFAULT 0");
                 // Every account owns a permanent browser fingerprint; accounts
                 // from older stores receive one the first time the store opens.
                 exec(db, "CREATE TABLE IF NOT EXISTS fingerprints(account TEXT PRIMARY KEY REFERENCES "
@@ -660,7 +667,8 @@ void Store::select_account(std::string_view id) {
         exists.text(1, id);
         if (!exists.row())
             throw Error(404, "account_not_found", "Account not found");
-        Statement s(impl_->db, "INSERT INTO settings(k,v) VALUES('selected',?) ON "
+        // An explicit choice also becomes the current account immediately.
+        Statement s(impl_->db, "INSERT INTO settings(k,v) VALUES('selected',?1),('current',?1) ON "
                                "CONFLICT(k) DO UPDATE SET v=excluded.v");
         s.text(1, id);
         s.row();
@@ -687,25 +695,51 @@ void Store::reset_account(std::string_view id) {
     });
 }
 std::optional<Account> Store::choose(std::string_view model,
-                                     const std::vector<std::string> &excluded) {
+                                     const std::vector<std::string> &excluded, bool auth_probe) {
     return impl_->run([&]() -> std::optional<Account> {
-        Statement s(impl_->db,
-                    "SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
-                    "accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 "
-                    "FROM failures f WHERE f.account=a.id AND (f.model=? OR f.model='*') "
-                    "AND f.until>?) ORDER BY (a.id=(SELECT account FROM sticky WHERE "
-                    "model=?)) DESC,(a.id=(SELECT v FROM settings WHERE k='selected')) "
-                    "DESC,a.rowid");
-        s.text(1, model);
-        s.integer(2, unix_seconds());
-        s.text(3, model);
-        while (s.row()) {
-            auto a = decode(s);
-            if (std::find(excluded.begin(), excluded.end(), a.id) != excluded.end())
-                continue;
+        const auto now = unix_seconds();
+        // Stay on the account that last completed a generation (the browser's
+        // resident session) while it can serve the model; switching rebuilds
+        // the page and may restart the browser for another fingerprint. Then
+        // the preferred account, then the account that last served the model.
+        constexpr std::string_view preference =
+            " ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,(a.id=(SELECT v FROM "
+            "settings WHERE k='selected')) DESC,(a.id=(SELECT account FROM sticky WHERE model=?3)) DESC,a.rowid";
+        auto pick = [&](std::string_view filter) -> std::optional<Account> {
+            Statement s(impl_->db, (std::string(filter) + std::string(preference)).c_str());
+            s.text(1, model);
+            s.integer(2, now);
+            s.text(3, model);
+            while (s.row()) {
+                auto a = decode(s);
+                if (std::find(excluded.begin(), excluded.end(), a.id) != excluded.end())
+                    continue;
+                return a;
+            }
+            return {};
+        };
+        if (auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
+                          "accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 "
+                          "FROM failures f WHERE f.account=a.id AND (f.model=?1 OR f.model='*') "
+                          "AND f.until>?2)"))
             return a;
+        if (!auth_probe) return {};
+        // Every account is cooling down. An auth cooldown alone may be stale
+        // (the session problem resolved itself), so admit one account blocked
+        // only by it for a single attempt per cooldown; quota, permission,
+        // expiry and disabled states are never bypassed.
+        auto a = pick("SELECT a.id,a.name,a.email,a.auth_user,a.state,a.disabled FROM "
+                      "accounts a WHERE a.disabled=0 AND a.expired=0 AND EXISTS(SELECT 1 FROM "
+                      "failures f WHERE f.account=a.id AND f.model='*' AND f.kind='auth' AND "
+                      "f.probed=0 AND f.until>?2) AND NOT EXISTS(SELECT 1 FROM failures f WHERE "
+                      "f.account=a.id AND (f.model=?1 OR f.model='*') AND f.until>?2 AND NOT "
+                      "(f.model='*' AND f.kind='auth' AND f.probed=0))");
+        if (a) {
+            Statement probed(impl_->db, "UPDATE failures SET probed=1 WHERE account=? AND model='*' AND kind='auth'");
+            probed.text(1, a->id);
+            probed.row();
         }
-        return {};
+        return a;
     });
 }
 json::object Store::rotation_status() {
@@ -714,7 +748,7 @@ json::object Store::rotation_status() {
         Statement selected(impl_->db, "SELECT a.id FROM accounts a JOIN settings s ON s.v=a.id WHERE s.k='selected'");
         if (selected.row()) out["preferred_account_id"] = selected.str(0);
         Statement next(impl_->db,
-            "SELECT a.id FROM accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND f.model='*' AND f.until>?) ORDER BY (a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
+            "SELECT a.id FROM accounts a WHERE a.disabled=0 AND a.expired=0 AND NOT EXISTS(SELECT 1 FROM failures f WHERE f.account=a.id AND f.model='*' AND f.until>?) ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,(a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
         next.integer(1, unix_seconds());
         if (next.row()) out["next_account_id"] = next.str(0);
         return out;
@@ -731,7 +765,7 @@ std::string Store::rotate_account() {
             next.integer(1, unix_seconds());
             if (!next.row()) throw Error(503, "no_available_account", "No globally available account");
             auto id = next.str(0);
-            Statement selected(impl_->db, "INSERT INTO settings(k,v) VALUES('selected',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v");
+            Statement selected(impl_->db, "INSERT INTO settings(k,v) VALUES('selected',?1),('current',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v");
             selected.text(1, id);
             selected.row();
             exec(impl_->db, "DELETE FROM sticky");
@@ -819,13 +853,19 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                     save_quota.integer(3, quota_count); save_quota.integer(4, day);
                     save_quota.integer(5, until); save_quota.row();
                 }
+                // A failure during an admitted auth probe extends the cooldown
+                // without granting another probe; an expired cooldown starts over.
                 Statement s(impl_->db,
-                            "INSERT INTO failures VALUES(?,?,?,?) ON CONFLICT(account,model) "
-                            "DO UPDATE SET until=excluded.until,count=excluded.count");
+                            "INSERT INTO failures(account,model,until,count,kind) VALUES(?,?,?,?,?) "
+                            "ON CONFLICT(account,model) DO UPDATE SET until=excluded.until,"
+                            "count=excluded.count,kind=excluded.kind,probed=CASE WHEN "
+                            "failures.until>? THEN failures.probed ELSE 0 END");
                 s.text(1, id);
                 s.text(2, m);
                 s.integer(3, until);
                 s.integer(4, quota_error ? count : std::min(count, 1000000) + 1);
+                s.text(5, kind);
+                s.integer(6, current_time);
                 s.row();
             }
             Statement st(impl_->db, "INSERT INTO stats(account,model,failed) VALUES(?,?,1) ON "
@@ -863,8 +903,13 @@ void Store::success(std::string_view id, std::string_view model, const json::obj
             sticky.text(1, model);
             sticky.text(2, id);
             sticky.row();
+            Statement current(impl_->db, "INSERT INTO settings(k,v) VALUES('current',?) ON CONFLICT(k) "
+                                         "DO UPDATE SET v=excluded.v");
+            current.text(1, id);
+            current.row();
+            // A completed generation also proves an auth cooldown stale.
             Statement reset(impl_->db, "DELETE FROM failures WHERE account=? AND "
-                                       "(model=? OR model='*') AND until<=?");
+                                       "((model=? OR model='*') AND until<=? OR model='*' AND kind='auth')");
             reset.text(1, id);
             reset.text(2, model);
             reset.integer(3, unix_seconds());

@@ -55,7 +55,13 @@
       "description": "Explicit browser path, or empty to auto-detect the locked browser-runtime bundle beside the executable."
     },
     "proxy": {
-      "type": "string"
+      "type": "string",
+      "description": "Upstream proxy for the browser and for downloads. The browser can use a proxy with credentials only through browser_proxy_relay."
+    },
+    "browser_proxy_relay": {
+      "type": "boolean",
+      "default": false,
+      "description": "Route the browser through a local relay that authenticates to proxy (http:// or socks5://, with or without credentials) and only opens tunnels to port 443. Requires a restart."
     },
     "headless": {
       "type": "boolean",
@@ -65,6 +71,12 @@
       "type": "boolean",
       "default": false,
       "description": "Discard optional data API parameters explicitly unsupported by the upstream. Takes effect without restarting."
+    },
+    "browser_idle_seconds": {
+      "type": "integer",
+      "default": 0,
+      "anyOf": [{"const": 0}, {"minimum": 10, "maximum": 86400}],
+      "description": "Optional memory saving: stop the browser after this many seconds without any work; 0 keeps it running. The next request starts it again (cold start). Takes effect without restarting."
     },
     "model_aliases": {
       "type": "object",

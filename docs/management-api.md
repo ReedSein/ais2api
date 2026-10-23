@@ -67,11 +67,15 @@ Managed generation keys have independent persisted records. Existing legacy data
 
 `ignore_unsupported_parameters` is a boolean, defaults to false and applies immediately when patched. It controls dropping known unsupported optional generation parameters across Gemini, Chat and Responses; it does not relax configuration, authentication or content validation. See [the compatibility switch](protocol.md#optional-unsupported-parameter-dropping).
 
+`browser_proxy_relay` is a boolean, default false, and requires a restart. When true, `proxy` must be a single `http://` or `socks5://` URL (credentials optional); otherwise the patch is rejected. Browser diagnostics report `proxy.mode` (`none`, `direct` or `relay`) and `proxy.relayError`, the relay's latest upstream failure without credentials.
+
+`browser_idle_seconds` is an integer, 0 (default, off) or 10..86400, and applies immediately when patched. When set, the browser stops after that many seconds without work and the next request starts it again; browser diagnostics then report the status `idle_closed`.
+
 `GET /config` returns the redacted running `config`, its file path and `restart_required`. When a saved change awaits restart, `saved_config` contains the redacted pending configuration. PATCH validates the full resulting configuration before atomically saving it. Unknown fields, wrong types, invalid limits and the display mask `***` as a secret are rejected. Omit unchanged redacted secret fields from a submitted form.
 
 Patches merge only the nested `limits` object. `model_aliases`, `model_defaults`, `configured_models` and `admin_origins` replace their respective complete containers. To delete a model alias, submit a replacement map without it.
 
-Bind address, port, data directory, browser executable, proxy, headless mode, generation timeout, stream idle timeout, object bytes and relay bytes require restart. Other settings retain the existing hot reload policy, including request bytes and queue limits. The response reports `saved`, `applied` and `restart_required`. A patch with any restart-only difference is saved as a complete pending configuration and is not partially applied. Later patches use that pending configuration as their base, preserving earlier saved changes. Returning all restart-only settings to their running values allows the complete result to apply immediately. Restart loads the saved configuration; environment overrides still apply during startup/reload.
+Bind address, port, data directory, browser executable, proxy, browser proxy relay, headless mode, generation timeout, stream idle timeout, object bytes and relay bytes require restart. Other settings retain the existing hot reload policy, including request bytes and queue limits. The response reports `saved`, `applied` and `restart_required`. A patch with any restart-only difference is saved as a complete pending configuration and is not partially applied. Later patches use that pending configuration as their base, preserving earlier saved changes. Returning all restart-only settings to their running values allows the complete result to apply immediately. Restart loads the saved configuration; environment overrides still apply during startup/reload.
 
 ## Logs and resumable streaming
 

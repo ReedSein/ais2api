@@ -54,6 +54,10 @@ struct BackendState {
     std::vector<std::string> probed_accounts;
     std::atomic<unsigned> session_resets{0};
     std::atomic<unsigned> browser_closes{0};
+    std::atomic<bool> browser_running{false};
+    std::atomic<unsigned> idle_checks{0};
+    std::atomic<unsigned> idle_releases{0};
+    std::atomic<unsigned> template_clears{0};
 };
 
 class SyntheticBackend final : public GenerationBackend {
@@ -63,6 +67,7 @@ public:
     void generate(const Request& request, const Account& account, const EventSink& emit,
                   std::stop_token cancel) override {
         const auto attempt = state_->calls.fetch_add(1) + 1;
+        state_->browser_running = true;
         {
             std::lock_guard lock(state_->mutex);
             state_->request = request.gemini;
@@ -171,7 +176,14 @@ public:
     }
     json::object diagnostics() override { return {{"synthetic", true}}; }
     void close() override { ++state_->browser_closes; }
+    bool release_idle() override {
+        ++state_->idle_checks;
+        if (!state_->browser_running.exchange(false)) return false;
+        ++state_->idle_releases;
+        return true;
+    }
     void reset_session() override { ++state_->session_resets; }
+    void clear_template() override { ++state_->template_clears; }
 
 private:
     std::shared_ptr<BackendState> state_;
@@ -196,7 +208,7 @@ struct GenerationServer {
     std::jthread thread;
     std::atomic<bool> failed{false};
 
-    explicit GenerationServer(bool browser_file_present = false) {
+    explicit GenerationServer(bool browser_file_present = false, unsigned browser_idle_seconds = 0) {
         net::io_context io;
         tcp::acceptor available(io, {tcp::v4(), 0});
         config.port = available.local_endpoint().port();
@@ -213,6 +225,7 @@ struct GenerationServer {
         config.limits.generation_seconds = 5;
         config.limits.stream_idle_seconds = 5;
         config.limits.max_attempts = 3;
+        config.browser_idle_seconds = browser_idle_seconds;
         fs::create_directories(directory);
         key = "generation-test-" + random_hex(24);
         config.api_key = key;
@@ -405,6 +418,36 @@ TEST_CASE("Gemini unary HTTP preserves multiple turns and aggregates synthetic e
         REQUIRE_FALSE(server.state->account_id.empty());
     }
     REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("An idle browser is released once after the configured quiet period", "[generation][http][idle-release]") {
+    GenerationServer server(false, 10);
+    const auto body = R"({"contents":[{"role":"user","parts":[{"text":"hello"}]}]})";
+    REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent", body).result_int() == 200);
+    const auto finished = Clock::now();
+    // Nothing is released while the period is still running.
+    std::this_thread::sleep_for(5s);
+    CHECK(server.state->idle_checks == 0);
+    while (server.state->idle_releases == 0 && Clock::now() - finished < 15s) std::this_thread::sleep_for(50ms);
+    CHECK(server.state->idle_releases == 1);
+    // The period starts when the task ends, just before the client has its reply.
+    CHECK(Clock::now() - finished >= 9s);
+    CHECK_FALSE(server.state->browser_running);
+    // The next request starts again on demand; without new work there is no
+    // repeated release attempt.
+    CHECK(server.state->idle_checks == 1);
+    REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent", body).result_int() == 200);
+    CHECK(server.state->browser_running);
+    CHECK(server.state->calls == 2);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("The browser is never released when idle release is off", "[generation][http][idle-release]") {
+    GenerationServer server;
+    REQUIRE(server.call("/v1beta/models/synthetic-unary:generateContent", R"({"contents":[{"role":"user","parts":[{"text":"hello"}]}]})").result_int() == 200);
+    std::this_thread::sleep_for(1s);
+    CHECK(server.state->idle_checks == 0);
+    CHECK(server.state->browser_running);
 }
 
 TEST_CASE("Gemini SSE reaches the client before backend generation can finish", "[generation][http][stream-timing]") {
@@ -870,6 +913,10 @@ TEST_CASE("Recoverable route and first empty responses retry the same account wi
         const auto& attempts = server.state->attempted_accounts;
         REQUIRE(attempts.size() == calls);
         for (const auto& account : attempts) CHECK(account == attempts.front());
+        // Only an empty reply discards the template, once; nothing rebuilds the session.
+        const bool empty = model.starts_with("synthetic-empty");
+        CHECK(server.state->template_clears == (empty ? 1u : 0u));
+        if (empty) CHECK(server.state->session_resets == 0);
         Store store(server.config.data_dir);
         auto available = store.choose(model);
         REQUIRE(available); CHECK(available->id == attempts.front());
@@ -1172,5 +1219,22 @@ TEST_CASE("Quota failover switches accounts without restarting the browser", "[g
     REQUIRE(server.state->attempted_accounts.size() == 2);
     CHECK(server.state->browser_closes == 0);
     CHECK(server.state->session_resets == 0);
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Accounts that are only in auth cooldown get one probe attempt, not one per request", "[generation][http][recovery][auth-probe]") {
+    GenerationServer server;
+    // Both accounts fail authentication and enter the auth cooldown.
+    REQUIRE(generate_once(server, "synthetic-upstream-auth").result_int() == 401);
+    REQUIRE(server.state->attempted_accounts.size() == 3);
+    // The next request still tries them instead of failing without an attempt.
+    REQUIRE(generate_once(server, "synthetic-upstream-auth").result_int() == 401);
+    const auto probed = server.state->attempted_accounts.size();
+    CHECK(probed > 3);
+    // The probes failed: further requests fail fast until the cooldown ends.
+    auto response = generate_once(server, "synthetic-upstream-auth");
+    REQUIRE(response.result_int() == 503);
+    CHECK(response.body().find("no_account") != std::string::npos);
+    CHECK(server.state->attempted_accounts.size() == probed);
     REQUIRE_FALSE(server.failed);
 }

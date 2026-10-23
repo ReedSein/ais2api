@@ -20,14 +20,25 @@ class ResponsesStream {
     json::array push(const json::object &gemini_delta);
     json::array finish();
     json::array fail(const Error &error);
+    // Plain text deltas extend the output in place instead of recomputing the
+    // whole response. Tests disable it to compare both paths.
+    bool incremental = true;
 
   private:
+    struct Append {
+        std::string_view text;
+        bool thought = false, native = false;
+        std::size_t index = 0, growth = 0;
+    };
     json::object event(std::string_view type, json::object fields);
+    static const json::array *first_parts(const json::object &aggregate);
+    std::optional<Append> plan_append(const json::object &delta) const;
+    void apply_append(const Append &plan, json::array &events);
     json::object response();
     std::string model_, id_, principal_;
     json::object options_, aggregate_;
     json::array output_;
-    std::size_t limit_, sequence_ = 0;
+    std::size_t limit_, sequence_ = 0, options_bytes_ = 0, aggregate_bound_ = 2, output_bound_ = 2;
     std::int64_t created_;
     Store *store_;
     bool started_ = false, ended_ = false;

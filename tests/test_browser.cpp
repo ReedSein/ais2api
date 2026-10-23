@@ -9,7 +9,9 @@
 #include "../browser/rpc_error.hpp"
 #include "../browser/google_auth.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <atomic>
 #include <cstdlib>
+#include <functional>
 #include <future>
 #include <map>
 #include <thread>
@@ -20,7 +22,7 @@ TEST_CASE("Browser bridge is embedded with a matching digest and required host m
     REQUIRE_FALSE(source.empty());
     REQUIRE(source.size() <= 256 * 1024);
     REQUIRE(sha256(source) == browser_detail::embedded_bridge_sha256());
-    REQUIRE(source.find("identity, bootstrap, finishBootstrap, run, snapshot, start, ack, abort, discoverModels") != std::string_view::npos);
+    REQUIRE(source.find("identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels") != std::string_view::npos);
 }
 TEST_CASE("Google authorization signs synthetic cookies with exact SHA1 hashes", "[google-auth]") {
     browser_detail::GoogleAuthorizationCache cache;
@@ -130,7 +132,7 @@ struct Peer {
     std::promise<json::object> received;
     std::future<json::object> request = received.get_future();
     std::jthread worker;
-    explicit Peer(bool delayed = false) : worker([this, delayed] {
+    explicit Peer(bool delayed = false, bool crash = false) : worker([this, delayed, crash] {
         try {
             websocket::stream<tcp::socket> ws{io};
             acceptor.accept(ws.next_layer()); ws.accept();
@@ -140,7 +142,16 @@ struct Peer {
             if (delayed) { std::this_thread::sleep_for(300ms); return; }
             const auto id = object.at("id");
             auto send = [&](const json::object& message) { auto encoded = json::serialize(message); ws.write(asio::buffer(encoded)); };
+            if (crash) {
+                // Another page's crash is not ours; ours never answers.
+                send({{"method", "Inspector.targetCrashed"}, {"sessionId", "other-session"}, {"params", json::object{}}});
+                send({{"method", "Inspector.targetCrashed"}, {"sessionId", string_or(object, "sessionId")}, {"params", json::object{}}});
+                std::this_thread::sleep_for(500ms);
+                return;
+            }
             send({{"method", "Runtime.consoleAPICalled"}, {"sessionId", "isolated-session"}, {"params", json::object{}}});
+            // Ignored events are skipped unparsed, so even a truncated one is harmless.
+            ws.write(asio::buffer(std::string_view(R"({"method":"Network.dataReceived","params":{)")));
             send({{"id", 999}, {"result", {{"ignored", true}}}});
             send({{"id", id}, {"sessionId", string_or(object, "sessionId")}, {"result", {{"result", {{"type", "string"}, {"value", "real-websocket-reply"}}}}}});
         } catch (...) { try { received.set_exception(std::current_exception()); } catch (...) {} }
@@ -166,6 +177,21 @@ TEST_CASE("native CDP correlates JSON RPC through interleaved session events") {
     CHECK(bool_or(request.at("params").as_object(), "awaitPromise"));
 }
 
+TEST_CASE("native CDP escapes evaluated expressions exactly like the JSON serializer") {
+    Peer peer;
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    std::string expression = "start({body:\"q\\\"x\n\"})\x01\x1f\b\t\n\f\r\x7f";
+    expression += "\xe4\xbd\xa0" + std::string(70000, 'a');
+    CHECK(client.evaluate(expression, "isolated-session", {}).as_string() == "real-websocket-reply");
+    CHECK(string_or(peer.request.get().at("params").as_object(), "expression") == expression);
+    for (std::string_view text : {std::string_view(expression), std::string_view("\0\"\\", 3)}) {
+        std::string quoted;
+        browser_detail::append_quoted(quoted, text);
+        CHECK(quoted == json::serialize(json::value(json::string_view(text.data(), text.size()))));
+    }
+}
+
 TEST_CASE("native CDP cancels a websocket read without waiting for its timeout") {
     Peer peer(true);
     browser_detail::Cdp client;
@@ -177,6 +203,163 @@ TEST_CASE("native CDP cancels a websocket read without waiting for its timeout")
     catch (const Error& error) { CHECK(error.code == "cancelled"); }
     CHECK(Clock::now() - began < 1s);
     CHECK(string_or(peer.request.get(), "sessionId") == "session");
+}
+
+TEST_CASE("native CDP fails a call at once when its page crashes") {
+    Peer peer(false, true);
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    const auto began = Clock::now();
+    try { client.evaluate("new Promise(()=>{})", "page-session", {}, 30s); FAIL("Expected a crash"); }
+    catch (const Error& error) { CHECK(error.code == "browser_disconnected"); }
+    CHECK(Clock::now() - began < 1s);
+    // Later calls on the crashed page fail without waiting for a reply.
+    try { client.evaluate("1", "page-session", {}, 30s); FAIL("Expected a crash"); }
+    catch (const Error& error) { CHECK(error.code == "browser_disconnected"); }
+    CHECK(Clock::now() - began < 1s);
+}
+
+namespace {
+// A loopback websocket peer that runs `script` on the accepted connection.
+struct ScriptedPeer {
+    using Socket = websocket::stream<tcp::socket>;
+    asio::io_context io;
+    tcp::acceptor acceptor{io, {asio::ip::address_v4::loopback(), 0}};
+    unsigned short port = acceptor.local_endpoint().port();
+    std::jthread worker;
+    explicit ScriptedPeer(std::function<void(Socket&)> script) : worker([this, script = std::move(script)] {
+        try {
+            Socket ws{io};
+            acceptor.accept(ws.next_layer()); ws.accept();
+            script(ws);
+        } catch (...) {}
+    }) {}
+    static json::object receive(Socket& ws) {
+        beast::flat_buffer buffer; ws.read(buffer);
+        return json::parse(beast::buffers_to_string(buffer.data())).as_object();
+    }
+    static void reply(Socket& ws, const json::object& request, json::value value) {
+        auto encoded = json::serialize(json::object{{"id", request.at("id")}, {"sessionId", string_or(request, "sessionId")},
+                                                    {"result", {{"result", {{"type", "string"}, {"value", std::move(value)}}}}}});
+        ws.write(asio::buffer(encoded));
+    }
+};
+}
+
+TEST_CASE("native CDP drains events while no call is waiting", "[cdp]") {
+    std::atomic<bool> flooded = false;
+    ScriptedPeer peer([&](ScriptedPeer::Socket& ws) {
+        // Far more than the socket buffers hold: blocks unless the client reads.
+        const std::string event = R"({"method":"Network.dataReceived","params":{"pad":")" + std::string(4096, 'x') + "\"}}";
+        for (int i = 0; i < 4096; ++i) ws.write(asio::buffer(event));
+        flooded = true;
+        auto request = ScriptedPeer::receive(ws);
+        ScriptedPeer::reply(ws, request, "after-flood");
+    });
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    const auto deadline = Clock::now() + 5s;
+    while (!flooded && Clock::now() < deadline) std::this_thread::sleep_for(10ms);
+    CHECK(flooded);
+    CHECK(client.evaluate("1", "session", {}, 5s).as_string() == "after-flood");
+}
+
+TEST_CASE("native CDP keeps the connection after a cancelled or timed-out call", "[cdp]") {
+    ScriptedPeer peer([](ScriptedPeer::Socket& ws) {
+        const auto cancelled = ScriptedPeer::receive(ws);
+        const auto timed_out = ScriptedPeer::receive(ws);
+        std::this_thread::sleep_for(1300ms);
+        // Late replies to abandoned calls must not satisfy the next call.
+        ScriptedPeer::reply(ws, cancelled, "late-cancelled");
+        ScriptedPeer::reply(ws, timed_out, "late-timed-out");
+        ScriptedPeer::reply(ws, ScriptedPeer::receive(ws), "current");
+        std::this_thread::sleep_for(200ms);
+    });
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    std::stop_source source;
+    std::jthread cancel([&] { std::this_thread::sleep_for(50ms); source.request_stop(); });
+    try { client.evaluate("first", "session", source.get_token(), 30s); FAIL("Expected cancellation"); }
+    catch (const Error& error) { CHECK(error.code == "cancelled"); }
+    try { client.evaluate("second", "session", {}, 1s); FAIL("Expected a timeout"); }
+    catch (const Error& error) { CHECK(error.code == "browser_timeout"); }
+    CHECK(client.open());
+    CHECK(client.evaluate("third", "session", {}, 5s).as_string() == "current");
+}
+
+TEST_CASE("native CDP fails a waiting call at once when the browser disconnects", "[cdp]") {
+    ScriptedPeer peer([](ScriptedPeer::Socket& ws) {
+        ScriptedPeer::receive(ws);
+        std::this_thread::sleep_for(100ms);
+        beast::get_lowest_layer(ws).close();
+    });
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    const auto began = Clock::now();
+    try { client.evaluate("new Promise(()=>{})", "session", {}, 30s); FAIL("Expected a disconnect"); }
+    catch (const Error& error) { CHECK(error.code == "browser_disconnected"); }
+    CHECK(Clock::now() - began < 2s);
+    CHECK_FALSE(client.open());
+    try { client.call("Browser.getVersion", {}, {}, {}, 30s); FAIL("Expected a disconnect"); }
+    catch (const Error& error) { CHECK(error.code == "browser_disconnected"); }
+}
+
+TEST_CASE("native CDP passes call arguments as escaped protocol values", "[cdp]") {
+    std::promise<json::object> received;
+    ScriptedPeer peer([&](ScriptedPeer::Socket& ws) {
+        auto request = ScriptedPeer::receive(ws);
+        received.set_value(request);
+        ScriptedPeer::reply(ws, request, 3);
+        // A fire-and-forget command arrives too; nothing waits for its reply.
+        auto notified = ScriptedPeer::receive(ws);
+        ScriptedPeer::reply(ws, notified, "ignored");
+        ScriptedPeer::reply(ws, ScriptedPeer::receive(ws), json::string(string_or(notified, "method")));
+    });
+    auto request_future = received.get_future();
+    browser_detail::Cdp client;
+    client.connect(peer.port, "/devtools/browser/test-owned-browser", {});
+    std::string chunk = "[\"q\\\"x\n\x01\xe4\xbd\xa0" + std::string(70000, 'a') + "\"]";
+    const auto result = client.call_function("object-7", "function(id, chunk) { return this.append(id, chunk); }", {"upload-id", chunk}, "session", {});
+    CHECK(result.as_int64() == 3);
+    auto request = request_future.get();
+    CHECK(string_or(request, "method") == "Runtime.callFunctionOn");
+    CHECK(string_or(request, "sessionId") == "session");
+    const auto& params = request.at("params").as_object();
+    CHECK(string_or(params, "objectId") == "object-7");
+    CHECK(string_or(params, "functionDeclaration") == "function(id, chunk) { return this.append(id, chunk); }");
+    const auto& arguments = params.at("arguments").as_array();
+    REQUIRE(arguments.size() == 2);
+    CHECK(string_or(arguments[0].as_object(), "value") == "upload-id");
+    CHECK(string_or(arguments[1].as_object(), "value") == chunk);
+    CHECK(bool_or(params, "awaitPromise"));
+    client.notify("HeapProfiler.collectGarbage", {}, "session");
+    CHECK(client.evaluate("1", "session", {}, 5s).as_string() == "HeapProfiler.collectGarbage");
+}
+
+TEST_CASE("request body pieces never split a UTF-8 sequence", "[cdp]") {
+    using browser_detail::utf8_prefix;
+    const std::string text = "ab\xe4\xbd\xa0" "c\xf0\x9f\x98\x80";  // ab, 3-byte, c, 4-byte
+    CHECK(utf8_prefix(text, 100) == text.size());
+    CHECK(utf8_prefix(text, 2) == 2);
+    CHECK(utf8_prefix(text, 3) == 2);
+    CHECK(utf8_prefix(text, 4) == 2);
+    CHECK(utf8_prefix(text, 5) == 5);
+    CHECK(utf8_prefix(text, 6) == 6);
+    CHECK(utf8_prefix(text, 7) == 6);
+    CHECK(utf8_prefix(text, 9) == 6);
+    // Every split reassembles the original text.
+    for (std::size_t limit = 4; limit <= text.size(); ++limit) {
+        std::string joined;
+        for (std::string_view rest(text); !rest.empty();) {
+            const auto size = utf8_prefix(rest, limit);
+            REQUIRE(size > 0);
+            joined.append(rest.substr(0, size));
+            rest.remove_prefix(size);
+        }
+        CHECK(joined == text);
+    }
+    // An invalid run of continuation bytes is cut at the limit.
+    CHECK(utf8_prefix(std::string(8, '\x80'), 4) == 4);
 }
 
 TEST_CASE("unconfigured browser probe fails without claiming account readiness") {
@@ -379,4 +562,25 @@ TEST_CASE("verified cookie write-back keeps unexported cookies and refuses signe
     CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[2]}).empty());
     CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[0]}).empty());
     CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[1]}).empty());
+}
+
+TEST_CASE("cookie injection drops volatile conflicting cookies but never the whole state", "[cookie-refresh]") {
+    const json::array stored{
+        json::object{{"name", "SID"}, {"value", "keep"}, {"domain", ".google.com"}, {"secure", true}, {"expires", 0}},
+        json::object{{"name", "OSID"}, {"value", "drop"}, {"domain", "aistudio.google.com"}},
+        json::object{{"name", "__Secure-OSID"}, {"value", "drop"}, {"domain", "aistudio.google.com"}},
+        json::object{{"name", "SIDCC"}, {"value", "drop"}, {"domain", ".google.com"}},
+        json::object{{"name", "__Secure-1PSIDCC"}, {"value", "drop"}, {"domain", ".google.com"}},
+        json::object{{"name", "__Secure-3PSIDCC"}, {"value", "drop"}, {"domain", ".google.com"}},
+        json::object{{"name", "SAPISID"}, {"value", "keep"}, {"domain", ".google.com"}, {"sameParty", true}}};
+    auto injected = browser_detail::injected_cookies(stored);
+    std::vector<std::string> names;
+    for (const auto& cookie : injected) names.push_back(string_or(cookie.as_object(), "name"));
+    CHECK(names == std::vector<std::string>{"SID", "SAPISID"});
+    // Unsupported fields and non-positive expiry are not passed to the browser.
+    CHECK_FALSE(injected[0].as_object().contains("expires"));
+    CHECK_FALSE(injected[1].as_object().contains("sameParty"));
+    CHECK(injected[0].as_object().at("secure").as_bool());
+    // A state made only of these cookies is injected unchanged.
+    CHECK(browser_detail::injected_cookies(json::array{stored[1], stored[3]}).size() == 2);
 }

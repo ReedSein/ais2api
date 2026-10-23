@@ -60,13 +60,18 @@ Options may precede or follow the command. Use a value after the option or `--op
 ```text
 --config PATH          --data-dir PATH       --bind ADDRESS
 --port PORT            --browser PATH        --proxy URL
---headless=true|false
+--browser-proxy-relay=true|false
+--headless=true|false                       --browser-idle-seconds N
 --request-bytes N      --object-bytes N      --relay-bytes N
 --queue-size N         --queue-seconds N     --generation-seconds N
 --stream-idle-seconds N                     --max-attempts N
 ```
 
 The effective configuration combines defaults, the configuration file, `AIS2API_*` environment overrides, then explicit CLI options. `start` preserves its effective settings in the child process without adding proxy credentials to the child command line. Keep using the same `--data-dir` for all commands targeting that service. Paths with spaces should be quoted by the shell.
+
+`browser_proxy_relay` (default false, restart required) routes the browser through a loopback relay that authenticates to `proxy`. Chromium cannot send proxy credentials and never supports SOCKS authentication, so a `proxy` with `user:password@` needs the relay; without it the browser refuses to start with `proxy_auth_unsupported` instead of putting the credentials on its command line. With the relay on, `proxy` must be `http://[user:password@]host:port` or `socks5://[user:password@]host:port` (`socks5h://` is the same: target names are always resolved by the upstream proxy). The relay listens on an ephemeral `127.0.0.1` port and only opens `CONNECT` tunnels to port 443; other local processes can reach that port too, which is why it is limited this way. Downloads keep using `proxy` directly through libcurl.
+
+`browser_idle_seconds` is an optional, hot-reloadable memory saving, default 0 (off). With a value of 10..86400, the service stops the browser after that many seconds without any work (requests, probes, model listing), writing back the session's cookies first; the next request starts it again, which is a cold start. Set it in `config.json` and run `ais2api config reload`, or use `AIS2API_BROWSER_IDLE_SECONDS` or `--browser-idle-seconds N`. Each release is logged as `browser_idle_released`.
 
 `ignore_unsupported_parameters` is a hot-reloadable config boolean, default false. Set it to true and run `ais2api config reload`, or set `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`, to discard known unsupported optional generation controls. No dedicated CLI flag is required. Dropped fields are logged by name; see [compatibility behavior](protocol.md#optional-unsupported-parameter-dropping).
 

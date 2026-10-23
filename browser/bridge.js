@@ -222,6 +222,25 @@
     const pageReady = url.hostname === 'aistudio.google.com' && !login && document.readyState === 'complete';
     return { login, regionBlocked: url.pathname.includes('available-regions'), ready: pageReady && !!document.querySelector('textarea'), identityReady: pageReady && emails.size === 1, email: emails.size === 1 ? [...emails][0] : '', identityAmbiguous: emails.size > 1 };
   }
+  const controlLabel = el => (el.innerText || el.getAttribute('aria-label') || '').trim();
+  // Overlays such as welcome or announcement dialogs are only ever dismissed:
+  // never tick a checkbox or press a button that agrees, accepts or continues,
+  // since those can change account settings or terms.
+  const dismissLabels = /^(close|dismiss|got it|no,? thanks|not now|maybe later|skip|cancel)$/i;
+  function dismissDialogs() {
+    let dismissed = 0;
+    for (const dialog of document.querySelectorAll('mat-dialog-container, cdk-dialog-container, [role="dialog"], [role="alertdialog"]')) {
+      const button = [...dialog.querySelectorAll('button')].find(el => !el.disabled &&
+        el.getAttribute('aria-disabled') !== 'true' && dismissLabels.test(controlLabel(el)));
+      try {
+        if (button) button.click();
+        // CDK dialogs close on Escape unless the dialog forbids it.
+        else dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true }));
+        ++dismissed;
+      } catch (_) {}
+    }
+    return dismissed;
+  }
   let bootstrapInput = null;
   function finishBootstrap() {
     if (!bootstrapInput) return true;
@@ -236,9 +255,14 @@
   }
   function bootstrap() {
     install();
+    dismissDialogs();
     const input = document.querySelector('textarea');
     if (!input) return false;
     if (!bootstrapInput) bootstrapInput = { input, value: input.value };
+    // A repeated bootstrap replaces a template the host discarded as stale.
+    state.template = null;
+    state.snapshotCall = null;
+    state.templateTransport = null;
     // Temporary chat is optional; only activate an explicit inactive control.
     const temporary = [...document.querySelectorAll('button')].find(el => !el.disabled &&
       /^Temporary chat$/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()) &&
@@ -249,17 +273,39 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return true;
   }
+  // Returns true after clicking Run, 'shortcut' after sending the editor's
+  // submit shortcut (the host follows with a trusted key press if needed).
   function run() {
-    const button = [...document.querySelectorAll('button')].find(el => !el.disabled && /^(Run|Build)(\s|$)/.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
-    if (!button) return false;
-    button.click();
-    return true;
+    dismissDialogs();
+    const button = [...document.querySelectorAll('button')].find(el => !el.disabled && /^(Run|Build)(\s|$)/.test(controlLabel(el)));
+    if (button) { button.click(); return true; }
+    const input = document.querySelector('textarea');
+    if (!input || input.disabled) return false;
+    const mac = /Mac/i.test(globalThis.navigator?.platform || '');
+    input.focus?.();
+    for (const type of ['keydown', 'keyup'])
+      input.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, ctrlKey: !mac, metaKey: mac, bubbles: true, cancelable: true }));
+    return 'shortcut';
   }
+  // A busy page can drop or stall a snapshot call: retry it a bounded number
+  // of times. The host evaluation timeout covers every attempt.
+  const snapshotAttempts = 3, snapshotAttemptMs = 9000;
   async function snapshot(hash) {
     if (!state.snapshotCall || !state.template) fail('browser_incompatible: snapshot service or live template unavailable');
-    const value = await state.snapshotCall(hash);
-    if (typeof value !== 'string' || !value.length) fail('browser_incompatible: snapshot service returned no ticket');
-    return value;
+    const call = state.snapshotCall;
+    for (let attempt = 1; ; ++attempt) {
+      let timer;
+      try {
+        const value = await Promise.race([call(hash), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('snapshot attempt timed out')), snapshotAttemptMs);
+        })]);
+        if (typeof value === 'string' && value.length) return value;
+      } catch (_) {
+        // Retry below; the page's own failure details are not reported.
+      } finally { clearTimeout(timer); }
+      if (attempt === snapshotAttempts) fail('browser_incompatible: snapshot service returned no ticket');
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
   function authenticatedHeaders(captured, expectedAuthUser, authorization) {
     if (typeof expectedAuthUser !== 'string' || !/^\d+$/.test(expectedAuthUser))
@@ -399,14 +445,33 @@
       throw error;
     } finally { clearTimeout(timer); }
   }
+  // The host sends a request body in pieces as call arguments. Each piece is
+  // kept as a Blob, which Chromium stores outside the JavaScript heap, so the
+  // page never holds the whole body as a string.
+  let upload = null;
+  function append(id, chunk) {
+    if (typeof id !== 'string' || !id || typeof chunk !== 'string') fail('browser_incompatible: invalid upload chunk');
+    if (upload?.id !== id) upload = { id, parts: [] };
+    upload.parts.push(new Blob([chunk]));
+    return upload.parts.length;
+  }
+  function takeUpload(id) {
+    const current = upload;
+    upload = null;
+    if (!current || current.id !== id) fail('browser_incompatible: request body upload missing');
+    return new Blob(current.parts);
+  }
   function abort() {
+    upload = null;
     const t = state.transfer;
     if (!t) return;
     t.controller.abort();
     t.pending = null;
     if (t.credit) { t.credit(); t.credit = null; }
+    wake(t);
   }
   function start(args) {
+    let body = args.upload === undefined ? args.body : takeUpload(args.upload);
     abort();
     const chunkBytes = Number.isSafeInteger(args.chunkBytes) && args.chunkBytes > 0 ? Math.min(32768, args.chunkBytes) : 32768;
     const t = { controller: new AbortController(), pending: null, sequence: 0, credit: null, done: false, error: '', errorBody: '', status: 0, retryAfter: 0, benefitTier: 'unknown' };
@@ -418,7 +483,12 @@
         const headers = await benefitHeaders(state.template, authUser, args.authorization, t.controller.signal);
         if (t.controller.signal.aborted) fail('cancelled');
         t.benefitTier = Date.now() < benefit.expires ? benefit.tier : 'unknown';
-        const response = await nativeFetch(state.template.url, { method: 'POST', credentials: 'include', headers, body: args.body, signal: t.controller.signal });
+        // A string body gets this type by default; a typeless Blob gets none.
+        if (typeof body !== 'string' && !('content-type' in headers)) headers['content-type'] = 'text/plain;charset=UTF-8';
+        const sent = nativeFetch(state.template.url, { method: 'POST', credentials: 'include', headers, body, signal: t.controller.signal });
+        // The request owns the body now; do not keep it alive for the stream.
+        body = null;
+        const response = await sent;
         t.status = response.status;
         const retry = response.headers.get('retry-after');
         if (retry) {
@@ -452,17 +522,36 @@
           if (value && value.byteLength) {
             if (t.controller.signal.aborted) fail('cancelled');
             let binary = '';
-            for (const byte of value) binary += String.fromCharCode(byte);
+            for (let i = 0; i < value.byteLength; i += 8192)
+              binary += String.fromCharCode.apply(null, value.subarray(i, i + 8192));
             const sequence = ++t.sequence;
-            await new Promise(resolve => { t.credit = resolve; t.pending = { sequence, bytes: btoa(binary) }; });
+            await new Promise(resolve => { t.credit = resolve; t.pending = { sequence, bytes: btoa(binary) }; wake(t); });
             if (t.controller.signal.aborted) fail('cancelled');
           }
           if (done) break;
         }
       } catch (error) { t.error = error.name === 'AbortError' ? 'cancelled' : String(error.message || error); }
-      finally { if (reader) { try { await reader.cancel(); } catch (_) {} } t.done = true; }
+      finally { if (reader) { try { await reader.cancel(); } catch (_) {} } t.done = true; wake(t); }
     })();
     return true;
+  }
+  // The host waits in next() for the relay's next state instead of polling.
+  function wake(t) { const resolve = t.waiter; t.waiter = null; if (resolve) resolve(); }
+  const relayState = t => t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter, benefitTier: t.benefitTier } : null;
+  // Acknowledges `sequence` (0: nothing to acknowledge) and resolves with the
+  // relay state once a chunk is pending, the transfer is done, or `waitMs`
+  // (at most 1 s) elapsed.
+  async function next(sequence, waitMs) {
+    if (sequence) ack(sequence);
+    const t = state.transfer;
+    const limit = Number.isSafeInteger(waitMs) && waitMs > 0 ? Math.min(waitMs, 1000) : 0;
+    if (t && limit && !t.pending && !t.done)
+      await new Promise(resolve => {
+        const timer = setTimeout(() => { if (t.waiter === done) t.waiter = null; resolve(); }, limit);
+        const done = () => { clearTimeout(timer); resolve(); };
+        t.waiter = done;
+      });
+    return relayState(state.transfer);
   }
   function ack(sequence) {
     const t = state.transfer;
@@ -472,8 +561,8 @@
     return true;
   }
   globalThis.__ais2bridge = {
-    identity, bootstrap, finishBootstrap, run, snapshot, start, ack, abort, discoverModels,
-    poll: () => { const t = state.transfer; return t ? { pending: t.pending, done: t.done, error: t.error, errorBody: t.errorBody, status: t.status, retryAfter: t.retryAfter, benefitTier: t.benefitTier } : null; },
+    identity, bootstrap, finishBootstrap, run, snapshot, append, start, ack, next, abort, discoverModels,
+    poll: () => relayState(state.transfer),
     capability: () => ({ benefitTier: Date.now() < benefit.expires ? benefit.tier : 'unknown', template: state.template ? { body: state.template.body } : null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', snapshot: !!state.snapshotCall, discovery: !!state.discoveryRequest, templateTransport: state.templateTransport, snapshotCandidates: state.snapshotCandidates, snapshotHooked: state.snapshotHooked }),
     models: () => state.models,
     dispose: () => { abort(); benefit.controller?.abort(); clearInterval(installTimer); }

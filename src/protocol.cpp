@@ -1279,9 +1279,18 @@ bool has_content(const json::object &event) {
     return false;
 }
 
-void merge_event(json::object &aggregate, const json::object &event, std::size_t limit) {
-    // Construct transactionally: an oversized event cannot partially alter the result.
-    json::object next = aggregate;
+bool joins_text(const json::object &a, const json::object &b) {
+    return a.if_contains("text") && b.if_contains("text") && !a.if_contains("thoughtSignature") &&
+           !b.if_contains("thoughtSignature") && bool_or(a, "thought") == bool_or(b, "thought") &&
+           a.size() <= 2 && b.size() <= 2 && a.at("text").is_string() && b.at("text").is_string();
+}
+std::size_t merge_growth_bound(const json::object &event, std::size_t candidates, std::size_t parts) {
+    return json_size(event) + 1 + parts + 96 * candidates;
+}
+namespace {
+// Applies one event to `next` in place. Callers validate the event first, so
+// this cannot fail halfway (allocation failure aside).
+void apply_event(json::object &next, const json::object &event) {
     for (auto &kv : event)
         if (kv.key() != "candidates")
             next[kv.key()] = kv.value();
@@ -1320,17 +1329,11 @@ void merge_event(json::object &aggregate, const json::object &event, std::size_t
                     auto &parts = dc["parts"].as_array();
                     for (auto &part : ps->as_array()) {
                         bool joined = false;
-                        if (part.is_object() && !parts.empty() && parts.back().is_object()) {
+                        if (part.is_object() && !parts.empty() && parts.back().is_object() &&
+                            joins_text(parts.back().as_object(), part.as_object())) {
                             auto &a = parts.back().as_object();
-                            auto &b = part.as_object();
-                            if (a.if_contains("text") && b.if_contains("text") &&
-                                !a.if_contains("thoughtSignature") && !b.if_contains("thoughtSignature") &&
-                                bool_or(a, "thought") == bool_or(b, "thought") && a.size() <= 2 &&
-                                b.size() <= 2 && a.at("text").is_string() &&
-                                b.at("text").is_string()) {
-                                a["text"] = str(a.at("text")) + str(b.at("text"));
-                                joined = true;
-                            }
+                            a.at("text").as_string().append(part.as_object().at("text").as_string());
+                            joined = true;
                         }
                         if (!joined)
                             parts.push_back(part);
@@ -1339,10 +1342,41 @@ void merge_event(json::object &aggregate, const json::object &event, std::size_t
             }
         }
     }
-    if (json::serialize(next).size() > limit)
+}
+}
+void merge_event(json::object &aggregate, const json::object &event, std::size_t limit,
+                 std::size_t *size_bound) {
+    std::size_t candidates = 0, parts = 0;
+    if (auto incoming = event.if_contains("candidates"); incoming && incoming->is_array())
+        for (auto &cv : incoming->as_array()) {
+            auto &c = object(cv, "candidate");
+            ++candidates;
+            if (auto content = c.if_contains("content"); content && content->is_object())
+                if (auto ps = content->as_object().if_contains("parts"); ps && ps->is_array())
+                    parts += ps->as_array().size();
+        }
+    // Merging adds at most the event's own serialized members, one separator
+    // per appended element, and a small skeleton (index, role, parts) per
+    // candidate. While that upper bound fits, merge in place without
+    // re-serializing the whole aggregate.
+    if (size_bound) {
+        const auto growth = merge_growth_bound(event, candidates, parts);
+        if (*size_bound <= limit && growth <= limit - *size_bound) {
+            apply_event(aggregate, event);
+            *size_bound += growth;
+            return;
+        }
+    }
+    // Near the limit: construct transactionally so an oversized event cannot
+    // partially alter the result, and measure exactly.
+    json::object next = aggregate;
+    apply_event(next, event);
+    const auto size = json_size(next);
+    if (size > limit)
         throw Error(413, "response_too_large",
                     "Generated response exceeds configured object limit");
     aggregate = std::move(next);
+    if (size_bound) *size_bound = size;
 }
 
 namespace {

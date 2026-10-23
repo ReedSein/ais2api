@@ -13,7 +13,7 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
@@ -42,7 +42,8 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     fields: [
       { key: 'bind', label: '监听地址', desc: '默认 127.0.0.1；改为 0.0.0.0 会对局域网开放。', type: 'text', restart: true },
       { key: 'port', label: '端口', desc: '默认 18451。', type: 'number', restart: true, min: 1, max: 65535 },
-      { key: 'proxy', label: '上游代理', desc: '浏览器访问 Google 以及服务端下载请求中的远程图片时使用的代理，例如 http://127.0.0.1:7890。凭据显示为 ***，修改时需完整重填。', type: 'text', restart: true, placeholder: '不使用代理' },
+      { key: 'proxy', label: '上游代理', desc: '浏览器访问 Google 以及服务端下载请求中的远程图片时使用的代理，例如 http://127.0.0.1:7890。凭据显示为 ***，修改时需完整重填。浏览器不能直接使用带用户名密码的代理，需要开启下面的「本机转发代理」。', type: 'text', restart: true, placeholder: '不使用代理' },
+      { key: 'browser_proxy_relay', label: '本机转发代理', desc: '默认关闭。开启后浏览器改为连接 ais2api 在本机开的转发代理，由它向上游代理认证，支持 http:// 和 socks5:// 代理，带不带用户名密码都可以；凭据只留在 ais2api 进程里。转发只允许访问 443 端口。', type: 'bool', restart: true },
     ],
   },
   {
@@ -52,6 +53,7 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
       { key: 'headless', label: '无头模式', desc: '关闭后会显示浏览器窗口，便于排查登录问题。', type: 'bool', restart: true },
       { key: 'browser_executable', label: '浏览器路径', desc: '留空则自动使用程序旁的 browser-runtime。', type: 'text', restart: true, placeholder: '自动检测' },
       { key: 'data_dir', label: '数据目录', desc: '数据库、日志、浏览器资料所在目录。相对路径以配置文件所在目录为基准。', type: 'text', restart: true },
+      { key: 'browser_idle_seconds', label: '空闲时回收浏览器', desc: '激进的内存优化，0 表示关闭（默认）。连续这么多秒没有任何请求时关闭浏览器以释放内存，关闭前会写回 Cookie；之后的第一个请求需要重新启动浏览器、打开页面并引导，会明显变慢。可设为 10–86400 秒，建议不低于 600。保存后立即生效。', type: 'number', min: 0, max: 86400, unit: 's' },
     ],
   },
   {
@@ -154,6 +156,7 @@ function fieldError(field: FieldDef): string {
   if (value === '' || typeof value !== 'number' || !Number.isInteger(value)) return '请输入整数'
   if (field.min !== undefined && value < field.min) return `不能小于 ${field.min}`
   if (field.max !== undefined && value > field.max) return `不能大于 ${field.max}`
+  if (field.key === 'browser_idle_seconds' && value > 0 && value < 10) return '0 表示关闭，开启时不能小于 10'
   return ''
 }
 

@@ -29,16 +29,10 @@ class EventPipe {
         wakeup_ = {};
     }
     void push(json::object value, Clock::time_point deadline) {
-        json::serializer serializer;
-        serializer.reset(&value);
-        std::array<char, 16384> bytes{};
-        std::size_t size = 0;
-        while (!serializer.done()) {
-            auto part = serializer.read(bytes.data(), bytes.size());
-            if (part.size() > object_limit_ - size)
-                throw Error(413, "object_limit", "Decoded response exceeds object limit");
-            size += part.size();
-        }
+        // The consumer serializes the object; only its exact length is needed here.
+        const auto size = json_size(value);
+        if (size > object_limit_)
+            throw Error(413, "object_limit", "Decoded response exceeds object limit");
         std::unique_lock lock(mutex_);
         auto wait = [&](auto condition) {
             while (!condition()) {

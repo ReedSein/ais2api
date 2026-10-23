@@ -15,6 +15,7 @@ namespace ais2api {
 enum class FailureAction {
     fail,            // Return the error; account state is unchanged.
     retry_same,      // Retry the same account and browser session.
+    refresh_template, // Discard the captured request template, then retry the same session.
     rebuild_session, // Recreate the account's page and BotGuard session, then retry it.
     restart_browser, // Restart the browser process, then retry the same account.
     cool_and_switch, // Record `cooldown` for the account and try another one.
@@ -38,11 +39,13 @@ inline FailureDecision classify_failure(const Error& error, unsigned attempt, bo
     if (error.status == 400 || error.status == 413 || code == "unsupported_adapter" ||
         code == "consumer_timeout" || code == "invalid_auth_user" || code == "invalid_config" ||
         code == "browser_not_configured" || code == "region_blocked" ||
+        code == "proxy_failed" || code == "proxy_auth_unsupported" ||
         code == "generation_timeout" || code == "stream_idle_timeout")
         return {fail};
-    // Recognized upstream routing glitches and one empty reply are retried as-is.
+    // Recognized upstream routing glitches are retried as-is. A first empty
+    // reply may come from a stale request template: capture a new one.
     if (code == "transient_rpc_route") return {retry_same};
-    if (code == "upstream_no_content") return {attempt == 0 ? retry_same : fail};
+    if (code == "upstream_no_content") return {attempt == 0 ? refresh_template : fail};
     if (error.status == 429) {
         return {cool_and_switch, error.quota_scope == "minute" ? "rate_limit_minute"
                                  : error.quota_scope == "day"  ? "rate_limit_day"

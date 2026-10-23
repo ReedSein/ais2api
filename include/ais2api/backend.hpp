@@ -23,5 +23,11 @@ class GenerationBackend {
     // Discard the resident account's page and BotGuard session so the next
     // request rebuilds it in place, keeping the browser process when possible.
     virtual void reset_session() { close(); }
+    // Discard the captured GenerateContent template so the next request
+    // captures a new one on the resident page.
+    virtual void clear_template() { reset_session(); }
+    // Stops an idle browser to free its memory; the next request starts it
+    // again. Returns whether a running browser was stopped.
+    virtual bool release_idle() { return false; }
 };
 } // namespace ais2api

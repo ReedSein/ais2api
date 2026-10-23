@@ -6,6 +6,7 @@
 
 #include "ais2api/protocol.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <limits>
 
 using namespace ais2api;
 namespace {
@@ -895,4 +896,17 @@ TEST_CASE("Signed idless function output roundtrips standard and native messages
                       .at("functionCall")
                       .as_object()
                       .if_contains("id"));
+}
+TEST_CASE("json_size matches serialized length without serializing", "[protocol][stream-performance]") {
+    std::string every_byte;
+    for (int c = 0; c < 256; ++c) every_byte += static_cast<char>(c);
+    json::array values{nullptr, true, false, 0, -1, std::numeric_limits<std::int64_t>::min(),
+                       std::numeric_limits<std::uint64_t>::max(), 1.5, -0.0, 1e300, 3.0,
+                       "", "plain", "\xe4\xbd\xa0\xe5\xa5\xbd", json::string_view(every_byte.data(), every_byte.size()),
+                       json::array{}, json::object{}, json::array{1, json::array{json::object{}}, "x"}};
+    json::object nested{{"", 1}, {"k\"\\n", values}, {"inner", {{"a", json::array{}}, {"b", nullptr}}}};
+    values.push_back(nested);
+    for (const auto& value : values) CHECK(json_size(value) == json::serialize(value).size());
+    CHECK(json_size(values) == json::serialize(values).size());
+    CHECK(json_size(nested) == json::serialize(nested).size());
 }
