@@ -234,7 +234,7 @@ exist on the repository's default branch before manual dispatch is available.
 
 The job runs CTest, bridge tests and isolated CLI/portable smoke checks without
 Google access. It uploads a `termux-aarch64-COMMIT` artifact containing a
-`.tar.gz` backend runtime and its `.sha256` sidecar, retained for seven days.
+`.tar.gz` backend runtime and its `.sha256` sidecar, retained for 28 days.
 Extract into a new directory in Termux private storage; Android shared storage
 is not an executable installation directory. Verify before using it:
 
@@ -298,7 +298,7 @@ results. This work adds no claim that these device or account checks have run.
 ASan/UBSan both enabled and disabled, a short Clang fuzz smoke, a Windows MSVC
 build, a Debian 13 container/GCC build, and Node bridge syntax/behavior checks. Desktop jobs run the isolated
 CLI/IPC/HTTP smoke harness without Google credentials and archive the installed
-runtime. The workflow has no path filter that could skip script-only changes.
+runtime as an artifact retained for 28 days. The workflow has no path filter that could skip script-only changes.
 
 Workflow definitions are not successful remote runs. Real Google login, private
 RPC compatibility, browser downloads and Android process lifecycle remain
