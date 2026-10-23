@@ -18,8 +18,8 @@ jobs:
   bridge:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
       - name: Check scripts and browser bridge
@@ -45,8 +45,8 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.12'
       - name: Install development tools
@@ -54,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
           key: ubuntu24-vcpkg-${{ matrix.compiler }}-${{ hashFiles('vcpkg.json') }}
@@ -79,7 +79,7 @@ jobs:
       - name: Verify runtime archive contents and checksum
         if: matrix.sanitize == 'OFF'
         run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.sanitize == 'OFF'
         with:
           name: ubuntu24-${{ matrix.compiler }}-runtime
@@ -100,13 +100,13 @@ jobs:
         run: |
           apt-get update
           apt-get install -y build-essential cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3 ca-certificates
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.12'
       - name: Prepare dependency cache
         run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
           key: debian13-gcc-vcpkg-${{ hashFiles('vcpkg.json') }}
@@ -118,7 +118,7 @@ jobs:
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
       - name: Verify runtime archive contents and checksum
         run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: debian13-gcc-runtime
           path: build/linux/packages/*.tar.gz*
@@ -132,14 +132,14 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}\build\deps\vcpkg
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.12'
       - name: Prepare dependency cache
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
           key: windows-msvc-static-${{ hashFiles('vcpkg.json') }}
@@ -166,7 +166,7 @@ jobs:
             python scripts/check-package.py $_.FullName
             if ($LASTEXITCODE -ne 0) { throw 'Runtime archive validation failed' }
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msvc-x64-runtime
           path: build/windows/packages/*.zip*
