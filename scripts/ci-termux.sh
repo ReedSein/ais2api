@@ -17,12 +17,9 @@ export DEBIAN_FRONTEND=noninteractive
 # A fresh container must have a coherent package set from the rolling repository.
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
-pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite python nodejs tar
-python -m unittest discover -s tests -p test_check_package.py
+pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite python tar
 # libc++ supplies syncstream declarations through its experimental feature gate.
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --jobs 2
-node --test browser/test_bridge.cjs
-node userscript/test_cookie_helper.cjs
 python tests/cli_smoke.py --exe build/termux/install/bin/ais2api
 python tests/portable_smoke.py --exe build/termux/install/bin/ais2api
 

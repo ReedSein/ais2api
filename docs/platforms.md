@@ -232,8 +232,9 @@ run it manually for an intended branch. GitHub requires the workflow file to
 exist on the repository's default branch before manual dispatch is available.
 [Manual workflow dispatch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 
-The job runs CTest, bridge tests and isolated CLI/portable smoke checks without
-Google access. It uploads a `termux-aarch64-COMMIT` artifact containing a
+The job runs CTest and isolated CLI/portable smoke checks without Google access;
+browser bridge and userscript checks run in the desktop workflow's bridge job.
+It uploads a `termux-aarch64-COMMIT` artifact containing a
 `.tar.gz` backend runtime and its `.sha256` sidecar, retained for 28 days.
 Extract into a new directory in Termux private storage; Android shared storage
 is not an executable installation directory. Verify before using it:
