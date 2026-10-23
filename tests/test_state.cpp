@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <sqlite3.h>
+#include <set>
 #include <thread>
 using namespace ais2api;
 namespace {
@@ -420,4 +421,135 @@ TEST_CASE("BOM JSON credentials and Netscape row delimiters remain intact",
     REQUIRE(saved.size() == 2);
     CHECK(saved[0].as_object().at("value") == "first-value");
     CHECK(saved[1].as_object().at("value") == "");
+}
+TEST_CASE("browser cookie write-back only replaces the cookies it was built from", "[cookie-refresh]") {
+    Directory dir;
+    Store store(dir.path);
+    Account account;
+    account.id = "acc_refresh";
+    account.name = "Refresh";
+    account.email = "refresh@example.com";
+    account.auth_user = "0";
+    account.storage_state = credential("original");
+    store.put_account(account);
+    store.failure(account.id, "gemini-test", "rate_limit_day");
+    const auto built_from = store.account(account.id).storage_state;
+    const auto rotated = credential("rotated").at("cookies").as_array();
+
+    auto saved = store.refresh_cookies(account.id, built_from, rotated);
+    REQUIRE(saved);
+    auto stored = store.account(account.id);
+    CHECK(stored.storage_state == *saved);
+    CHECK(string_or(stored.storage_state.at("cookies").as_array()[0].as_object(), "value") == "rotated");
+    CHECK(stored.email == account.email);
+    // Cooldowns, quota state and expiry are not credential replacement.
+    CHECK_FALSE(store.choose("gemini-test"));
+    auto status = store.account_status();
+    CHECK_FALSE(status[0].as_object().at("expired").as_bool());
+
+    // Unchanged cookies and a stale session baseline are both refused.
+    CHECK_FALSE(store.refresh_cookies(account.id, *saved, rotated));
+    CHECK_FALSE(store.refresh_cookies(account.id, built_from, credential("late").at("cookies").as_array()));
+    CHECK(string_or(store.account(account.id).storage_state.at("cookies").as_array()[0].as_object(), "value") == "rotated");
+    CHECK_FALSE(store.refresh_cookies("acc_missing", built_from, rotated));
+}
+TEST_CASE("authentication cooldowns are account-wide and temporary", "[cookie-refresh][recovery]") {
+    Directory dir;
+    Store store(dir.path);
+    Account account;
+    account.id = "acc_auth";
+    account.name = "Auth";
+    account.email = "auth@example.com";
+    account.auth_user = "0";
+    account.storage_state = credential();
+    store.put_account(account);
+    store.failure(account.id, "gemini-test", "auth");
+    CHECK_FALSE(store.choose("gemini-test"));
+    CHECK_FALSE(store.choose("other-model"));
+    const auto status = store.account_status()[0].as_object();
+    CHECK_FALSE(status.at("expired").as_bool());
+    const auto& failure = status.at("failures").as_array()[0].as_object();
+    CHECK(string_or(failure, "model") == "*");
+    const auto until = failure.at("until").to_number<std::int64_t>();
+    CHECK(until > unix_seconds() + 240);
+    CHECK(until <= unix_seconds() + 300);
+}
+TEST_CASE("accounts receive a permanent browser fingerprint when first stored", "[fingerprint]") {
+    Directory dir;
+    Store store(dir.path);
+    const auto imported = store.import_accounts(credential("first-import"));
+    const auto id = string_or(imported[0].as_object(), "id");
+    const auto first = store.fingerprint(id);
+    // Cookie import verifies with the seed the store later assigns to the id.
+    CHECK(first.seed == default_fingerprint_seed(id));
+    CHECK(default_fingerprint_seed("acc_candidate") == default_fingerprint_seed("acc_candidate"));
+    CHECK(first.seed >= 10000);
+    CHECK(first.seed <= 99999);
+    CHECK(first.timezone.empty());
+    CHECK(first.locale.empty());
+    // Credential updates, verified re-imports and metadata edits keep it.
+    auto account = store.account(id);
+    account.email = "permanent@example.com";
+    store.put_account(account);
+    Account reimport = account;
+    reimport.id = "acc_candidate";
+    reimport.storage_state = credential("second-import");
+    store.merge_verified_accounts({reimport});
+    store.update_account_metadata(id, {{"name", "Renamed"}});
+    CHECK(store.fingerprint(id).seed == first.seed);
+    const auto listed = store.account_status()[0].as_object().at("fingerprint").as_object();
+    CHECK(listed.at("seed").to_number<unsigned>() == first.seed);
+    CHECK(string_or(listed, "timezone").empty());
+    // Distinct accounts get independent seeds (collisions are possible but rare).
+    std::set<unsigned> seeds{first.seed};
+    for (int i = 0; i < 8; ++i)
+        seeds.insert(store.fingerprint(string_or(store.import_accounts(credential("other-" + std::to_string(i)))[0].as_object(), "id")).seed);
+    CHECK(seeds.size() > 1);
+}
+TEST_CASE("fingerprints regenerate and accept validated region overrides", "[fingerprint]") {
+    Directory dir;
+    Store store(dir.path);
+    const auto id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+    const auto original = store.fingerprint(id);
+    const auto regenerated = store.regenerate_fingerprint(id);
+    CHECK(regenerated.seed != original.seed);
+    CHECK(store.fingerprint(id).seed == regenerated.seed);
+
+    auto custom = store.set_fingerprint_region(id, std::string("Asia/Tokyo"), std::string("ja-JP"));
+    CHECK(custom.timezone == "Asia/Tokyo");
+    CHECK(custom.locale == "ja-JP");
+    CHECK(custom.seed == regenerated.seed);
+    // nullopt keeps a field; "" returns it to the host default.
+    auto partial = store.set_fingerprint_region(id, std::nullopt, std::string());
+    CHECK(partial.timezone == "Asia/Tokyo");
+    CHECK(partial.locale.empty());
+    CHECK_THROWS_AS(store.set_fingerprint_region(id, std::string("Asia/Tokyo --flag"), std::nullopt), Error);
+    CHECK_THROWS_AS(store.set_fingerprint_region(id, std::nullopt, std::string("en_US")), Error);
+    CHECK(store.fingerprint(id).timezone == "Asia/Tokyo");
+    CHECK_THROWS_AS(store.fingerprint("acc_missing"), Error);
+    CHECK_THROWS_AS(store.regenerate_fingerprint("acc_missing"), Error);
+}
+TEST_CASE("fingerprints follow account lifetime and back-fill older stores", "[fingerprint]") {
+    Directory dir;
+    std::string id;
+    {
+        Store store(dir.path);
+        id = string_or(store.import_accounts(credential())[0].as_object(), "id");
+        const auto removed = string_or(store.import_accounts(credential("removed"))[0].as_object(), "id");
+        store.remove_account(removed);
+        CHECK_THROWS_AS(store.fingerprint(removed), Error);
+    }
+    {
+        // Simulate a store written before fingerprints existed.
+        sqlite3* database = nullptr;
+        REQUIRE(sqlite3_open((dir.path / "state.sqlite3").string().c_str(), &database) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(database, "DROP TABLE fingerprints", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(database);
+    }
+    Store reopened(dir.path);
+    const auto status = reopened.account_status()[0].as_object();
+    REQUIRE(status.contains("fingerprint"));
+    const auto seed = status.at("fingerprint").as_object().at("seed").to_number<unsigned>();
+    CHECK(seed >= 10000);
+    CHECK(reopened.fingerprint(id).seed == seed);
 }

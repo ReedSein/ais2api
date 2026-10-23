@@ -6,6 +6,7 @@
 
 #include "ais2api/browser.hpp"
 #include "ais2api/flow.hpp"
+#include "ais2api/retry_policy.hpp"
 #include "ais2api/management.hpp"
 #include "ais2api/cookie_import.hpp"
 #include "ais2api/logs.hpp"
@@ -219,6 +220,30 @@ class Service {
             log({{"event", "config_saved"}, {"restart_required", restart}});
             return {{"saved", true}, {"applied", !restart}, {"restart_required", restart}};
         }
+        if (action == "admin.password") {
+            // Applies immediately even while restart-only changes are pending:
+            // the new password goes into both the running configuration and the
+            // saved file, without applying anything else that awaits a restart.
+            std::lock_guard update_lock(config_update_mutex_);
+            const auto password = string_or(command, "password");
+            auto running = config();
+            validate_admin_password(password, running.admin_key);
+            running.admin_key = password;
+            if (pending_config_) {
+                auto pending = *pending_config_;
+                pending.admin_key = password;
+                pending.save();
+                pending_config_ = std::move(pending);
+            } else {
+                running.save();
+            }
+            {
+                std::lock_guard lock(config_mutex_);
+                config_.admin_key = password;
+            }
+            log({{"event", "admin_password_changed"}});
+            return {{"changed", true}};
+        }
         if (action == "config.validate_patch") {
             std::lock_guard update_lock(config_update_mutex_);
             auto current = config();
@@ -420,8 +445,12 @@ class Service {
                                  value["account_id"] = a.id;
                                  results.push_back(std::move(value));
                              } catch (const Error &e) {
-                                 if (e.status == 401)
+                                 // Only a sign-in redirect or missing credentials
+                                 // prove expiry; other auth failures cool down.
+                                 if (e.code == "session_expired" || e.code == "missing_cookies")
                                      store_.failure(a.id, "probe", "login_expired");
+                                 else if (e.status == 401)
+                                     store_.failure(a.id, "probe", "auth");
                                  if (!id.empty() || e.code == "cancelled")
                                      throw;
                                  results.push_back(
@@ -567,6 +596,8 @@ class Service {
             std::optional<Error> previous;
             std::optional<Account> retry_account;
             bool delivered = false;
+            // One in-place session rebuild or browser restart per request.
+            bool recovered = false;
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
                 trace.attempts = attempt + 1;
                 check_cancel(token);
@@ -618,39 +649,54 @@ class Service {
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
-                    if (token.stop_requested())
+                    if (token.stop_requested() || delivered)
                         throw;
-                    // Upstream route glitches and one empty 204 are retries of
-                    // this request, not evidence that an account is unhealthy.
-                    const bool same_account = e.code == "transient_rpc_route" ||
-                                              (e.code == "upstream_no_content" && attempt == 0);
-                    if (same_account) {
-                        if (delivered || attempt + 1 == cfg.limits.max_attempts) throw;
+                    const bool last = attempt + 1 == cfg.limits.max_attempts;
+                    auto decision = classify_failure(e, attempt, recovered);
+                    // Without an attempt left a recovery cannot run; judge the
+                    // failure as if the recovery had already failed.
+                    if (last && (decision.action == FailureAction::rebuild_session ||
+                                 decision.action == FailureAction::restart_browser))
+                        decision = classify_failure(e, attempt, true);
+                    switch (decision.action) {
+                    case FailureAction::fail:
+                        throw;
+                    case FailureAction::retry_same: {
+                        if (last) throw;
+                        // generate() re-encodes the body and obtains a new snapshot.
                         retry_account = account;
-                        // generate() re-encodes the body and obtains a new
-                        // snapshot; a route glitch does not invalidate login.
+                        if (decision.delay.count()) {
+                            std::mutex wait_mutex;
+                            std::condition_variable_any wake;
+                            std::unique_lock wait_lock(wait_mutex);
+                            wake.wait_for(wait_lock, token, decision.delay, [] { return false; });
+                            check_cancel(token);
+                        }
                         continue;
                     }
-                    if (e.status == 404 || e.status == 204 || e.code == "upstream_no_content" ||
-                        e.code == "benefit_tier_unconfirmed") throw;
-                    auto kind = e.status == 429   ? (e.quota_scope == "minute" ? "rate_limit_minute" :
-                                                    e.quota_scope == "day" ? "rate_limit_day" : "rate_limit_model")
-                                : e.status == 403 ? "permission_temporary"
-                                : (e.status == 401 || e.code == "login_expired" ||
-                                   e.code == "session_expired")
-                                    ? "login_expired"
-                                    : "transient";
-                    if (e.status == 400 || e.status == 413 || e.code == "browser_incompatible" ||
-                        e.code == "unsupported_adapter" || e.code == "consumer_timeout")
-                        throw;
-                    store_.failure(account->id, request.model, kind, e.retry_after);
-                    log({{"event", "account_failure"}, {"request_id", work->id},
-                        {"account_id", account->id}, {"kind", kind}, {"code", e.code}});
-                    previous = e;
-                    excluded.push_back(account->id);
-                    if (delivered || attempt + 1 == cfg.limits.max_attempts)
-                        throw;
-                    gateway_->close();
+                    case FailureAction::rebuild_session:
+                    case FailureAction::restart_browser: {
+                        recovered = true;
+                        const bool rebuild = decision.action == FailureAction::rebuild_session;
+                        log({{"event", "session_recovery"}, {"request_id", work->id},
+                             {"account_id", account->id}, {"code", e.code},
+                             {"action", rebuild ? "rebuild_session" : "restart_browser"}});
+                        if (rebuild) gateway_->reset_session();
+                        else gateway_->close();
+                        retry_account = account;
+                        continue;
+                    }
+                    case FailureAction::cool_and_switch:
+                        store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
+                        log({{"event", "account_failure"}, {"request_id", work->id},
+                             {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});
+                        previous = e;
+                        excluded.push_back(account->id);
+                        if (last) throw;
+                        // The next account's session replaces this context; the
+                        // browser process itself stays up.
+                        continue;
+                    }
                 }
             }
             throw Error(502, "generation_failed", "Generation failed");
@@ -906,6 +952,18 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
     if (!cfg.authenticate_admin(token)) throw Error(401, "admin_authentication", "A valid management Bearer key is required");
     auto method = request.method();
     const bool get = method == http::verb::get, post = method == http::verb::post;
+    if (cfg.admin_key_is_default()) {
+        // The default password is public knowledge: accept it only from this
+        // machine or a private network, and only to replace it.
+        boost::system::error_code peer_error;
+        const auto peer = stream.socket().remote_endpoint(peer_error);
+        if (peer_error || !local_network_address(peer.address().to_string()))
+            throw Error(403, "admin_default_password_remote",
+                        "The default management password only works from this machine or a local network");
+        if (!(get && path == "/auth/check") && !(post && path == "/auth/password"))
+            throw Error(403, "admin_password_change_required",
+                        "Change the default management password before using the management API");
+    }
     auto query = query_parameters(std::string_view(request.target()));
     auto parameter = [&](const char* key, std::string fallback = {}) {
         auto it = query.find(key); return it == query.end() ? fallback : it->second;
@@ -965,7 +1023,14 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         co_await net::async_write(stream, http::make_chunk_last(), net::use_awaitable);
         co_return;
     }
-    if (get && path == "/auth/check") result = {{"authenticated", true}, {"api_version", "v1"}};
+    if (get && path == "/auth/check") result = {{"authenticated", true}, {"api_version", "v1"},
+        {"password_change_required", cfg.admin_key_is_default()}};
+    else if (post && path == "/auth/password") {
+        const auto body = admin_body(request);
+        if (body.size() != 1 || !body.contains("password") || !body.at("password").is_string())
+            throw Error(400, "invalid_password", "Expected only a string password");
+        command = {{"command", "admin.password"}, {"password", body.at("password")}};
+    }
     else if (get && path == "/version") result = {{"version", "0.1.0"}, {"management_api", "v1"}};
     else if (get && path == "/capabilities") result = {
         {"api_version", "v1"}, {"accounts", true}, {"rotation", true}, {"stats", true},
@@ -1045,6 +1110,11 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             command = admin_body(request); command["id"] = id; command["command"] = "accounts.update";
         }
         else if (post && action == "activate") command["command"] = "accounts.select";
+        else if (get && action == "fingerprint") command["command"] = "accounts.fingerprint";
+        else if (method == http::verb::patch && action == "fingerprint") {
+            command = admin_body(request); command["id"] = id; command["command"] = "accounts.fingerprint.update";
+        }
+        else if (post && action == "fingerprint/regenerate") command["command"] = "accounts.fingerprint.regenerate";
         else if (post && action == "reset") command["command"] = "accounts.reset";
         else if (post && (action == "probe" || action == "detect-email")) command["command"] = "accounts.probe";
         else throw Error(404, "route_not_found", "Unknown management route or method");
@@ -1146,6 +1216,9 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         if (!principal)
             throw Error(401, admin ? "admin_authentication" : "cookie_import_authentication",
                 admin ? "A valid management key is required" : "A valid Cookie import key is required");
+        if (admin && import_cfg.admin_key_is_default())
+            throw Error(403, "admin_password_change_required",
+                        "Change the default management password before using the management API");
         const auto origin = request[http::field::origin];
         if (!admin && !origin.empty() && origin != "https://aistudio.google.com")
             throw Error(403, "cookie_import_origin", "Cookie import requires the AI Studio userscript");

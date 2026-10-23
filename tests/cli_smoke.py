@@ -142,6 +142,12 @@ class Smoke:
         first = self.cli("init")
         self.check("init_has_no_key", "api_key" not in first and first.get("api_key_configured") is False)
         self.check("init_has_configuration_guidance", isinstance(first.get("next_step"), str) and bool(first["next_step"]))
+        # New configurations start with the public default management password,
+        # which the service forces to be replaced on first sign-in.
+        self.check("init_reports_default_admin_password", first.get("admin_password_default") is True
+                   and isinstance(first.get("management_next_step"), str))
+        self.check("init_writes_default_admin_password",
+                   json.loads(self.config.read_text(encoding="utf-8")).get("admin_key") == "admin")
         database_uri = (self.data / "state.sqlite3").resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(database_uri, uri=True)) as database:
             stored_keys = database.execute("SELECT COUNT(*) FROM keys").fetchone()[0]

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/store.hpp"
+#include "ais2api/region.hpp"
 #include "../browser/rate_policy.hpp"
 #include <algorithm>
 #include <condition_variable>
@@ -141,7 +142,21 @@ std::string import_text(std::string text) {
         text.erase(last + 1);
     return text;
 }
-json::object state(json::value v) {
+void cookie_count(std::size_t count, std::size_t limit) {
+    if (count > limit)
+        throw Error(413, "cookie_import_limit", "Cookie import exceeds the credential count limit");
+}
+void cookie_count(const json::value &v, std::size_t limit) {
+    const json::value *cookies = &v;
+    if (v.is_object()) cookies = v.as_object().if_contains("cookies");
+    if (cookies && cookies->is_array()) cookie_count(cookies->as_array().size(), limit);
+    if (cookies && cookies->is_object()) cookie_count(cookies->as_object().size(), limit);
+}
+json::object state(const json::value &input, bool *raw_header = nullptr,
+                   std::size_t max_cookies = std::numeric_limits<std::size_t>::max()) {
+    cookie_count(input, max_cookies);
+    auto v = input;
+    if (raw_header) *raw_header = false;
     if (v.is_string()) {
         auto raw = import_text(std::string(v.as_string()));
         try {
@@ -190,10 +205,12 @@ json::object state(json::value v) {
                             throw Error(400, "invalid_credentials", "Invalid cookie expiry");
                         }
                     }
+                    cookie_count(cs.size() + 1, max_cookies);
                     cs.push_back(cookie);
                 }
-                return state(json::object{{"cookies", cs}});
+                return state(json::object{{"cookies", cs}}, nullptr, max_cookies);
             }
+            if (raw_header) *raw_header = true;
             if (raw.starts_with("Cookie:") || raw.starts_with("cookie:"))
                 raw.erase(0, 7);
             if (raw.find_first_of("\r\n") != std::string::npos)
@@ -208,13 +225,15 @@ json::object state(json::value v) {
                     auto k = part.substr(0, eq);
                     k.erase(0, k.find_first_not_of(" \t"));
                     k.erase(k.find_last_not_of(" \t") + 1);
-                    if (!k.empty())
+                    if (!k.empty()) {
+                        cookie_count(cs.size() + 1, max_cookies);
                         cs.push_back(json::object{{"name", k},
                                                   {"value", part.substr(eq + 1)},
                                                   {"domain", ".google.com"},
                                                   {"path", "/"},
                                                   {"secure", true},
                                                   {"httpOnly", true}});
+                    }
                 }
                 if (end == std::string::npos)
                     break;
@@ -223,6 +242,7 @@ json::object state(json::value v) {
             v = json::object{{"cookies", cs}};
         }
     }
+    cookie_count(v, max_cookies);
     if (v.is_array())
         v = json::object{{"cookies", v}};
     if (!v.is_object())
@@ -231,8 +251,17 @@ json::object state(json::value v) {
     auto cookies = o.if_contains("cookies");
     if (!cookies)
         throw Error(400, "invalid_credentials", "Missing cookies");
-    if (cookies->is_string())
-        return state(*cookies);
+    if (cookies->is_string()) {
+        auto nested = state(*cookies, raw_header, max_cookies);
+        o["cookies"] = nested.at("cookies");
+        if (auto origins = nested.if_contains("origins")) {
+            auto outer = o.if_contains("origins");
+            if (!outer) o["origins"] = *origins;
+            else if (outer->is_array())
+                for (const auto &origin : origins->as_array()) outer->as_array().push_back(origin);
+        }
+        cookies = o.if_contains("cookies");
+    }
     if (cookies->is_object()) {
         json::array mapped;
         for (auto &p : cookies->as_object()) {
@@ -342,6 +371,12 @@ struct Store::Impl {
                 { Statement columns(db, "PRAGMA table_info(quota_counters)");
                   while (columns.row()) if (columns.str(1) == "cooldown_until") quota_deadline = true; }
                 if (!quota_deadline) exec(db, "ALTER TABLE quota_counters ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0");
+                // Every account owns a permanent browser fingerprint; accounts
+                // from older stores receive one the first time the store opens.
+                exec(db, "CREATE TABLE IF NOT EXISTS fingerprints(account TEXT PRIMARY KEY REFERENCES "
+                         "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
+                         "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
+                         "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
                 ready.set_value();
             } catch (...) {
                 ready.set_exception(std::current_exception());
@@ -406,6 +441,11 @@ struct Store::Impl {
         s.text(5, json::serialize(a.storage_state));
         s.integer(6, a.disabled);
         s.row();
+        // New accounts get their permanent fingerprint; updates keep it.
+        Statement fingerprint(db, "INSERT OR IGNORE INTO fingerprints(account,seed) VALUES(?,?)");
+        fingerprint.text(1, a.id);
+        fingerprint.integer(2, default_fingerprint_seed(a.id));
+        fingerprint.row();
     }
 };
 Store::Store(const fs::path &d) : impl_(std::make_unique<Impl>(d)) {}
@@ -430,7 +470,9 @@ Account Store::account(std::string_view id) {
         return decode(s);
     });
 }
-json::object Store::normalize_storage_state(const json::value &input) { return state(input); }
+json::object Store::normalize_storage_state(const json::value &input, bool *raw_header, std::size_t max_cookies) {
+    return state(input, raw_header, max_cookies);
+}
 json::array Store::merge_verified_accounts(const std::vector<Account> &input) {
     auto parsed = input;
     for (auto &a : parsed) {
@@ -486,6 +528,34 @@ void Store::put_account(const Account &a) {
         throw Error(400, "invalid_account", "Account ID required");
     copy.storage_state = state(copy.storage_state);
     impl_->run([&] { impl_->put(copy); });
+}
+std::optional<json::object> Store::refresh_cookies(std::string_view id, const json::object &expected,
+                                                   const json::array &cookies) {
+    auto next = expected;
+    next["cookies"] = cookies;
+    next = state(next);
+    return impl_->run([&]() -> std::optional<json::object> {
+        exec(impl_->db, "BEGIN IMMEDIATE");
+        try {
+            Statement current(impl_->db, "SELECT state FROM accounts WHERE id=?");
+            current.text(1, id);
+            // A concurrent import or deletion wins over a browser write-back.
+            if (!current.row() || json::parse(current.str(0)) != json::value(expected) ||
+                json::value(next) == json::value(expected)) {
+                exec(impl_->db, "ROLLBACK");
+                return std::nullopt;
+            }
+            Statement update(impl_->db, "UPDATE accounts SET state=? WHERE id=?");
+            update.text(1, json::serialize(next));
+            update.text(2, id);
+            update.row();
+            exec(impl_->db, "COMMIT");
+            return next;
+        } catch (...) {
+            exec(impl_->db, "ROLLBACK");
+            throw;
+        }
+    });
 }
 void Store::update_email(std::string_view id, std::string_view email) {
     if (email.size() > 320) throw Error(400, "invalid_account", "Email is too long");
@@ -709,7 +779,8 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                 s.text(1, id);
                 s.row();
             } else {
-                std::string m = (kind == "429" || kind == "rate_limit") ? "*" : std::string(model);
+                // Authentication trouble affects every model of the account.
+                std::string m = (kind == "429" || kind == "rate_limit" || kind == "auth") ? "*" : std::string(model);
                 Statement prior(impl_->db,
                                 "SELECT count FROM failures WHERE account=? AND model=?");
                 prior.text(1, id);
@@ -733,7 +804,7 @@ void Store::failure(std::string_view id, std::string_view model, std::string_vie
                     if (!minute) quota_count = std::min(quota_count, 4) + 1;
                     base_delay = minute || quota_count <= 2 ? 60u : quota_count <= 4 ? 300u : 600u;
                 } else {
-                    if (kind == "permission_temporary") base_delay = 300;
+                    if (kind == "permission_temporary" || kind == "auth") base_delay = 300;
                     Statement active_quota(impl_->db, "SELECT cooldown_until FROM quota_counters WHERE account=? AND model=?");
                     active_quota.text(1, id); active_quota.text(2, m);
                     if (active_quota.row()) quota_deadline = sqlite3_column_int64(active_quota.p, 0);
@@ -824,6 +895,60 @@ json::object Store::stats() {
         return json::object{{"records", rows}};
     });
 }
+unsigned default_fingerprint_seed(std::string_view account_id) {
+    return 10000 + static_cast<unsigned>(std::stoul(sha256(account_id).substr(0, 8), nullptr, 16) % 90000);
+}
+namespace {
+BrowserFingerprint read_fingerprint(sqlite3 *db, std::string_view id) {
+    Statement exists(db, "SELECT 1 FROM accounts WHERE id=?");
+    exists.text(1, id);
+    if (!exists.row()) throw Error(404, "account_not_found", "Account not found");
+    // Accounts written by an older build in this process may still lack a row.
+    Statement create(db, "INSERT OR IGNORE INTO fingerprints(account,seed) VALUES(?,?)");
+    create.text(1, id);
+    create.integer(2, default_fingerprint_seed(id));
+    create.row();
+    Statement s(db, "SELECT seed,timezone,locale FROM fingerprints WHERE account=?");
+    s.text(1, id);
+    s.row();
+    return {static_cast<unsigned>(sqlite3_column_int64(s.p, 0)), s.str(1), s.str(2)};
+}
+} // namespace
+BrowserFingerprint Store::fingerprint(std::string_view id) {
+    return impl_->run([&] { return read_fingerprint(impl_->db, id); });
+}
+BrowserFingerprint Store::regenerate_fingerprint(std::string_view id) {
+    return impl_->run([&] {
+        const auto previous = read_fingerprint(impl_->db, id);
+        auto next = previous;
+        // Same 10000..99999 range CloakBrowser uses for its own random seeds.
+        while (next.seed == previous.seed)
+            next.seed = 10000 + static_cast<unsigned>(std::stoul(random_hex(4), nullptr, 16) % 90000);
+        Statement s(impl_->db, "UPDATE fingerprints SET seed=? WHERE account=?");
+        s.integer(1, next.seed);
+        s.text(2, id);
+        s.row();
+        return next;
+    });
+}
+BrowserFingerprint Store::set_fingerprint_region(std::string_view id, std::optional<std::string> timezone,
+                                                 std::optional<std::string> locale) {
+    if (timezone && !timezone->empty() && !valid_timezone(*timezone))
+        throw Error(400, "invalid_timezone", "Timezone must be an IANA name such as Asia/Shanghai");
+    if (locale && !locale->empty() && !valid_locale(*locale))
+        throw Error(400, "invalid_locale", "Locale must be a language tag such as zh-CN");
+    return impl_->run([&] {
+        auto result = read_fingerprint(impl_->db, id);
+        if (timezone) result.timezone = *timezone;
+        if (locale) result.locale = *locale;
+        Statement s(impl_->db, "UPDATE fingerprints SET timezone=?,locale=? WHERE account=?");
+        s.text(1, result.timezone);
+        s.text(2, result.locale);
+        s.text(3, id);
+        s.row();
+        return result;
+    });
+}
 json::array Store::account_status() {
     return impl_->run([&] {
         json::array rows;
@@ -840,6 +965,11 @@ json::array Store::account_status() {
                                                 {"until", sqlite3_column_int64(f.p, 1)},
                                                 {"count", sqlite3_column_int(f.p, 2)}});
             o["failures"] = failures;
+            Statement fp(impl_->db, "SELECT seed,timezone,locale FROM fingerprints WHERE account=?");
+            fp.text(1, s.str(0));
+            if (fp.row())
+                o["fingerprint"] = json::object{{"seed", sqlite3_column_int64(fp.p, 0)},
+                                                {"timezone", fp.str(1)}, {"locale", fp.str(2)}};
             rows.push_back(o);
         }
         return rows;

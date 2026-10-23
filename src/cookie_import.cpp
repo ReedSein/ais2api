@@ -75,12 +75,12 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     if (!input || (!input->is_string() && !input->is_array() && !input->is_object())) invalid();
     unsigned skipped = 0;
     json::object storage;
-    if (input->is_string()) {
-        auto raw = std::string(input->as_string());
-        if (std::count(raw.begin(), raw.end(), ';') > 512)
-            throw Error(413, "cookie_import_limit", "Cookie import exceeds the credential count limit");
+    bool raw_header = false;
+    auto parsed = Store::normalize_storage_state(*input, &raw_header, 512);
+    if (raw_header) {
         // Header cookies have no host provenance. Host-prefixed cookies cannot be reconstructed.
-        auto parsed = Store::normalize_storage_state(json::string(raw));
+        if (parsed.at("cookies").as_array().size() > 512)
+            throw Error(413, "cookie_import_limit", "Cookie import exceeds the credential count limit");
         json::array cookies;
         for (auto value : parsed.at("cookies").as_array()) {
             auto &cookie = value.as_object();
@@ -96,8 +96,9 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
                 cookie["domain"] = "aistudio.google.com";
             cookies.push_back(std::move(value));
         }
-        storage = checked_state(json::object{{"cookies", cookies}});
-    } else storage = checked_state(*input);
+        parsed["cookies"] = std::move(cookies);
+        storage = checked_state(parsed);
+    } else storage = checked_state(parsed);
     CookieImportResult result;
     unsigned attempted = 0;
     std::uint64_t skipped_partition = 0;

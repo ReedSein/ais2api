@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/management.hpp"
+#include "ais2api/region.hpp"
 #include <algorithm>
 #include <cctype>
 
@@ -18,7 +19,7 @@ std::string identifier(const json::object& command) {
 
 json::object account_summary(const json::object& input) {
     json::object output;
-    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures"}) {
+    for (auto key : {"id", "name", "email", "auth_user", "disabled", "expired", "failures", "fingerprint"}) {
         if (auto value = input.if_contains(key)) output[key] = *value;
     }
     return output;
@@ -59,10 +60,41 @@ void redact(json::value& value) {
         }
     }
 }
+
+// Stored values plus what the browser will actually present; empty stored
+// timezone/locale follow this computer's region settings.
+json::object fingerprint_view(const BrowserFingerprint& fingerprint) {
+    const auto timezone = host_timezone(), locale = host_locale();
+    return {{"seed", fingerprint.seed}, {"platform", fingerprint_platform()},
+            {"timezone", fingerprint.timezone}, {"locale", fingerprint.locale},
+            {"effective_timezone", fingerprint.timezone.empty() ? timezone : fingerprint.timezone},
+            {"effective_locale", fingerprint.locale.empty() ? locale : fingerprint.locale},
+            {"host_timezone", timezone}, {"host_locale", locale}};
+}
 }
 
 json::object manage(Store& store, Config& config, const json::object& command) {
     auto name = string_or(command, "command");
+    if (name == "accounts.fingerprint") return fingerprint_view(store.fingerprint(identifier(command)));
+    if (name == "accounts.fingerprint.regenerate") return fingerprint_view(store.regenerate_fingerprint(identifier(command)));
+    if (name == "accounts.fingerprint.update") {
+        std::optional<std::string> timezone, locale;
+        bool any = false;
+        for (const auto& field : command) {
+            const auto key = field.key();
+            if (key == "command" || key == "id") continue;
+            if (key != "timezone" && key != "locale")
+                throw Error(400, "invalid_command", "Unknown fingerprint field");
+            // null or "" restores the host default.
+            if (!field.value().is_null() && !field.value().is_string())
+                throw Error(400, "invalid_command", "Fingerprint timezone and locale must be strings or null");
+            std::string value = field.value().is_string() ? std::string(field.value().as_string()) : std::string{};
+            (key == "timezone" ? timezone : locale) = std::move(value);
+            any = true;
+        }
+        if (!any) throw Error(400, "invalid_command", "Fingerprint update requires timezone or locale");
+        return fingerprint_view(store.set_fingerprint_region(identifier(command), timezone, locale));
+    }
     if (name == "accounts.list") {
         json::array accounts;
         for (auto& item : store.account_status()) accounts.push_back(account_summary(item.as_object()));

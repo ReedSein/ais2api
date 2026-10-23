@@ -297,6 +297,12 @@ json::object execute(Arguments args) {
                             {"next_step", config.api_key.empty()
                                 ? "Set api_key in config.json before using generation or model endpoints"
                                 : "API key is configured in config.json"}};
+        // "admin" is public, so reporting that it is still active reveals nothing.
+        result["admin_password_default"] = config.admin_key_is_default();
+        if (config.admin_key_is_default())
+            result["management_next_step"] = "Start the service and open http://127.0.0.1:" +
+                std::to_string(config.port) + "/ on this machine or a local network; sign in with the "
+                "default management password 'admin' and set a new password when prompted";
         if (!initialized)
             atomic_write(marker, "{\"version\":1}", true);
         return result;

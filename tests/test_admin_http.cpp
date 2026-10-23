@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Mana Nekoha (mananekoha114)
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/backend.hpp"
+#include "ais2api/region.hpp"
 #include "ais2api/runtime.hpp"
 #include "ais2api/store.hpp"
 #include <boost/asio.hpp>
@@ -357,4 +358,95 @@ TEST_CASE("management probe import enforces admin authentication and verified id
     CHECK(failure.result_int() == 409);
     CHECK(failure.body().find("synthetic-unverified") == std::string::npos);
     CHECK(object(server.get("/accounts")).at("accounts").as_array().empty());
+}
+TEST_CASE("the default management password only permits replacing itself", "[http][admin]") {
+    AdminServer server;
+    server.config.admin_key = std::string(default_admin_key);
+    atomic_write(server.config.config_file, json::serialize(server.config.to_json(true)), true);
+    local_call(server.config, {{"command", "config.reload"}});
+    const std::string initial(default_admin_key);
+    auto check = server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial);
+    REQUIRE(check.result_int() == 200);
+    CHECK(object(check).at("password_change_required") == true);
+    for (const auto* route : {"/api/admin/v1/status", "/api/admin/v1/config", "/api/admin/v1/logs",
+                              "/api/admin/v1/logs/stream", "/api/admin/v1/keys"}) {
+        auto blocked = server.call(http::verb::get, route, {}, initial);
+        CHECK(blocked.result_int() == 403);
+        CHECK(blocked.body().find("admin_password_change_required") != std::string::npos);
+    }
+    CHECK(server.call(http::verb::patch, "/api/admin/v1/config", R"({"admin_key":"other-password"})", initial).result_int() == 403);
+    CHECK(server.call(http::verb::post, "/api/admin/v1/accounts/probe-import",
+                      R"({"cookies":"SID=synthetic","auth_user":"0"})", initial).result_int() == 403);
+    CHECK(server.call(http::verb::get, "/api/admin/v1/auth/check", {}, "wrong-password").result_int() == 401);
+    for (const auto* body : {R"({"password":"short"})", R"({"password":"admin"})", R"({"password":7})",
+                             R"({"password":"long-enough-1","extra":true})", R"({})"})
+        CHECK(server.call(http::verb::post, "/api/admin/v1/auth/password", body, initial).result_int() == 400);
+    CHECK(Config::load(server.config.config_file).admin_key_is_default());
+
+    const std::string replacement = "synthetic-replacement-" + random_hex(8);
+    auto changed = server.call(http::verb::post, "/api/admin/v1/auth/password",
+                               json::serialize(json::object{{"password", replacement}}), initial);
+    REQUIRE(changed.result_int() == 200);
+    CHECK(object(changed).at("changed") == true);
+    CHECK(server.call(http::verb::get, "/api/admin/v1/auth/check", {}, initial).result_int() == 401);
+    auto after = server.call(http::verb::get, "/api/admin/v1/auth/check", {}, replacement);
+    REQUIRE(after.result_int() == 200);
+    CHECK(object(after).at("password_change_required") == false);
+    CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, replacement).result_int() == 200);
+    CHECK(Config::load(server.config.config_file).admin_key == replacement);
+    auto reuse = server.call(http::verb::patch, "/api/admin/v1/config", R"({"admin_key":"admin"})", replacement);
+    CHECK(reuse.result_int() == 400);
+    CHECK(reuse.body().find("admin_password_invalid") != std::string::npos);
+}
+TEST_CASE("management password changes apply while restart-only changes are pending", "[http][admin]") {
+    AdminServer server;
+    const auto port = server.config.port == 19000 ? 19001 : 19000;
+    auto pending = object(server.send(http::verb::patch, "/config", {{"port", port}}));
+    REQUIRE(bool_or(pending, "restart_required"));
+    const std::string replacement = "synthetic-pending-" + random_hex(8);
+    REQUIRE(server.send(http::verb::post, "/auth/password", {{"password", replacement}}).result_int() == 200);
+    CHECK(server.call(http::verb::get, "/api/admin/v1/status", {}, server.admin).result_int() == 401);
+    auto view = server.call(http::verb::get, "/api/admin/v1/config", {}, replacement);
+    REQUIRE(view.result_int() == 200);
+    CHECK(object(view).at("restart_required") == true);
+    auto saved = Config::load(server.config.config_file);
+    CHECK(saved.admin_key == replacement);
+    CHECK(saved.port == port);
+}
+TEST_CASE("management HTTP exposes and edits per-account browser fingerprints", "[http][admin][fingerprint]") {
+    AdminServer server;
+    auto imported = server.send(http::verb::post, "/accounts/import", {{"input", "SAPISID=synthetic-fingerprint"}});
+    REQUIRE(imported.result_int() == 200);
+    const auto id = string_or(object(imported).at("accounts").as_array()[0].as_object(), "id");
+    const auto route = "/accounts/" + id + "/fingerprint";
+
+    auto shown = server.get(route);
+    REQUIRE(shown.result_int() == 200);
+    auto view = object(shown);
+    const auto seed = view.at("seed").to_number<unsigned>();
+    CHECK(seed >= 10000);
+    CHECK(string_or(view, "platform") == fingerprint_platform());
+    CHECK(string_or(view, "timezone").empty());
+    CHECK(string_or(view, "effective_timezone") == host_timezone());
+    CHECK(string_or(view, "effective_locale") == host_locale());
+    auto listed = object(server.get("/accounts")).at("accounts").as_array()[0].as_object();
+    CHECK(listed.at("fingerprint").as_object().at("seed").to_number<unsigned>() == seed);
+
+    auto updated = server.send(http::verb::patch, route, {{"timezone", "America/New_York"}, {"locale", "en-US"}});
+    REQUIRE(updated.result_int() == 200);
+    CHECK(string_or(object(updated), "effective_timezone") == "America/New_York");
+    CHECK(object(updated).at("seed").to_number<unsigned>() == seed);
+    auto reset = object(server.send(http::verb::patch, route, {{"timezone", nullptr}}));
+    CHECK(string_or(reset, "timezone").empty());
+    CHECK(string_or(reset, "locale") == "en-US");
+    for (const auto& body : std::vector<json::object>{{{"timezone", "Bad Zone"}}, {{"locale", "en_US"}},
+                                                     {{"seed", 12345}}, {{"timezone", 7}}, {}})
+        CHECK(server.send(http::verb::patch, route, body).result_int() == 400);
+
+    auto regenerated = server.send(http::verb::post, route + "/regenerate");
+    REQUIRE(regenerated.result_int() == 200);
+    CHECK(object(regenerated).at("seed").to_number<unsigned>() != seed);
+    CHECK(string_or(object(regenerated), "locale") == "en-US");
+    CHECK(server.get("/accounts/acc_missing/fingerprint").result_int() == 404);
+    CHECK(server.send(http::verb::post, "/accounts/acc_missing/fingerprint/regenerate").result_int() == 404);
 }

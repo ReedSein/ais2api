@@ -27,10 +27,28 @@ const json::object *reference_target(const json::object &root, std::string_view 
             i += 2;
         }
     }
-    if (ref == "#") return &root;
-    if (!ref.starts_with("#/")) return nullptr;
+    if (!ref.starts_with('#')) return nullptr;
+    // URI fragments are decoded once before interpreting JSON Pointer syntax.
+    // In particular, an encoded slash separates tokens, while ~1 denotes a
+    // slash inside a token. Do not decode percent sequences introduced here.
+    std::string fragment;
+    auto hex = [](char c) -> unsigned {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return c - 'A' + 10;
+    };
+    for (std::size_t i = 1; i < ref.size(); ++i) {
+        if (ref[i] != '%') fragment += ref[i];
+        else {
+            fragment += static_cast<char>((hex(ref[i + 1]) << 4) | hex(ref[i + 2]));
+            i += 2;
+        }
+    }
+    ref = fragment;
+    if (ref.empty()) return &root;
+    if (!ref.starts_with('/')) return nullptr;
     const json::object *current = &root;
-    ref.remove_prefix(2);
+    ref.remove_prefix(1);
     while (true) {
         const auto slash = ref.find('/');
         auto token = ref.substr(0, slash);

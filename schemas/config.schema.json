@@ -148,7 +148,7 @@
       "default": "",
       "maxLength": 4096,
       "pattern": "^[!-~]*$",
-      "description": "Independent management Bearer secret; empty disables HTTP management. Redacted in management output."
+      "description": "Independent management Bearer secret; empty disables HTTP management. Newly created configurations use the default 'admin', which only works from local networks and must be replaced before other management use. Redacted in management output."
     },
     "admin_origins": {
       "type": "array",

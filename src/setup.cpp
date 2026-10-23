@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/runtime.hpp"
+#include "ais2api/media.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/bundle.hpp"
 #include <archive.h>
@@ -111,8 +112,11 @@ bool termux_container_exists() {
                       fs::is_directory(fs::path(prefix) /
                                        "var/lib/proot-distro/installed-rootfs/ais2api-browser"));
 }
-bool public_address(const boost::asio::ip::address &address) {
+} // namespace
+bool media_detail::public_address(const boost::asio::ip::address &address) {
     if (address.is_unspecified() || address.is_loopback() || address.is_multicast())
+        return false;
+    if (address.is_v6() && address.to_v6().scope_id() != 0)
         return false;
     if (address.is_v4()) {
         auto n = address.to_v4().to_uint();
@@ -130,18 +134,26 @@ bool public_address(const boost::asio::ip::address &address) {
         mapped = mapped && b[i] == 0;
     if (mapped && b[10] == 255 && b[11] == 255)
         return public_address(boost::asio::ip::address_v4({b[12], b[13], b[14], b[15]}));
-    return b[0] == 0x20 || b[0] == 0x26 || b[0] == 0x28 || b[0] == 0x2a || b[0] == 0x2c;
+    // Global unicast is 2000::/3. Exclude IETF special-purpose space,
+    // documentation and 6to4 (which can embed nonpublic IPv4 destinations).
+    if ((b[0] & 0xe0) != 0x20) return false;
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] < 2) return false; // 2001::/23
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;
+    if (b[0] == 0x20 && b[1] == 0x02) return false; // 2002::/16
+    if (b[0] == 0x3f && b[1] == 0xff && (b[2] & 0xf0) == 0) return false; // 3fff::/20
+    return true;
 }
+namespace {
 curl_socket_t public_socket(void *, curlsocktype, struct curl_sockaddr *address) {
     bool allowed = false;
     if (address->family == AF_INET) {
         auto *p = reinterpret_cast<sockaddr_in *>(&address->addr);
-        allowed = public_address(boost::asio::ip::address_v4(ntohl(p->sin_addr.s_addr)));
+        allowed = media_detail::public_address(boost::asio::ip::address_v4(ntohl(p->sin_addr.s_addr)));
     } else if (address->family == AF_INET6) {
         auto *p = reinterpret_cast<sockaddr_in6 *>(&address->addr);
         boost::asio::ip::address_v6::bytes_type b{};
         std::copy_n(reinterpret_cast<const unsigned char *>(&p->sin6_addr), 16, b.begin());
-        allowed = public_address(boost::asio::ip::address_v6(b));
+        allowed = media_detail::public_address(boost::asio::ip::address_v6(b));
     }
     if (!allowed)
         return CURL_SOCKET_BAD;
@@ -474,8 +486,8 @@ json::object doctor(const Config &config) {
             {"manifest_available", !manifest().empty()},
             {"google_access", "not_checked"}};
 }
-std::string fetch_public_media(std::string_view input, std::size_t limit, std::string_view proxy,
-                               std::stop_token cancel) {
+std::string media_detail::fetch_with_resolver(std::string_view input, std::size_t limit, std::string_view proxy,
+                               std::stop_token cancel, const Resolver& resolve) {
     std::string url(input), proxy_text(proxy);
     for (unsigned redirect = 0; redirect < 4; ++redirect) {
         check_cancel(cancel);
@@ -491,18 +503,38 @@ std::string fetch_public_media(std::string_view input, std::size_t limit, std::s
         };
         if (part(CURLUPART_SCHEME) != "https" || !part(CURLUPART_USER).empty() ||
             !part(CURLUPART_PASSWORD).empty() ||
+            !part(CURLUPART_ZONEID).empty() ||
             (!part(CURLUPART_PORT).empty() && part(CURLUPART_PORT) != "443"))
             throw Error(400, "media_url",
                         "Only public HTTPS images without URL credentials are supported");
-        boost::asio::io_context io;
-        boost::asio::ip::tcp::resolver resolver(io);
-        boost::system::error_code ec;
-        auto addresses = resolver.resolve(part(CURLUPART_HOST), "443", ec);
-        if (ec || addresses.empty())
-            throw Error(400, "media_url", "Cannot resolve image host");
-        for (auto &a : addresses)
-            if (!public_address(a.endpoint().address()))
+        const auto host = part(CURLUPART_HOST);
+        auto resolution_host = host;
+        if (resolution_host.starts_with('[') && resolution_host.ends_with(']'))
+            resolution_host = resolution_host.substr(1, resolution_host.size() - 2);
+        std::vector<boost::asio::ip::address> addresses;
+        boost::system::error_code literal_error;
+        auto literal = boost::asio::ip::make_address(resolution_host, literal_error);
+        if (!literal_error) addresses.push_back(literal);
+        else if (resolve) addresses = resolve(resolution_host);
+        else {
+            boost::asio::io_context io;
+            boost::asio::ip::tcp::resolver resolver(io);
+            boost::system::error_code ec;
+            const auto results = resolver.resolve(resolution_host, "443", ec);
+            if (ec) throw Error(400, "media_url", "Cannot resolve image host");
+            for (const auto& result : results) addresses.push_back(result.endpoint().address());
+        }
+        check_cancel(cancel);
+        if (addresses.empty()) throw Error(400, "media_url", "Cannot resolve image host");
+        for (const auto& address : addresses)
+            if (!public_address(address))
                 throw Error(400, "media_url", "Private image destinations are not allowed");
+        // Bound fallback work after validating every result, including those
+        // outside the fallback budget. Never silently ignore a private result.
+        std::vector<boost::asio::ip::address> destinations;
+        for (const auto& address : addresses)
+            if (std::find(destinations.begin(), destinations.end(), address) == destinations.end() && destinations.size() < 8)
+                destinations.push_back(address);
         struct Buffer {
             std::string bytes;
             std::size_t max;
@@ -531,11 +563,36 @@ std::string fetch_public_media(std::string_view input, std::size_t limit, std::s
             +[](void *p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
                 return static_cast<std::stop_token *>(p)->stop_requested() ? 1 : 0;
             });
+        // An empty explicit proxy disables environment proxies. With a
+        // configured proxy, do not let NO_PROXY bypass the requested route.
+        curl_easy_setopt(c.get(), CURLOPT_PROXY, proxy_text.c_str());
+        curl_easy_setopt(c.get(), CURLOPT_NOPROXY, "");
         if (proxy_text.empty())
             curl_easy_setopt(c.get(), CURLOPT_OPENSOCKETFUNCTION, public_socket);
-        else
-            curl_easy_setopt(c.get(), CURLOPT_PROXY, proxy_text.c_str());
-        auto result = curl_easy_perform(c.get());
+        CURLcode result = CURLE_COULDNT_CONNECT;
+        const auto deadline = Clock::now() + std::chrono::seconds(30);
+        for (const auto& address : destinations) {
+            check_cancel(cancel);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+            if (remaining <= 0) break;
+            curl_easy_setopt(c.get(), CURLOPT_TIMEOUT_MS, static_cast<long>(remaining));
+            // CONNECT_TO changes only the connection target. HTTPS SNI,
+            // certificate verification and HTTP Host keep the original name.
+            auto numeric = address.to_string();
+            if (address.is_v6()) numeric = "[" + numeric + "]";
+            const auto mapping = host + ":443:" + numeric + ":443";
+            std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> target(
+                curl_slist_append(nullptr, mapping.c_str()), curl_slist_free_all);
+            if (!target) throw Error(500, "media_fetch", "Cannot allocate image destination");
+            if (curl_easy_setopt(c.get(), CURLOPT_CONNECT_TO, target.get()) != CURLE_OK)
+                throw Error(500, "media_fetch", "Cannot pin image destination");
+            data.bytes.clear();
+            result = curl_easy_perform(c.get());
+            curl_easy_setopt(c.get(), CURLOPT_CONNECT_TO, nullptr);
+            if (data.exceeded || !data.bytes.empty() ||
+                (result != CURLE_COULDNT_CONNECT && result != CURLE_RECV_ERROR &&
+                 result != CURLE_SSL_CONNECT_ERROR)) break;
+        }
         check_cancel(cancel);
         if (data.exceeded)
             throw Error(413, "media_limit", "Remote image exceeds size limit");
@@ -567,5 +624,9 @@ std::string fetch_public_media(std::string_view input, std::size_t limit, std::s
         return "data:" + mime + ";base64," + b64;
     }
     throw Error(400, "media_redirect", "Too many image redirects");
+}
+std::string fetch_public_media(std::string_view url, std::size_t limit, std::string_view proxy,
+                               std::stop_token cancel) {
+    return media_detail::fetch_with_resolver(url, limit, proxy, cancel);
 }
 } // namespace ais2api

@@ -14,7 +14,7 @@ ais2api status --config ./config.json --data-dir ./data
 ais2api stop --config ./config.json --data-dir ./data
 ```
 
-`init` writes the first configuration and initializes local storage. It never generates or prints an API key. Its result includes `api_key_configured` and `next_step`. Set `api_key` in `config.json` to your own key before starting; the default is empty. Re-running initialization preserves it. Keys allow at most 4096 visible ASCII characters without whitespace.
+`init` writes the first configuration and initializes local storage. It never generates or prints an API key. Its result includes `api_key_configured`, `next_step` and `admin_password_default`. A newly written configuration uses the default management password `admin`; `management_next_step` then explains how to sign in to the console and replace it (required before any other management use, and only from this machine or a local network). Set `api_key` in `config.json` to your own key before starting; the default is empty. Re-running initialization preserves it. Keys allow at most 4096 visible ASCII characters without whitespace.
 
 Generated and saved `config.json` files use two-space indentation, with each
 object field and array item on its own line. Loading an existing configuration

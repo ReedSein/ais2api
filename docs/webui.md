@@ -28,17 +28,17 @@ sh scripts/build.sh termux --webui
 
 ## 启动与登录
 
-先按项目的[首次运行说明](../README.md#首次运行)初始化配置并启动服务。编辑程序旁的 `config.json`，为独立管理密钥设置一个足够强的 `admin_key`，保存后重启服务，或在服务运行时执行 `ais2api config reload`。管理密钥与生成 API 的 `api_key` 相互独立。
+先按项目的[首次运行说明](../README.md#首次运行)初始化配置并启动服务。新创建的配置默认管理密码为 `admin`；首次登录后控制台会强制进入“设置新的管理密码”页面，修改前服务拒绝其他所有管理请求。默认密码只接受来自本机或局域网（回环、私有地址、链路本地、IPv6 ULA）的连接；若服务只能从公网访问，请先在 `config.json` 中设置一个足够强的 `admin_key`，再重启服务或执行 `ais2api config reload`。管理密钥与生成 API 的 `api_key` 相互独立。
 
 在浏览器打开服务地址，例如 `http://127.0.0.1:18451/`，进入登录页并使用 `admin_key` 登录。控制台通过同源 `/api/admin/v1` 调用管理 API，无需设置跨域来源。账号、模型、密钥、统计、日志、配置、诊断和设置页面分别位于 `/accounts`、`/models`、`/keys`、`/stats`、`/logs`、`/config`、`/diagnostics`、`/settings`；`/login` 为登录页。
 
-管理 API 默认关闭：`admin_key` 为空时，管理请求不会通过认证。请像其他凭据一样保护该密钥；如需撤销，清空 `admin_key` 并重新加载配置或重启服务。详见[管理 API 文档](management-api.md)。
+之后可在“设置 → 管理密码”中再次修改密码，新密码立即生效，即使服务存在待重启的配置也是如此；新密码需为 8–4096 个可见 ASCII 字符且不能是 `admin`。已有配置文件中 `admin_key` 为空时，管理 API 仍保持关闭。请像其他凭据一样保护该密钥；如需撤销，清空 `admin_key` 并重新加载配置或重启服务。详见[管理 API 文档](management-api.md)。
 
 登录页的后端地址留空表示当前服务。管理密钥默认仅保存在当前标签页的 sessionStorage；勾选“在此设备上记住”才写入 localStorage。
 
 ## 前端开发
 
-在 `webui/` 运行 `npm ci` 和 `npm run dev`，默认开发地址为 `http://localhost:5173`，管理请求代理到 `http://127.0.0.1:18451`；可用 `AIS2API_URL` 环境变量指定其他后端。类型检查使用 `npm run typecheck`，生产构建使用 `npm run build`。独立静态部署时，在登录页填写后端地址，并在后端 `admin_origins` 中配置页面的完整来源。
+在 `webui/` 运行 `npm ci` 和 `npm run dev`，默认开发地址为 `http://localhost:5173`，管理请求代理到 `http://127.0.0.1:18451`；可用 `AIS2API_URL` 环境变量指定其他后端。类型检查使用 `npm run typecheck`，交互测试使用 `npm test`（Vitest + happy-dom，模拟管理 API，不连接真实服务），生产构建使用 `npm run build`。独立静态部署时，在登录页填写后端地址，并在后端 `admin_origins` 中配置页面的完整来源。
 
 ## 验证范围
 

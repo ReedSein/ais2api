@@ -6,7 +6,7 @@ An optional [embedded Web console](webui.md) uses these same endpoints from the 
 
 ## Authentication and browser access
 
-Set an independent `admin_key` in config.json. Empty disables HTTP management. Send `Authorization: Bearer <admin_key>` on every request, including log streams. Generation API keys and managed generation keys do not grant management access. Secrets are never accepted through a URL query parameter. Configuration and diagnostics redact secrets; account responses omit Cookie and browser storage credentials.
+Newly created configurations (`init`, or a first start without a configuration file) use the default management password `admin`. While it is active, the password is accepted only from loopback, RFC 1918 private, link-local and IPv6 unique-local peers (other peers receive `403 admin_default_password_remote`), and every route except `GET /auth/check` and `POST /auth/password` returns `403 admin_password_change_required`. `GET /auth/check` reports `password_change_required`. `POST /auth/password` with `{ "password": "..." }` replaces it: 8–4096 visible ASCII characters, not `admin` and not the current value (`400 admin_password_invalid` otherwise). The change applies immediately, also while restart-only configuration changes are pending, and is saved to config.json; the old password stops working at once. Configuration patches cannot set `admin_key` to `admin`. Existing configuration files keep their stored `admin_key`; you can also set an independent `admin_key` in config.json directly. Empty disables HTTP management. A reverse proxy on the same host makes every client appear local, so replace the default password before exposing the service through one. Send `Authorization: Bearer <admin_key>` on every request, including log streams. Generation API keys and managed generation keys do not grant management access. Secrets are never accepted through a URL query parameter. Configuration and diagnostics redact secrets; account responses omit Cookie and browser storage credentials.
 
 `admin_origins` is an array of exact HTTP(S) origins, such as `http://localhost:5173`. Its default empty value permits only same-origin browser access. Origins cannot contain a path, query, fragment, credentials or wildcard. Cross-origin frontends must explicitly list their origin; CORS preflight supports Authorization, Content-Type and Last-Event-ID. Origin checks supplement Bearer authentication.
 
@@ -25,7 +25,8 @@ Paths below are relative to the management base URL. JSON mutation bodies must b
 
 | Method | Path | Purpose/body |
 | --- | --- | --- |
-| GET | `/auth/check`, `/version`, `/capabilities` | Authentication and version/capability discovery |
+| GET | `/auth/check`, `/version`, `/capabilities` | Authentication (`password_change_required`) and version/capability discovery |
+| POST | `/auth/password` | Replace the management password with `{ "password": "..." }`; applies immediately |
 | GET | `/status` | Service state, queue, active generation account, `logging_healthy`, `pending_logs` |
 | GET, DELETE | `/stats` | Read or reset usage statistics |
 | GET | `/accounts` | Credential-free account summaries |
@@ -35,6 +36,9 @@ Paths below are relative to the management base URL. JSON mutation bodies must b
 | PATCH | `/accounts/{id}` | Update `name` (string), `disabled` (boolean), or both |
 | DELETE | `/accounts/{id}` | Remove an account |
 | POST | `/accounts/{id}/activate` | Select the preferred account |
+| GET | `/accounts/{id}/fingerprint` | Permanent browser fingerprint: `seed`, `platform`, stored `timezone`/`locale` (empty follows the host), `effective_*` and `host_*` values |
+| PATCH | `/accounts/{id}/fingerprint` | Override `timezone` (IANA) and/or `locale` (BCP 47); `null` or `""` restores the host default. Applies the next time the account is used |
+| POST | `/accounts/{id}/fingerprint/regenerate` | Assign a new seed; Google will see a new device for this account |
 | POST | `/accounts/{id}/reset` | Reset account failure/disabled state |
 | POST | `/accounts/probe`, `/accounts/{id}/probe`, `/accounts/{id}/detect-email` | Probe all accounts or one account; email detection uses the same browser probe |
 | GET | `/rotation` | Rotation and preference state |

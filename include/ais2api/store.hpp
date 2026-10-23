@@ -7,6 +7,7 @@
 #pragma once
 #include "config.hpp"
 #include <memory>
+#include <limits>
 namespace ais2api {
 struct Account {
     std::string id, name, email;
@@ -14,6 +15,17 @@ struct Account {
     json::object storage_state;
     bool disabled = false;
 };
+// Permanent per-account CloakBrowser identity. The seed is assigned when the
+// account is first stored and only changes on explicit regeneration. Empty
+// timezone or locale follow the host's region settings.
+struct BrowserFingerprint {
+    unsigned seed = 0;
+    std::string timezone, locale;
+};
+// Initial seed for an account id (10000..99999). Deterministic so an account
+// verified before it is stored (Cookie import) keeps the identity it was
+// verified with.
+unsigned default_fingerprint_seed(std::string_view account_id);
 class Store {
 public:
     explicit Store(const fs::path& directory);
@@ -23,9 +35,17 @@ public:
     std::vector<Account> accounts();
     Account account(std::string_view id);
     json::array import_accounts(const json::value& input, std::string name = {});
-    static json::object normalize_storage_state(const json::value& input);
+    // Reports raw Cookie header leaves, which have no browser metadata.
+    static json::object normalize_storage_state(const json::value& input, bool* raw_header = nullptr,
+        std::size_t max_cookies = std::numeric_limits<std::size_t>::max());
     json::array merge_verified_accounts(const std::vector<Account>& accounts);
     void put_account(const Account& account);
+    // Replaces the cookies of an account whose stored credentials still equal
+    // `expected` (the state a browser session was built from); identity, expiry,
+    // cooldowns and quota counters are untouched. Returns the stored state, or
+    // nothing when the credentials were replaced meanwhile or are unchanged.
+    std::optional<json::object> refresh_cookies(std::string_view id, const json::object& expected,
+                                                const json::array& cookies);
     void update_email(std::string_view id, std::string_view email);
     void update_account_metadata(std::string_view id, const json::object& patch);
     void remove_account(std::string_view id);
@@ -35,6 +55,11 @@ public:
     std::string rotate_account();
     void clear_cooldown(std::string_view id, std::string_view model = {});
     void reset_stats();
+    BrowserFingerprint fingerprint(std::string_view id);
+    BrowserFingerprint regenerate_fingerprint(std::string_view id);
+    // nullopt leaves a field unchanged; an empty string restores the host default.
+    BrowserFingerprint set_fingerprint_region(std::string_view id, std::optional<std::string> timezone,
+                                              std::optional<std::string> locale);
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {});
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
     void success(std::string_view account, std::string_view model, const json::object& usage);

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/browser.hpp"
+#include "ais2api/region.hpp"
 #include "../browser/cdp.hpp"
 #include "../browser/google_auth.hpp"
 #include "../browser/rpc_error.hpp"
@@ -72,6 +73,31 @@ json::array browser_detail::import_cookies(const json::array& cookies, std::size
         if (auto p = source.if_contains("sameSite"); p && p->is_string() && (p->as_string() == "Strict" || p->as_string() == "Lax" || p->as_string() == "None")) cookie["sameSite"] = *p;
         if (auto p = source.if_contains("expires"); p && p->is_number() && json::value_to<double>(*p) > 0) cookie["expires"] = *p;
         result.push_back(std::move(cookie));
+    }
+    return result;
+}
+json::array browser_detail::refreshed_cookies(const json::array& stored, const json::array& browser) {
+    auto result = import_cookies(browser);
+    // Never replace credentials with a signed-out or partial export.
+    auto has = [&](std::initializer_list<std::string_view> names) {
+        return std::any_of(result.begin(), result.end(), [&](const json::value& value) {
+            const auto name = string_or(value.as_object(), "name");
+            return std::find(names.begin(), names.end(), name) != names.end();
+        });
+    };
+    if (!has({"SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"}) || !has({"SID", "__Secure-1PSID", "__Secure-3PSID"}))
+        return {};
+    for (const auto& value : stored) {
+        if (!value.is_object()) continue;
+        const auto& cookie = value.as_object();
+        auto domain = string_or(cookie, "domain");
+        std::transform(domain.begin(), domain.end(), domain.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (!domain.empty() && domain.front() == '.') domain.erase(0, 1);
+        const bool google = domain == "google.com" || domain.ends_with(".google.com");
+        // import_cookies exports neither other domains nor partitioned cookies.
+        if (!google || cookie.contains("partitionKey") || bool_or(cookie, "partitionKeyOpaque"))
+            result.push_back(cookie);
     }
     return result;
 }
@@ -331,12 +357,38 @@ struct BrowserGateway::Impl {
     Clock::time_point models_at{};
     std::string last_status = "not_started";
     std::string phase = "idle";
+    // CloakBrowser applies fingerprints per process, so the running browser is
+    // tied to the identity it was launched with.
+    struct LaunchIdentity {
+        unsigned seed = 0;
+        std::string timezone, locale;
+        bool operator==(const LaunchIdentity&) const = default;
+    };
+    std::optional<LaunchIdentity> launched;
+    LaunchIdentity identity_for(const Account& account) {
+        BrowserFingerprint stored;
+        try {
+            stored = store.fingerprint(account.id);
+        } catch (const Error& error) {
+            if (error.code != "account_not_found") throw;
+            // Cookie import verifies an account before storing it; use the
+            // seed the store will assign to that id.
+            stored.seed = default_fingerprint_seed(account.id);
+        }
+        return {stored.seed, stored.timezone.empty() ? host_timezone() : stored.timezone,
+                stored.locale.empty() ? host_locale() : stored.locale};
+    }
+    // Credentials the current context was built from, for write-back CAS.
+    json::object session_state;
+    Clock::time_point cookies_saved_at{};
+    std::string cookie_refresh = "not_attempted";
     explicit Impl(const Config& c, Store& s) : config(c), store(s) {}
     ~Impl() { close(); }
     void close() noexcept {
         authorization_cache.clear();
         if (cdp) cdp->close();
-        cdp.reset(); process.stop(); context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear();
+        launched.reset();
+        cdp.reset(); process.stop(); context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
         if (!profile.empty()) { std::error_code ec; fs::remove_all(profile, ec); profile.clear(); }
         last_status = "closed";
     }
@@ -354,9 +406,11 @@ struct BrowserGateway::Impl {
         check_cancel(token);
         return result;
     }
-    void ensure_browser(std::stop_token token) {
+    void ensure_browser(std::stop_token token, const LaunchIdentity& identity) {
         check_cancel(token);
-        if (cdp && beast::get_lowest_layer(cdp->socket).socket().is_open() && process.alive()) return;
+        if (cdp && beast::get_lowest_layer(cdp->socket).socket().is_open() && process.alive() &&
+            launched == identity) return;
+        // A different account fingerprint needs a new browser process.
         close();
         if (config.browser_executable.empty() || !fs::is_regular_file(config.browser_executable)) throw Error(503, "browser_not_configured", "Configure an executable browser or Termux launcher path");
         profile = config.data_dir / "runtime" / ("browser-" + random_hex(12));
@@ -376,6 +430,16 @@ struct BrowserGateway::Impl {
         if (std::getenv("TERMUX_VERSION") || geteuid() == 0) args.push_back("--no-sandbox");
 #endif
         if (!config.proxy.empty()) args.push_back("--proxy-server=" + config.proxy);
+        // Stable per-account CloakBrowser identity: without a seed every launch
+        // is a new random device, and without timezone/locale it presents
+        // UTC + en-US. Other Chromium builds ignore these switches.
+        if (identity.seed) args.push_back("--fingerprint=" + std::to_string(identity.seed));
+        args.push_back("--fingerprint-platform=" + std::string(fingerprint_platform()));
+        args.push_back("--fingerprint-timezone=" + identity.timezone);
+        args.push_back("--fingerprint-locale=" + identity.locale);
+        // WebRTC may only use UDP through the configured proxy, so ICE
+        // candidates cannot reveal the real address.
+        args.push_back("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
         args.push_back("about:blank");
         try {
             process.start(config.browser_executable, args, profile);
@@ -384,7 +448,7 @@ struct BrowserGateway::Impl {
                 check_cancel(token);
                 if (!process.alive()) throw Error(502, "browser_launch", "Browser exited before DevTools became ready");
                 auto endpoint = read_endpoint(profile);
-                if (endpoint.first) { cdp = std::make_unique<Cdp>(); cdp->connect(endpoint.first, endpoint.second, token); last_status = "browser_ready"; return; }
+                if (endpoint.first) { cdp = std::make_unique<Cdp>(); cdp->connect(endpoint.first, endpoint.second, token); launched = identity; last_status = "browser_ready"; return; }
                 pause(token, 100ms);
             }
             throw Error(504, "browser_timeout", "Browser did not publish a DevTools endpoint");
@@ -393,7 +457,33 @@ struct BrowserGateway::Impl {
     void dispose_context(std::stop_token token) {
         authorization_cache.clear();
         if (!context.empty()) cdp->call("Target.disposeBrowserContext", {{"browserContextId", context}}, {}, token);
-        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear();
+        context.clear(); session.clear(); account_id.clear(); account_fingerprint.clear(); base_template.clear(); cached_models.clear(); session_state = {};
+    }
+    // Google rotates session cookies while the page is in use. Persist the
+    // verified context's current cookies so later sessions do not restart from
+    // the stale imported set. Best effort; only cancellation propagates.
+    void persist_cookies(const Account& account, std::stop_token token) {
+        if (context.empty() || session_state.empty()) return;
+        try {
+            cookies_saved_at = Clock::now();
+            auto reply = cdp->call("Storage.getCookies", {{"browserContextId", context}}, {}, token, 5s);
+            auto cookies = reply.if_contains("cookies");
+            auto stored = session_state.if_contains("cookies");
+            auto merged = cookies && cookies->is_array()
+                ? browser_detail::refreshed_cookies(stored && stored->is_array() ? stored->as_array() : json::array{}, cookies->as_array())
+                : json::array{};
+            if (merged.empty()) { cookie_refresh = "failed"; return; }
+            if (!store.refresh_cookies(account.id, session_state, merged)) { cookie_refresh = "unchanged"; return; }
+            // Adopt the stored form so the next request's account matches this
+            // session's fingerprint instead of triggering a context rebuild.
+            const auto saved = store.account(account.id);
+            session_state = saved.storage_state;
+            account_fingerprint = sha256(json::serialize(saved.storage_state) + "\n" + saved.auth_user + "\n" + saved.email);
+            cookie_refresh = "saved";
+        } catch (const Error& error) {
+            if (error.code == "cancelled") throw;
+            cookie_refresh = "failed";
+        }
     }
     json::object identity(std::stop_token token, bool allow_login = false, std::chrono::seconds timeout = 30s) {
         auto value = eval("globalThis.__ais2bridge.identity()", token, timeout);
@@ -448,7 +538,7 @@ struct BrowserGateway::Impl {
     }
     void ensure_account(const Account& account, std::stop_token token, bool bootstrap, bool identity_only = false) {
         phase = "browser_start";
-        ensure_browser(token);
+        ensure_browser(token, identity_for(account));
         auto fingerprint = sha256(json::serialize(account.storage_state) + "\n" + account.auth_user + "\n" + account.email);
         bool verified_session = false;
         if (account.id != account_id || fingerprint != account_fingerprint || session.empty()) {
@@ -485,7 +575,9 @@ struct BrowserGateway::Impl {
                 phase = "account_identity";
                 await_account_identity(account, token, !identity_only);
                 account_id = account.id; account_fingerprint = std::move(fingerprint); last_status = "account_ready";
+                session_state = account.storage_state;
                 verified_session = true;
+                persist_cookies(account, token);
             } catch (...) { try { dispose_context({}); } catch (...) { close(); } throw; }
         }
         if (!verified_session) {
@@ -542,7 +634,7 @@ BrowserGateway::~BrowserGateway() = default;
 json::object BrowserGateway::verify_runtime(std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
     try {
-        impl_->ensure_browser(cancel);
+        impl_->ensure_browser(cancel, {0, host_timezone(), host_locale()});
         auto version=impl_->cdp->call("Browser.getVersion",{}, {},cancel);
         auto context=string_or(impl_->cdp->call("Target.createBrowserContext",{{"disposeOnDetach",true}}, {},cancel),"browserContextId");
         if(context.empty())incompatible("Browser did not create a verification context");
@@ -552,6 +644,14 @@ json::object BrowserGateway::verify_runtime(std::stop_token cancel) {
     } catch (...) { impl_->close();throw; }
 }
 void BrowserGateway::close() { std::lock_guard lock(impl_->mutex); impl_->close(); }
+void BrowserGateway::reset_session() {
+    std::lock_guard lock(impl_->mutex);
+    // A new context reloads cookies, the page, BotGuard and the request template.
+    try {
+        if (impl_->cdp && impl_->process.alive()) impl_->dispose_context({});
+        else impl_->close();
+    } catch (...) { impl_->close(); }
+}
 void BrowserGateway::reconfigure(const Config& config) {
     std::lock_guard lock(impl_->mutex);
     // Transport/lifecycle settings require a service restart. These fields are
@@ -567,7 +667,11 @@ json::object BrowserGateway::diagnostics() {
                 {"bridgeSha256", browser_detail::embedded_bridge_sha256()}};
     return {{"status", impl_->last_status}, {"phase", impl_->phase},
         {"bridgeSource", "embedded"}, {"bridgeSha256", browser_detail::embedded_bridge_sha256()},
-        {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768}};
+        {"running", impl_->process.alive()}, {"isolatedContext", !impl_->context.empty()}, {"templateCaptured", !impl_->base_template.empty()}, {"modelDiscovery", impl_->cached_models.empty() ? "not_loaded" : "live_rpc_cache"}, {"chunkBytes", 32768},
+        {"cookieRefresh", impl_->cookie_refresh},
+        {"fingerprint", impl_->launched ? json::value(json::object{{"seed", impl_->launched->seed},
+            {"platform", fingerprint_platform()}, {"timezone", impl_->launched->timezone},
+            {"locale", impl_->launched->locale}}) : json::value(nullptr)}};
 }
 json::object BrowserGateway::probe(const Account& account, std::stop_token cancel) {
     std::lock_guard lock(impl_->mutex);
@@ -709,7 +813,10 @@ void BrowserGateway::generate(const Request& request, const Account& account, co
                 }
                 if (auto rpc = browser_detail::rpc_text_error(error_prefix, retry_after)) throw classified(*rpc);
                 if (parse_failure) throw *parse_failure;
-                parser.finish(); impl_->phase = "generation_complete"; return;
+                parser.finish(); impl_->phase = "generation_complete";
+                if (Clock::now() - impl_->cookies_saved_at >= 300s)
+                    try { impl_->persist_cookies(account, {}); } catch (...) {}
+                return;
             } else pause(cancel, 30ms);
         }
     } catch (...) {

@@ -7,6 +7,10 @@
 #pragma once
 #include "common.hpp"
 namespace ais2api {
+// Management password written to newly created configurations. While it is in
+// use, management sessions may only replace it, and only from loopback or
+// private-network peers (see local_network_address).
+inline constexpr std::string_view default_admin_key = "admin";
 struct Limits {
     std::size_t request_bytes = 32 * 1024 * 1024;
     std::size_t object_bytes = 64 * 1024 * 1024;
@@ -46,6 +50,13 @@ struct Config {
     Config patched(const json::object& patch) const;
     std::optional<std::string> authenticate_admin(std::string_view secret) const;
     void validate() const;
+    bool admin_key_is_default() const { return admin_key == default_admin_key; }
 };
 bool restart_required(const Config& previous, const Config& next);
+// Throws 400 admin_password_invalid unless `next` may replace `current` as the
+// management password: 8..4096 visible ASCII, not the default, not unchanged.
+void validate_admin_password(std::string_view next, std::string_view current);
+// Loopback, private (RFC 1918, IPv6 ULA) and link-local addresses, including
+// IPv4-mapped IPv6. Unparseable text is not local.
+bool local_network_address(std::string_view address);
 }

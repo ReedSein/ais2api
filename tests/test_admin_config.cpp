@@ -120,3 +120,48 @@ TEST_CASE("account metadata updates validate input and unknown ids", "[managemen
         CHECK_THROWS_AS(manage(store, cfg, command), Error);
     }
 }
+TEST_CASE("new configurations start with the default management password", "[config][admin]") {
+    AdminDirectory dir;
+    auto fresh = Config::load(dir.path / "config.json");
+    CHECK(fresh.admin_key == default_admin_key);
+    CHECK(fresh.admin_key_is_default());
+    CHECK(fresh.authenticate_admin("admin"));
+    fresh.save();
+    CHECK(Config::load(fresh.config_file).admin_key_is_default());
+    // Existing files keep their value: an empty key still disables management.
+    auto existing = fresh;
+    existing.admin_key.clear();
+    existing.save();
+    const auto before = read_file(existing.config_file);
+    auto reloaded = Config::load(existing.config_file);
+    CHECK(reloaded.admin_key.empty());
+    CHECK_FALSE(reloaded.authenticate_admin("admin"));
+    CHECK(read_file(existing.config_file) == before);
+    // The default can never be configured again through a patch.
+    CHECK_THROWS_AS(reloaded.patched({{"admin_key", "admin"}}), Error);
+    CHECK(reloaded.patched({{"admin_key", "replacement-admin"}}).admin_key == "replacement-admin");
+}
+TEST_CASE("management password replacement policy", "[config][admin]") {
+    CHECK_NOTHROW(validate_admin_password("strong-password-1", "admin"));
+    for (const auto* rejected : {"", "short", "1234567", "admin", "with space1", "tab\tpassword"})
+        CHECK_THROWS_AS(validate_admin_password(rejected, "admin"), Error);
+    CHECK_THROWS_AS(validate_admin_password("same-password", "same-password"), Error);
+    CHECK_THROWS_AS(validate_admin_password(std::string(4097, 'x'), "admin"), Error);
+    CHECK_NOTHROW(validate_admin_password(std::string(4096, 'x'), "admin"));
+    try {
+        validate_admin_password("short", "admin");
+    } catch (const Error& error) {
+        CHECK(error.status == 400);
+        CHECK(error.code == "admin_password_invalid");
+    }
+}
+TEST_CASE("default management password peers are limited to local networks", "[config][admin]") {
+    for (const auto* local : {"127.0.0.1", "127.8.9.10", "::1", "10.1.2.3", "172.16.0.1", "172.31.255.254",
+                              "192.168.1.20", "169.254.3.4", "fe80::1", "fd12:3456::1", "fc00::1",
+                              "::ffff:192.168.0.2", "::ffff:127.0.0.1"})
+        CHECK(local_network_address(local));
+    for (const auto* remote : {"8.8.8.8", "172.15.255.255", "172.32.0.1", "100.64.0.1", "192.169.0.1",
+                               "11.0.0.1", "2001:4860::8888", "::ffff:8.8.8.8", "::", "0.0.0.0",
+                               "not-an-address", ""})
+        CHECK_FALSE(local_network_address(remote));
+}

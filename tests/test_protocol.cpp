@@ -313,6 +313,23 @@ TEST_CASE("Wire parser tolerates arbitrary byte splits and bounds the current ch
     REQUIRE_THROWS_AS(invalid_utf8.feed(bad, [](json::value) {}), Error);
 }
 
+TEST_CASE("Wire parser emits complete chunks before the enclosing response ends", "[protocol][stream-timing]") {
+    auto first = response_wire(one(json::array{nullptr, "first"}), 1);
+    auto second = response_wire(one(json::array{nullptr, "second"}), 1);
+    WireStreamParser parser;
+    std::vector<json::value> received;
+    auto emit = [&](json::value value) { received.push_back(std::move(value)); };
+    parser.feed(std::string(")]}'\n[[") + json::serialize(first), emit);
+    REQUIRE(received.size() == 1);
+    REQUIRE(received.front() == first);
+    parser.feed("," + json::serialize(second), emit);
+    REQUIRE(received.size() == 2);
+    REQUIRE(received.back() == second);
+    parser.feed("]]", emit);
+    parser.finish();
+    REQUIRE(received.size() == 2);
+}
+
 TEST_CASE("Content gate ignores metadata and merge preserves part boundaries", "[protocol]") {
     json::object aggregate;
     json::object metadata{{"responseId", "id"},

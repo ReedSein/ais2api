@@ -15,6 +15,10 @@ std::string wire_content_hash(const json::array &wire);
 enum class IdentityVerdict { pending, verified, mismatch, ambiguous };
 IdentityVerdict identity_verdict(const json::object &identity, std::string_view expected_email);
 json::array import_cookies(const json::array &cookies, std::size_t *skipped_partition_cookies = nullptr);
+// Cookies to persist after a verified session: the browser's current Google
+// cookies replace the stored Google ones; stored cookies for other domains and
+// partitioned cookies the browser cannot export are kept unchanged.
+json::array refreshed_cookies(const json::array &stored, const json::array &browser);
 }
 class BrowserGateway final : public GenerationBackend {
   public:
@@ -29,6 +33,7 @@ class BrowserGateway final : public GenerationBackend {
     void reconfigure(const Config &config) override;
     json::object verify_runtime(std::stop_token cancel = {});
     void close() override;
+    void reset_session() override;
 
   private:
     struct Impl;

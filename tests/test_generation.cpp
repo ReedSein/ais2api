@@ -44,12 +44,16 @@ json::object finish_event() {
 struct BackendState {
     std::atomic<unsigned> calls{0};
     std::atomic<bool> cancelled{false};
+    std::atomic<bool> continue_stream{false};
+    std::atomic<bool> stream_continued{false};
     std::mutex mutex;
     json::object request;
     json::array wire;
     std::string account_id;
     std::vector<std::string> attempted_accounts;
     std::vector<std::string> probed_accounts;
+    std::atomic<unsigned> session_resets{0};
+    std::atomic<unsigned> browser_closes{0};
 };
 
 class SyntheticBackend final : public GenerationBackend {
@@ -74,6 +78,20 @@ public:
             throw Error(404, "upstream_error", "Synthetic model missing");
         if (request.model == "synthetic-unknown-tier")
             throw Error(403, "benefit_tier_unconfirmed", "Synthetic unknown account benefit");
+        // Failure modes for the account recovery policy (`-once` fails only the
+        // first attempt; others fail every attempt).
+        if ((request.model == "synthetic-permission-once" && attempt == 1) || request.model == "synthetic-permission-always")
+            throw Error(403, "permission_denied", "Synthetic BotGuard rejection");
+        if (request.model == "synthetic-upstream-auth")
+            throw Error(401, "upstream_auth", "Synthetic RPC authentication failure");
+        if (request.model == "synthetic-session-expired")
+            throw Error(401, "session_expired", "Synthetic sign-in redirect");
+        if (request.model == "synthetic-identity-mismatch")
+            throw Error(401, "identity_mismatch", "Synthetic different Google account");
+        if ((request.model == "synthetic-server-error-once" && attempt == 1) || request.model == "synthetic-server-error-always")
+            throw Error(503, "upstream_error", "Synthetic overloaded upstream");
+        if ((request.model == "synthetic-incompatible-once" && attempt == 1) || request.model == "synthetic-incompatible-always")
+            throw Error(502, "browser_incompatible", "Synthetic page bridge failure");
         if (request.model == "synthetic-model-rate" && attempt == 1) {
             Error error(429, "rate_limit", "Synthetic model quota");
             error.quota_scope = "minute";
@@ -90,6 +108,20 @@ public:
                 std::this_thread::sleep_for(5ms);
             check_cancel(cancel);
             throw Error(504, "synthetic_cancel_timeout", "Cancellation did not reach backend");
+        }
+        if (request.model == "synthetic-gated-stream") {
+            emit(text_event("hello "));
+            const auto deadline = Clock::now() + 10s;
+            while (!state_->continue_stream.load()) {
+                check_cancel(cancel);
+                if (Clock::now() >= deadline)
+                    throw Error(504, "synthetic_gate_timeout", "Client did not receive the first SSE event");
+                std::this_thread::sleep_for(5ms);
+            }
+            state_->stream_continued = true;
+            emit(text_event("world"));
+            emit(finish_event());
+            return;
         }
         if (request.model == "synthetic-native-parts") {
             auto thought = text_event("thinking");
@@ -138,7 +170,8 @@ public:
         return {{"ok", true}, {"status", "ok"}};
     }
     json::object diagnostics() override { return {{"synthetic", true}}; }
-    void close() override {}
+    void close() override { ++state_->browser_closes; }
+    void reset_session() override { ++state_->session_resets; }
 
 private:
     std::shared_ptr<BackendState> state_;
@@ -371,6 +404,50 @@ TEST_CASE("Gemini unary HTTP preserves multiple turns and aggregates synthetic e
         REQUIRE(turns[2].as_object().at("parts").as_array()[0].as_object().at("text") == "follow-up");
         REQUIRE_FALSE(server.state->account_id.empty());
     }
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Gemini SSE reaches the client before backend generation can finish", "[generation][http][stream-timing]") {
+    GenerationServer server;
+    net::io_context io;
+    tcp::socket socket(io);
+    socket.connect({net::ip::make_address("127.0.0.1"), server.config.port});
+    receive_timeout(socket);
+    auto request = server.request("/v1beta/models/synthetic-gated-stream:streamGenerateContent?alt=sse",
+        R"({"contents":[{"parts":[{"text":"hello"}]}]})");
+    http::write(socket, request);
+    boost::beast::flat_buffer input;
+    http::response_parser<http::buffer_body> parser;
+    http::read_header(socket, input, parser);
+    REQUIRE(parser.get().result_int() == 200);
+    REQUIRE(parser.get()[http::field::content_type].starts_with("text/event-stream"));
+    std::string body;
+    auto read_body = [&] {
+        std::array<char, 1024> bytes{};
+        parser.get().body().data = bytes.data();
+        parser.get().body().size = bytes.size();
+        boost::system::error_code error;
+        http::read_some(socket, input, parser, error);
+        if (error && error != http::error::need_buffer)
+            throw boost::system::system_error(error);
+        body.append(bytes.data(), bytes.size() - parser.get().body().size);
+    };
+    // The producer cannot send the second event or finish until the client has
+    // decoded a complete first SSE record. Buffering until completion deadlocks
+    // here and fails within the socket receive timeout.
+    while (body.find("\n\n") == std::string::npos && !parser.is_done()) read_body();
+    auto first = sse_records(body);
+    REQUIRE(first.size() == 1);
+    REQUIRE(json::parse(first[0]) == text_event("hello "));
+    REQUIRE_FALSE(parser.is_done());
+    REQUIRE_FALSE(server.state->stream_continued.load());
+    server.state->continue_stream = true;
+    while (!parser.is_done()) read_body();
+    auto records = sse_records(body);
+    REQUIRE(records.size() == 3);
+    REQUIRE(json::parse(records[1]) == text_event("world"));
+    REQUIRE(json::parse(records[2]) == finish_event());
+    REQUIRE(server.state->stream_continued.load());
     REQUIRE_FALSE(server.failed);
 }
 
@@ -784,7 +861,7 @@ TEST_CASE("Recoverable route and first empty responses retry the same account wi
     for (const auto& [model, calls, status] : std::vector<std::tuple<std::string, unsigned, unsigned>>{
              {"synthetic-route-retry", 3, 200}, {"synthetic-route-always", 3, 404},
              {"synthetic-empty-once", 2, 200}, {"synthetic-empty-always", 2, 502},
-             {"synthetic-ordinary-not-found", 1, 404}, {"synthetic-unknown-tier", 1, 403}}) {
+             {"synthetic-ordinary-not-found", 1, 404}, {"synthetic-unknown-tier", 2, 403}}) {
         GenerationServer server;
         auto response = server.call("/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"question"}]}]})");
         INFO(model);
@@ -950,5 +1027,150 @@ TEST_CASE("Probe-all records one expired session and continues probing healthy a
     auto not_ready = server.call("/ready", {}, http::verb::get);
     REQUIRE(not_ready.result_int() == 503);
     REQUIRE(json::parse(not_ready.body()).as_object().at("ready") == false);
+    REQUIRE_FALSE(server.failed);
+}
+
+namespace {
+json::object account_entry(Store& store, const std::string& id) {
+    for (auto& value : store.account_status())
+        if (string_or(value.as_object(), "id") == id) return value.as_object();
+    FAIL("account missing: " << id);
+    return {};
+}
+bool has_cooldown(const json::object& account, std::string_view model) {
+    for (const auto& failure : account.at("failures").as_array())
+        if (string_or(failure.as_object(), "model") == model &&
+            failure.as_object().at("until").to_number<std::int64_t>() > unix_seconds())
+            return true;
+    return false;
+}
+http::response<http::string_body> generate_once(GenerationServer& server, const std::string& model) {
+    return server.call("/v1beta/models/" + model + ":generateContent", R"({"contents":[{"parts":[{"text":"question"}]}]})");
+}
+}
+
+TEST_CASE("A BotGuard 403 rebuilds the session in place before penalizing the account", "[generation][http][recovery]") {
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-permission-once");
+    REQUIRE(response.result_int() == 200);
+    const auto& attempts = server.state->attempted_accounts;
+    REQUIRE(attempts.size() == 2);
+    CHECK(attempts[0] == attempts[1]);
+    CHECK(server.state->session_resets == 1);
+    CHECK(server.state->browser_closes == 0);
+    Store store(server.config.data_dir);
+    CHECK_FALSE(has_cooldown(account_entry(store, attempts[0]), "synthetic-permission-once"));
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("A repeated 403 after rebuilding cools the model and switches without restarting the browser", "[generation][http][recovery]") {
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-permission-always");
+    REQUIRE(response.result_int() == 403);
+    const auto& attempts = server.state->attempted_accounts;
+    REQUIRE(attempts.size() == 3);
+    CHECK(attempts[0] == attempts[1]);
+    CHECK(attempts[2] != attempts[0]);
+    CHECK(server.state->session_resets == 1);
+    CHECK(server.state->browser_closes == 0);
+    Store store(server.config.data_dir);
+    for (const auto& id : {attempts[0], attempts[2]}) {
+        auto account = account_entry(store, id);
+        CHECK(has_cooldown(account, "synthetic-permission-always"));
+        CHECK_FALSE(account.at("expired").as_bool());
+    }
+    // A different model on the same accounts is unaffected.
+    CHECK(store.choose("another-model"));
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("RPC authentication failures cool accounts briefly instead of expiring them", "[generation][http][recovery]") {
+    for (const std::string model : {"synthetic-upstream-auth", "synthetic-identity-mismatch"}) {
+        GenerationServer server;
+        INFO(model);
+        auto response = generate_once(server, model);
+        REQUIRE(response.result_int() == 401);
+        Store store(server.config.data_dir);
+        for (const auto& id : server.state->attempted_accounts) {
+            auto account = account_entry(store, id);
+            CHECK_FALSE(account.at("expired").as_bool());
+            CHECK(has_cooldown(account, "*"));
+        }
+        // Identity confusion is deterministic: it switches without a rebuild.
+        CHECK(server.state->session_resets == (model == "synthetic-upstream-auth" ? 1u : 0u));
+        CHECK(server.state->browser_closes == 0);
+        REQUIRE_FALSE(server.failed);
+    }
+}
+
+TEST_CASE("A sign-in redirect expires an account only after a fresh session also redirects", "[generation][http][recovery]") {
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-session-expired");
+    REQUIRE(response.result_int() == 401);
+    const auto& attempts = server.state->attempted_accounts;
+    REQUIRE(attempts.size() == 3);
+    CHECK(attempts[0] == attempts[1]);
+    CHECK(server.state->session_resets == 1);
+    Store store(server.config.data_dir);
+    // Both accounts redirected on a fresh session (the second account's session
+    // is new by construction), so both are reported expired.
+    CHECK(account_entry(store, attempts[0]).at("expired").as_bool());
+    CHECK(account_entry(store, attempts[2]).at("expired").as_bool());
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Upstream server errors retry the same account without cooldown", "[generation][http][recovery]") {
+    {
+        GenerationServer server;
+        auto response = generate_once(server, "synthetic-server-error-once");
+        REQUIRE(response.result_int() == 200);
+        const auto& attempts = server.state->attempted_accounts;
+        REQUIRE(attempts.size() == 2);
+        CHECK(attempts[0] == attempts[1]);
+        CHECK(server.state->session_resets == 0);
+        CHECK(server.state->browser_closes == 0);
+        REQUIRE_FALSE(server.failed);
+    }
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-server-error-always");
+    REQUIRE(response.result_int() == 503);
+    const auto& attempts = server.state->attempted_accounts;
+    REQUIRE(attempts.size() == 3);
+    for (const auto& id : attempts) CHECK(id == attempts.front());
+    Store store(server.config.data_dir);
+    auto account = account_entry(store, attempts.front());
+    CHECK_FALSE(has_cooldown(account, "synthetic-server-error-always"));
+    CHECK_FALSE(account.at("expired").as_bool());
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("A browser failure restarts the browser once and keeps the account", "[generation][http][recovery]") {
+    {
+        GenerationServer server;
+        auto response = generate_once(server, "synthetic-incompatible-once");
+        REQUIRE(response.result_int() == 200);
+        const auto& attempts = server.state->attempted_accounts;
+        REQUIRE(attempts.size() == 2);
+        CHECK(attempts[0] == attempts[1]);
+        CHECK(server.state->browser_closes == 1);
+        REQUIRE_FALSE(server.failed);
+    }
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-incompatible-always");
+    REQUIRE(response.result_int() == 502);
+    REQUIRE(server.state->attempted_accounts.size() == 2);
+    CHECK(server.state->browser_closes == 1);
+    Store store(server.config.data_dir);
+    CHECK_FALSE(has_cooldown(account_entry(store, server.state->attempted_accounts.front()), "synthetic-incompatible-always"));
+    REQUIRE_FALSE(server.failed);
+}
+
+TEST_CASE("Quota failover switches accounts without restarting the browser", "[generation][http][recovery]") {
+    GenerationServer server;
+    auto response = generate_once(server, "synthetic-model-rate");
+    REQUIRE(response.result_int() == 200);
+    REQUIRE(server.state->attempted_accounts.size() == 2);
+    CHECK(server.state->browser_closes == 0);
+    CHECK(server.state->session_resets == 0);
     REQUIRE_FALSE(server.failed);
 }

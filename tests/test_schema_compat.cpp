@@ -6,6 +6,7 @@
 
 #include "ais2api/schema.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <utility>
 
 using namespace ais2api;
 namespace {
@@ -95,4 +96,39 @@ TEST_CASE("Unsupported schema siblings cannot hide invalid references", "[schema
         R"({"type":"object","properties":{"a":true,"b":{"$ref":"#","type":"string"}}})"})
         require_invalid_schema(schema_object(text));
     REQUIRE_THROWS_AS(prepare_schema(schema_object(R"({"type":"object","properties":{"a":true,"b":{"$ref":"#"}}})"), nullptr, "schema", true), UnsupportedSchema);
+}
+
+TEST_CASE("Local schema refs decode URI fragments before JSON Pointer tokens", "[schema][ref]") {
+    auto schema = schema_object(R"({"$defs":{
+        "A B":{"type":"string"},"A%20B":{"type":"integer"},
+        "\u732b":{"type":"boolean"},"100%":{"type":"number"},
+        "a/b~c":{"type":"array","items":{"type":"string"}},
+        "outer":{"$defs":{"inner":{"type":"object"}}},
+        "outer/$defs/inner":{"type":"integer"}
+    },"type":"object","properties":{}})");
+    for (const auto &[ref, type] : {
+        std::pair{"#/$defs/A%20B", "string"},
+        std::pair{"#/$defs/A%2520B", "integer"},
+        std::pair{"#/$defs/%e7%8c%ab", "boolean"},
+        std::pair{"#/$defs/100%25", "number"},
+        std::pair{"#/$defs/a%7E1b%7e0c", "array"},
+        std::pair{"#%2F$defs%2Fouter%2F$defs%2Finner", "object"},
+        std::pair{"#/$defs/outer~1$defs~1inner", "integer"}}) {
+        CAPTURE(ref);
+        schema.at("properties").as_object()["value"] = json::object{{"$ref", ref}};
+        for (bool compatibility : {false, true}) {
+            auto result = prepare_schema(schema, nullptr, "schema", compatibility);
+            REQUIRE(result.at("properties").as_object().at("value").as_object().at("type") == type);
+        }
+    }
+}
+
+TEST_CASE("Encoded local schema refs retain malformed and recursive reference policy", "[schema][ref]") {
+    for (auto ref : {"#/$defs/%", "#/$defs/%2", "#/$defs/%GG", "#/$defs/%7E2", "#/$defs/%7E"}) {
+        CAPTURE(ref);
+        require_invalid_schema(json::object{{"$defs", json::object{}}, {"$ref", ref}});
+    }
+    auto recursive = schema_object(R"({"$defs":{"A B":{"type":"object","properties":{"next":{"$ref":"#/$defs/A%20B"}}}},"$ref":"#/$defs/A%20B"})");
+    REQUIRE_THROWS_AS(prepare_schema(recursive), UnsupportedSchema);
+    REQUIRE_THROWS_AS(prepare_schema(recursive, nullptr, "schema", true), UnsupportedSchema);
 }

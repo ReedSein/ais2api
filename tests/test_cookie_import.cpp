@@ -84,6 +84,71 @@ TEST_CASE("legacy userscript header keeps Google RPC authentication cookies scri
     result = probe_cookie_import({{"cookies", json::array{exact}}, {"auth_user", "0"}}, 8, backend);
     CHECK(bool_or(result.accounts[0].storage_state.at("cookies").as_array()[0].as_object(), "httpOnly"));
 }
+TEST_CASE("metadata-bearing cookie text preserves Netscape and JSON provenance") {
+    const std::string netscape = "\xEF\xBB\xBF# Netscape HTTP Cookie File\n"
+        "aistudio.google.com\tFALSE\t/\tTRUE\t0\t__Host-Synthetic\thost\n"
+        "#HttpOnly_accounts.google.com\tFALSE\t/specific\tTRUE\t1234\tSAPISID\tsecret\n"
+        "accounts.google.com\tFALSE\t/\tTRUE\t0\tOSID\tosid\n";
+    auto state = Store::normalize_storage_state(json::string(netscape));
+    for (const auto &input : {json::value(netscape), json::value(json::serialize(state)),
+                              json::value(json::serialize(state.at("cookies"))), json::value(state)}) {
+        ImportBackend backend; backend.replies = {verified("one@example.com")};
+        auto result = probe_cookie_import({{"cookies", input}, {"auth_user", "0"}}, 8, backend);
+        CHECK(result.accounts[0].storage_state == state);
+        CHECK(backend.candidates[0].storage_state == state);
+        CHECK(result.details.at("skipped_host_cookies") == 0);
+    }
+    // Semicolons in structured values are data, not a count of header credentials.
+    state.at("cookies").as_array()[0].as_object()["value"] = std::string(600, ';');
+    ImportBackend backend; backend.replies = {verified("one@example.com")};
+    CHECK_NOTHROW(probe_cookie_import({{"cookies", json::serialize(state)}, {"auth_user", "0"}}, 8, backend));
+}
+TEST_CASE("wrapped raw cookie headers retain compensation and outer validation") {
+    json::object wrapped{{"cookies", "SID=x; OSID=y; __Host-X=z"}};
+    for (const auto &input : {json::value(wrapped), json::value(json::serialize(wrapped))}) {
+        ImportBackend backend; backend.replies = {verified("one@example.com")};
+        auto result = probe_cookie_import({{"storage_state", input}, {"auth_user", "0"}}, 8, backend);
+        const auto &cookies = result.accounts[0].storage_state.at("cookies").as_array();
+        REQUIRE(cookies.size() == 2);
+        CHECK_FALSE(bool_or(cookies[0].as_object(), "httpOnly"));
+        CHECK(cookies[1].as_object().at("domain") == "aistudio.google.com");
+        CHECK(result.details.at("skipped_host_cookies") == 1);
+    }
+    wrapped["origins"] = json::array{json::object{{"origin", "https://google.com"}}};
+    for (const auto &input : {json::value(wrapped), json::value(json::serialize(wrapped))}) {
+        ImportBackend backend;
+        CHECK_THROWS(probe_cookie_import({{"storage_state", input}}, 8, backend));
+        CHECK(backend.candidates.empty());
+    }
+}
+TEST_CASE("JSON cookie text retains structured import security validation") {
+    const json::object base{{"name", "OSID"}, {"value", "synthetic"}, {"domain", "accounts.google.com"}};
+    for (const auto &field : {"partitionKey", "partitionKeyOpaque", "partitioned", "firstPartyDomain", "domain"}) {
+        auto cookie = base;
+        if (std::string_view(field) == "partitionKeyOpaque" || std::string_view(field) == "partitioned")
+            cookie[field] = true;
+        else cookie[field] = std::string_view(field) == "domain" ? "evilgoogle.com" : "https://google.com";
+        json::object state{{"cookies", json::array{cookie}}};
+        for (const auto &input : {json::value(state), json::value(json::serialize(state))}) {
+            ImportBackend backend;
+            CHECK_THROWS(probe_cookie_import({{"cookies", input}}, 8, backend));
+            CHECK(backend.candidates.empty());
+        }
+    }
+    for (const auto &cookies : {json::value(json::array{base}), json::value("SID=synthetic")}) {
+        json::object state{{"cookies", cookies}, {"origins", json::array{json::object{{"origin", "https://google.com"}}}}};
+        for (const auto &input : {json::value(state), json::value(json::serialize(state))}) {
+            ImportBackend backend;
+            CHECK_THROWS(probe_cookie_import({{"storage_state", input}}, 8, backend));
+            CHECK(backend.candidates.empty());
+        }
+    }
+    ImportBackend backend;
+    json::object nested{{"cookies", json::array{base}}, {"origins", json::array{json::object{{"origin", "https://google.com"}}}}};
+    CHECK_THROWS(probe_cookie_import({{"storage_state", json::object{{"cookies", json::serialize(nested)}}}}, 8, backend));
+    CHECK_THROWS(probe_cookie_import({{"cookies", "evilgoogle.com\tFALSE\t/\tTRUE\t0\tOSID\tsynthetic\n"}}, 8, backend));
+    CHECK(backend.candidates.empty());
+}
 TEST_CASE("cookie import distinguishes safe browser failures without leaking exception text") {
     for (const auto &[code, status] : std::vector<std::pair<std::string, int>>{
         {"browser_not_configured", 503}, {"browser_launch", 502}, {"browser_timeout", 504},
@@ -157,5 +222,27 @@ TEST_CASE("cookie import bounds normalized and refreshed credentials and sanitiz
     for (auto value : {json::value(-1), json::value(2.5), json::value("private-cookie")}) {
         backend.candidates.clear(); backend.replies[0]["skippedPartitionCookies"] = value;
         CHECK(probe_cookie_import(input, 8, backend).details.at("skipped_partition_cookies") == 0);
+    }
+}
+TEST_CASE("cookie parser bounds every import format before probing") {
+    std::string header, netscape;
+    json::array cookies;
+    json::object mapped;
+    for (unsigned i = 0; i < 513; ++i) {
+        auto name = "SID" + std::to_string(i);
+        header += name + "=x;";
+        netscape += ".google.com\tTRUE\t/\tTRUE\t0\t" + name + "\tx\n";
+        cookies.push_back(json::object{{"name", name}, {"value", "x"}, {"domain", ".google.com"}});
+        mapped[name] = "x";
+    }
+    for (const auto &input : {json::value(header), json::value(netscape), json::value(cookies),
+                             json::value(json::serialize(cookies)), json::value(json::object{{"cookies", mapped}}),
+                             json::value(json::object{{"cookies", header}})}) {
+        ImportBackend backend;
+        try { probe_cookie_import({{"cookies", input}}, 8, backend); FAIL("expected cookie count limit"); }
+        catch (const Error &e) { CHECK(e.status == 413); CHECK(e.code == "cookie_import_limit"); }
+        CHECK(backend.candidates.empty());
+        // General storage normalization remains unlimited unless the caller opts in.
+        CHECK(Store::normalize_storage_state(input).at("cookies").as_array().size() == 513);
     }
 }

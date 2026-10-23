@@ -167,6 +167,11 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   Config c;
   c.config_file = fs::absolute(file.empty() ? default_directory() / "config.json" : file).lexically_normal();
   c.data_dir = default_directory() / "data";
+  // A brand-new installation starts with the well-known management password;
+  // the service forces it to be replaced on first sign-in. Existing files keep
+  // their stored value, including an empty key that disables management.
+  if (!fs::exists(c.config_file))
+    c.admin_key = std::string(default_admin_key);
   bool explicit_browser = false;
   auto o = c.to_json();
   std::optional<json::object> upgraded;
@@ -352,6 +357,8 @@ Config Config::patched(const json::object& patch) const {
   for (auto key : {"api_key", "admin_key", "cookie_import_key"})
     if (auto value = patch.if_contains(key); value && value->is_string() && value->as_string() == "***")
       throw Error(400, "invalid_config", "Redacted secrets cannot be saved");
+  if (auto value = patch.if_contains("admin_key"); value && value->is_string() && value->as_string() == default_admin_key)
+    throw Error(400, "admin_password_invalid", "The default management password cannot be configured");
   // Only limits merge recursively. Model maps and arrays replace the old value.
   return parse_config(*this, std::move(o), true);
 }
@@ -460,6 +467,38 @@ std::optional<std::string> Config::authenticate_cookie_import(std::string_view s
   if (CRYPTO_memcmp(expected.data(), presented.data(), expected.size()) != 0)
     return std::nullopt;
   return "cookie-import-key-" + expected;
+}
+void validate_admin_password(std::string_view next, std::string_view current) {
+  if (next.size() < 8 || next.size() > 4096 ||
+      std::any_of(next.begin(), next.end(), [](unsigned char ch) { return ch < 33 || ch > 126; }))
+    throw Error(400, "admin_password_invalid",
+                "The management password must be 8..4096 visible ASCII characters without whitespace");
+  if (next == default_admin_key)
+    throw Error(400, "admin_password_invalid", "The default management password cannot be reused");
+  if (next == current)
+    throw Error(400, "admin_password_invalid", "The new management password must differ from the current one");
+}
+bool local_network_address(std::string_view text) {
+  namespace ip = boost::asio::ip;
+  boost::system::error_code ec;
+  auto address = ip::make_address(std::string(text), ec);
+  if (ec) return false;
+  if (address.is_v6()) {
+    const auto v6 = address.to_v6();
+    if (!v6.is_v4_mapped()) {
+      const auto bytes = v6.to_bytes();
+      // ::1, fe80::/10 link-local and fc00::/7 unique local addresses.
+      return v6.is_loopback() || v6.is_link_local() || (bytes[0] & 0xfe) == 0xfc;
+    }
+    address = ip::make_address_v4(ip::v4_mapped, v6);
+  }
+  const auto value = address.to_v4().to_uint();
+  const auto within = [value](std::uint32_t network, unsigned bits) {
+    return (value >> (32 - bits)) == (network >> (32 - bits));
+  };
+  // Loopback, RFC 1918 private ranges and 169.254/16 link-local.
+  return within(0x7f000000, 8) || within(0x0a000000, 8) || within(0xac100000, 12) ||
+         within(0xc0a80000, 16) || within(0xa9fe0000, 16);
 }
 std::optional<std::string> Config::authenticate_admin(std::string_view secret) const {
   if (admin_key.empty() || secret.empty() || secret.size() > 4096) return std::nullopt;

@@ -19,7 +19,7 @@
     "/auth/check": {
       "get": {
         "operationId": "get_auth_check",
-        "summary": "Validate management credential",
+        "summary": "Validate management credential and report whether the default password must be replaced",
         "responses": {
           "200": {
             "description": "Success",
@@ -27,6 +27,18 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "properties": {
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "api_version": {
+                      "type": "string"
+                    },
+                    "password_change_required": {
+                      "type": "boolean",
+                      "description": "True while the default password admin is active; all other routes return 403 admin_password_change_required."
+                    }
+                  },
                   "additionalProperties": true
                 }
               }
@@ -34,6 +46,57 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled, disallowed Origin, or default password used from a non-local peer"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        }
+      }
+    },
+    "/auth/password": {
+      "post": {
+        "operationId": "post_auth_password",
+        "summary": "Replace the management password; applies immediately and persists to config.json",
+        "responses": {
+          "200": {
+            "description": "Changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "changed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "changed"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, or admin_password_invalid: not 8..4096 visible ASCII, the default admin, or unchanged",
             "content": {
               "application/json": {
                 "schema": {
@@ -56,6 +119,31 @@
           },
           "429": {
             "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "password"
+                ],
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 4096,
+                    "pattern": "^[!-~]+$",
+                    "not": {
+                      "const": "admin"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -674,6 +762,189 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/accounts/{id}/fingerprint": {
+      "get": {
+        "operationId": "get_accounts_id_fingerprint",
+        "summary": "Read the permanent browser fingerprint",
+        "responses": {
+          "200": {
+            "description": "Fingerprint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Fingerprint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "patch_accounts_id_fingerprint",
+        "summary": "Override or reset fingerprint timezone/locale (null restores host default)",
+        "responses": {
+          "200": {
+            "description": "Fingerprint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Fingerprint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin Bearer"
+          },
+          "403": {
+            "description": "Management disabled or disallowed Origin"
+          },
+          "404": {
+            "description": "Resource or route does not exist"
+          },
+          "409": {
+            "description": "Restart needed, invalid state or truncated log"
+          },
+          "429": {
+            "description": "Queue, operation or memory admission limit"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "timezone": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "locale": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{id}/fingerprint/regenerate": {
+      "post": {
+        "operationId": "post_accounts_id_fingerprint_regenerate",
+        "summary": "Assign a new fingerprint seed",
+        "responses": {
+          "200": {
+            "description": "Fingerprint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Fingerprint"
                 }
               }
             }
@@ -2114,6 +2385,20 @@
           },
           "expired": {
             "type": "boolean"
+          },
+          "fingerprint": {
+            "type": "object",
+            "properties": {
+              "seed": {
+                "type": "integer"
+              },
+              "timezone": {
+                "type": "string"
+              },
+              "locale": {
+                "type": "string"
+              }
+            }
           }
         },
         "additionalProperties": true
@@ -2567,7 +2852,7 @@
             "default": "",
             "maxLength": 4096,
             "pattern": "^[!-~]*$",
-            "description": "Independent management Bearer secret; empty disables HTTP management. Redacted in management output."
+            "description": "Independent management Bearer secret; empty disables HTTP management. Newly created configurations use the default 'admin', which only works from local networks and must be replaced before other management use; patches cannot set it back to 'admin'. Redacted in management output."
           },
           "admin_origins": {
             "type": "array",
@@ -2604,6 +2889,54 @@
         },
         "required": [
           "sources"
+        ]
+      },
+      "Fingerprint": {
+        "type": "object",
+        "properties": {
+          "seed": {
+            "type": "integer",
+            "minimum": 10000,
+            "maximum": 99999,
+            "description": "Permanent CloakBrowser seed"
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "windows",
+              "macos"
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "description": "Stored IANA override; empty follows the host"
+          },
+          "locale": {
+            "type": "string",
+            "description": "Stored BCP 47 override; empty follows the host"
+          },
+          "effective_timezone": {
+            "type": "string"
+          },
+          "effective_locale": {
+            "type": "string"
+          },
+          "host_timezone": {
+            "type": "string"
+          },
+          "host_locale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seed",
+          "platform",
+          "timezone",
+          "locale",
+          "effective_timezone",
+          "effective_locale",
+          "host_timezone",
+          "host_locale"
         ]
       }
     }

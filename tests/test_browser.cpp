@@ -11,6 +11,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <future>
+#include <map>
 #include <thread>
 
 using namespace ais2api;
@@ -354,4 +355,28 @@ TEST_CASE("snapshot hash follows encoded contents including expanded attachments
     request.model = "test";
     request.gemini = json::parse(R"({"contents":[{"role":"user","parts":[{"functionResponse":{"name":"fn","response":{},"parts":[{"text":"attached"},{"inlineData":{"mimeType":"image/png","data":"YWJj"}}]}}]}]})").as_object();
     REQUIRE(browser_detail::wire_content_hash(encode_request(request, {}, "")) == sha256(" attached YWJj"));
+}
+
+TEST_CASE("verified cookie write-back keeps unexported cookies and refuses signed-out exports", "[cookie-refresh]") {
+    const json::array stored{
+        json::object{{"name", "SID"}, {"value", "old"}, {"domain", ".google.com"}},
+        json::object{{"name", "SAPISID"}, {"value", "old"}, {"domain", ".google.com"}},
+        json::object{{"name", "partitioned"}, {"value", "keep"}, {"domain", ".google.com"},
+                     {"partitionKey", json::object{{"topLevelSite", "https://google.com"}}}},
+        json::object{{"name", "VISITOR"}, {"value", "keep"}, {"domain", ".youtube.com"}}};
+    const json::array browser{
+        json::object{{"name", "SID"}, {"value", "new"}, {"domain", ".google.com"}, {"httpOnly", true}},
+        json::object{{"name", "SAPISID"}, {"value", "new"}, {"domain", ".google.com"}},
+        json::object{{"name", "__Secure-1PSIDTS"}, {"value", "rotated"}, {"domain", ".google.com"}},
+        json::object{{"name", "tracker"}, {"value", "drop"}, {"domain", ".example.com"}}};
+    auto merged = browser_detail::refreshed_cookies(stored, browser);
+    std::map<std::string, std::string> values;
+    for (const auto& cookie : merged)
+        values[string_or(cookie.as_object(), "name")] = string_or(cookie.as_object(), "value");
+    CHECK(values == std::map<std::string, std::string>{
+        {"SID", "new"}, {"SAPISID", "new"}, {"__Secure-1PSIDTS", "rotated"}, {"partitioned", "keep"}, {"VISITOR", "keep"}});
+    // A signed-out browser keeps no API/session pair: never persist it.
+    CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[2]}).empty());
+    CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[0]}).empty());
+    CHECK(browser_detail::refreshed_cookies(stored, json::array{browser[1]}).empty());
 }

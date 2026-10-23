@@ -20,5 +20,8 @@ class GenerationBackend {
     virtual json::object diagnostics() = 0;
     virtual void reconfigure(const Config &) {}
     virtual void close() = 0;
+    // Discard the resident account's page and BotGuard session so the next
+    // request rebuilds it in place, keeping the browser process when possible.
+    virtual void reset_session() { close(); }
 };
 } // namespace ais2api

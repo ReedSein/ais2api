@@ -90,7 +90,7 @@ Responses 使用无状态完整历史模式，不提供服务端响应存储、`
 
 ## 前端管理 API
 
-在 `config.json` 设置独立的 `admin_key` 后重启，或通过 CLI 执行 `config reload`。管理请求使用 `Authorization: Bearer ADMIN_KEY`，默认空密钥禁用。前端跨域开发需在 `admin_origins` 中列出精确的来源（例如 `http://localhost:5173`）。
+新创建的配置（`init` 或首次无配置启动）默认管理密码为 `admin`：它只能从本机或局域网（回环、RFC 1918 私有地址、链路本地、IPv6 ULA）使用，且登录后除修改密码外的管理请求都会被拒绝（`403 admin_password_change_required`），直到通过控制台或 `POST /api/admin/v1/auth/password` 设置新密码。已有配置保持原值；`admin_key` 为空仍表示禁用管理 API。也可在 `config.json` 中直接设置独立的 `admin_key` 后重启，或通过 CLI 执行 `config reload`。管理请求使用 `Authorization: Bearer ADMIN_KEY`。前端跨域开发需在 `admin_origins` 中列出精确的来源（例如 `http://localhost:5173`）。
 
 `/api/admin/v1/` 提供账号导入、启停、改名、切换、探测与删除，轮转及冷却管理，统计，模型发现，配置校验/保存，API 密钥管理及诊断。`GET /logs` 可分页读完整历史；`GET /logs/stream` 通过 SSE 补读后持续推送，支持游标断线续读。`GET /logs/sources` 列出服务及浏览器日志，也可从前端逐文件实时读取全部字节。日志不自动按最近 N 条截断。
 
