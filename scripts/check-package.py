@@ -21,6 +21,8 @@ spec.loader.exec_module(bundle)
 
 TERMUX_PREFIX = '/data/data/com.termux/files/usr'
 ANDROID_LIBRARIES = {'libc.so', 'libdl.so', 'libm.so', 'liblog.so', 'libandroid.so'}
+# Termux packages whose header/static code is compiled into the executable.
+TERMUX_EMBEDDED_NOTICES = frozenset({'boost', 'libc++'})
 
 
 def termux_soname(name: str) -> str:
@@ -110,7 +112,7 @@ def check_termux(relative, read) -> None:
             raise ValueError('invalid_termux_package')
     # Header/static code is distributed inside the executable. Shared libraries
     # stay in Termux's package manager and must declare their notice availability.
-    required_licenses, runtime_packages = {'boost', 'libc++'}, set()
+    required_licenses, runtime_packages = set(TERMUX_EMBEDDED_NOTICES), set()
     required_libraries = {termux_soname(name) for name in actual['needed']}
     for name, library in libraries.items():
         if termux_soname(name) != name or not isinstance(library, dict):
