@@ -39,6 +39,11 @@ const REASONS: Record<string, string> = {
   memory_budget: '后端请求内存预算已耗尽，请稍后再试。',
   backend_unreachable: '代理无法连接到 ais2api 后端。',
   keys_managed_in_config: '该密钥由配置文件管理。',
+  admin_password_change_required: '当前仍在使用默认管理密码，请先修改密码。',
+  admin_default_password_remote:
+    '默认管理密码 admin 只能在本机或局域网内使用。请在本机或局域网内登录并修改密码，或在 config.json 中直接设置 admin_key。',
+  admin_password_invalid: '新密码不符合要求：需 8–4096 个可见 ASCII 字符（不含空格），且不能是 admin 或与当前密码相同。',
+  invalid_password: '请求格式无效：只需提供新密码。',
 }
 
 export function describeError(error: unknown): string {
@@ -107,6 +112,8 @@ export async function rawRequest(method: string, path: string, options: RequestO
     const error = await parseError(response)
     // A rejected key while signed in ends the session (key rotated or revoked).
     if (response.status === 401 && options.adminKey === undefined && session.adminKey) signOut('管理密钥已失效，请重新登录。')
+    // The default password only unlocks the password change; App routes there.
+    if (error.reason === 'admin_password_change_required' && session.adminKey) session.mustChangePassword = true
     throw error
   }
   return response

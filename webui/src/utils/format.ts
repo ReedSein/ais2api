@@ -42,12 +42,22 @@ const dateTime = new Intl.DateTimeFormat('zh-CN', {
 })
 const timeOnly = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 
+/**
+ * Deadlines beyond year 9999 mean "no expiry": the backend stores INT64_MAX
+ * for permission cooldowns, which is also outside the JavaScript Date range
+ * (formatting such a Date throws a RangeError).
+ */
+export const isIndefinite = (unix: number) => unix >= 253402300800
+
 /** Unix seconds → local date-time. */
-export const formatTimestamp = (unix: number | undefined | null) => (unix ? dateTime.format(new Date(unix * 1000)) : '—')
-export const formatTime = (unix: number | undefined | null) => (unix ? timeOnly.format(new Date(unix * 1000)) : '—')
+export const formatTimestamp = (unix: number | undefined | null) =>
+  !unix ? '—' : isIndefinite(unix) ? '无限期' : dateTime.format(new Date(unix * 1000))
+export const formatTime = (unix: number | undefined | null) =>
+  !unix ? '—' : isIndefinite(unix) ? '无限期' : timeOnly.format(new Date(unix * 1000))
 
 export function formatRelative(unix: number | undefined | null, now = Date.now() / 1000): string {
   if (!unix) return '—'
+  if (isIndefinite(unix)) return '无限期'
   const diff = unix - now
   const abs = Math.abs(diff)
   const text = abs < 60 ? `${Math.round(abs)} 秒` : abs < 3600 ? `${Math.round(abs / 60)} 分钟` : abs < 86400 ? `${Math.round(abs / 3600)} 小时` : `${Math.round(abs / 86400)} 天`

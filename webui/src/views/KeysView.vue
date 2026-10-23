@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import EmptyState from '../components/EmptyState.vue'
 import FDialog from '../components/FDialog.vue'
 import FIcon from '../components/FIcon.vue'
@@ -9,7 +9,8 @@ import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
 import SecretInput from '../components/SecretInput.vue'
 import { api, describeError, enc } from '../api/client'
-import type { Key, KeyCreated, KeyList } from '../api/types'
+import type { ConfigSaved, ConfigView, Key, KeyCreated, KeyList } from '../api/types'
+import type { IconName } from '../icons'
 import { session } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatTimestamp } from '../utils/format'
@@ -18,10 +19,26 @@ const list = ref<KeyList | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const busy = ref(false)
+/**
+ * The service holds a saved configuration that only applies after a restart.
+ * Config-key changes made meanwhile are merged into that pending file and do
+ * not affect the running process. Read from GET /config so the state survives
+ * page reloads; secrets are redacted there, so no key values are involved.
+ */
+const pendingRestart = ref(false)
+
+async function loadPending() {
+  try {
+    pendingRestart.value = (await api.get<ConfigView>('/config')).restart_required
+  } catch {
+    /* keep the last known state; the key list error is reported separately */
+  }
+}
 
 async function load() {
   try {
-    list.value = await api.get<KeyList>('/keys')
+    const [keys] = await Promise.all([api.get<KeyList>('/keys'), loadPending()])
+    list.value = keys
     loadError.value = ''
   } catch (e) {
     loadError.value = describeError(e)
@@ -99,30 +116,107 @@ async function revoke(key: Key) {
 }
 
 // ---------- Config key ----------
+// PUT/DELETE /keys/config return ConfigSaved. HTTP 200 only means "saved";
+// `applied` says whether the running service already uses the new value.
 const configOpen = ref(false)
 const configValue = ref('')
 const configValid = computed(() => /^[!-~]{1,4096}$/.test(configValue.value))
-function openConfigKey() {
+/** Outcome of the last rotation, shown in the dialog until it is closed. */
+const rotation = ref<{ value: string; applied: boolean } | null>(null)
+
+// Forget the entered/shown secret once the dialog closes.
+watch(configOpen, (open) => {
+  if (!open) {
+    rotation.value = null
+    configValue.value = ''
+  }
+})
+
+async function openConfigKey() {
   configValue.value = randomKey()
+  rotation.value = null
   configOpen.value = true
+  await loadPending()
 }
+
+const isApplied = (saved: ConfigSaved) => saved.applied && !saved.restart_required
+
+function announce(saved: ConfigSaved, action: '更新' | '清除') {
+  if (isApplied(saved)) {
+    notify('success', `配置密钥已${action}并生效`, action === '清除' ? '使用旧配置密钥的客户端已无法访问。' : '旧配置密钥已失效。')
+  } else {
+    notify(
+      'warning',
+      `配置密钥已保存，重启后生效`,
+      '服务有待重启的配置，本次更改尚未应用；重启前旧配置密钥仍然有效。',
+      9000,
+    )
+  }
+}
+
 async function submitConfigKey() {
   const value = configValue.value
-  configOpen.value = false
-  await guarded(async () => {
-    await api.put('/keys/config', { api_key: value })
-    await copyText(value, '新密钥已复制到剪贴板')
-  }, '配置密钥已更新')
+  busy.value = true
+  try {
+    const saved = await api.put<ConfigSaved>('/keys/config', { api_key: value })
+    rotation.value = { value, applied: isApplied(saved) }
+    announce(saved, '更新')
+  } catch (e) {
+    notifyError('更新配置密钥失败', e)
+  } finally {
+    busy.value = false
+  }
+  await load()
 }
+
 async function clearConfigKey() {
+  await loadPending()
   const ok = await confirm({
     title: '清除配置密钥',
-    message: '将把 config.json 中的 api_key 置空，使用它的客户端会立即失去访问权限。面板创建的密钥不受影响。',
+    message: pendingRestart.value
+      ? '服务当前有已保存但尚未生效的配置。清除会写入配置文件，但在重启服务前不会生效，旧配置密钥在此期间仍可访问。面板创建的密钥不受影响。'
+      : '将把 config.json 中的 api_key 置空。若服务确认已生效，使用该密钥的客户端将无法再访问；实际是否立即生效以服务返回的状态为准。面板创建的密钥不受影响。',
     confirmText: '清除',
     danger: true,
   })
-  if (ok) await guarded(() => api.delete('/keys/config'), '配置密钥已清除')
+  if (!ok) return
+  busy.value = true
+  try {
+    announce(await api.delete<ConfigSaved>('/keys/config'), '清除')
+  } catch (e) {
+    notifyError('清除配置密钥失败', e)
+  } finally {
+    busy.value = false
+  }
+  await load()
 }
+
+const clients = computed<{ name: string; hint: string; url: string; icon: IconName }[]>(() => [
+  {
+    name: 'OpenAI 兼容（Cherry Studio 等）',
+    hint: 'Base URL；支持 Chat Completions 与 Responses，模型从列表选择。',
+    url: `${endpoint.value}/v1`,
+    icon: 'bot',
+  },
+  {
+    name: 'RikkaHub',
+    hint: 'Google 提供商的 Base URL。',
+    url: `${endpoint.value}/v1beta`,
+    icon: 'sparkle',
+  },
+  {
+    name: 'SillyTavern',
+    hint: '选择 Google AI Studio，反向代理填此地址（也可用 …/v1beta/），代理密码填 API 密钥。',
+    url: endpoint.value,
+    icon: 'branch',
+  },
+  {
+    name: 'Gemini 原生接口',
+    hint: 'generateContent / streamGenerateContent 的 Base URL。',
+    url: `${endpoint.value}/v1beta`,
+    icon: 'code',
+  },
+])
 
 const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_BACKEND_ORIGIN__ : location.origin))
 </script>
@@ -141,6 +235,12 @@ const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_
         title="尚无可用的 API 密钥"
         message="在配置或创建至少一个密钥之前，生成和模型接口会拒绝所有请求。"
       />
+      <FInfoBar v-if="pendingRestart" severity="warning" title="有已保存但尚未生效的配置">
+        <span>
+          下方配置文件密钥的状态反映当前运行中的服务。在重启服务之前，对配置密钥的轮换或清除只会写入配置文件，旧值仍然有效。
+          <RouterLink to="/config">查看服务配置</RouterLink>
+        </span>
+      </FInfoBar>
 
       <section class="settings-group">
         <h3>配置文件密钥</h3>
@@ -148,12 +248,15 @@ const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_
           <FIcon name="lock_closed" :size="20" />
           <div class="setting-text">
             <div>config.json · api_key</div>
-            <div class="desc">保存在配置文件中的单个密钥，以明文存储；轮换后旧值立即失效。</div>
+            <div class="desc">保存在配置文件中的单个密钥，以明文存储。状态为当前运行中服务的生效状态。</div>
           </div>
           <div class="setting-control">
             <span v-if="loading" class="skeleton" style="width: 64px; height: 22px" />
             <span v-else class="badge" :class="configKeySet ? 'success' : 'caution'">
-              <FIcon :name="configKeySet ? 'checkmark_circle' : 'warning'" filled />{{ configKeySet ? '已配置' : '未配置' }}
+              <FIcon :name="configKeySet ? 'checkmark_circle' : 'warning'" filled />{{ configKeySet ? '已生效' : '未配置' }}
+            </span>
+            <span v-if="!loading && pendingRestart" class="badge outline" title="重启服务后才会应用已保存的配置">
+              <FIcon name="timer" />待重启
             </span>
             <button class="btn" :disabled="busy" @click="openConfigKey">{{ configKeySet ? '轮换' : '设置' }}</button>
             <button v-if="configKeySet" class="btn subtle icon-only" aria-label="清除配置密钥" title="清除" :disabled="busy" @click="clearConfigKey">
@@ -194,18 +297,26 @@ const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_
       </section>
 
       <section class="settings-group">
-        <h3>接入示例</h3>
+        <h3>客户端接入</h3>
+        <div v-for="client in clients" :key="client.name" class="setting client">
+          <FIcon :name="client.icon" :size="20" class="t-secondary" />
+          <div class="setting-text">
+            <div>{{ client.name }}</div>
+            <div class="desc">{{ client.hint }}</div>
+          </div>
+          <div class="setting-control">
+            <button class="url mono" :title="`复制 ${client.url}`" @click="copyText(client.url, '地址已复制')">
+              <span class="break">{{ client.url }}</span><FIcon name="copy" :size="14" />
+            </button>
+          </div>
+        </div>
         <div class="card pad stack" style="--gap: 8px">
           <p class="t-secondary t-caption">
-            支持 <code>Authorization: Bearer</code>、<code>x-goog-api-key</code>、<code>x-api-key</code> 或 <code>?key=</code>。移动设备需使用可访问的服务地址。
+            密钥可通过 <code>Authorization: Bearer</code>、<code>x-goog-api-key</code>、<code>x-api-key</code> 或 <code>?key=</code> 传递。移动设备需使用可访问的服务地址。
           </p>
           <pre class="code-block">curl {{ endpoint }}/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" -H "Content-Type: application/json" \
   -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"hello"}],"stream":true}'</pre>
-          <div class="row wrap t-caption t-secondary">
-            <span>OpenAI Base URL：<code>{{ endpoint }}/v1</code></span>
-            <span>Gemini Base URL：<code>{{ endpoint }}/v1beta</code></span>
-          </div>
         </div>
       </section>
     </div>
@@ -251,22 +362,79 @@ const endpoint = computed(() => session.baseUrl || (import.meta.env.DEV ? __DEV_
     </FDialog>
 
     <!-- Config key -->
-    <FDialog v-model:open="configOpen" :title="configKeySet ? '轮换配置密钥' : '设置配置密钥'" :width="520">
-      <p class="t-secondary">新密钥会写入 config.json 并立即生效。已为你生成一个随机密钥，也可以输入自己的值（最多 4096 个可见 ASCII 字符，不含空白）。</p>
-      <div class="field">
-        <label for="config-key">新密钥</label>
-        <SecretInput id="config-key" v-model="configValue" :invalid="!configValid" />
-        <button class="hyperlink" type="button" @click="configValue = randomKey()"><FIcon name="arrow_sync" :size="14" />重新生成</button>
-      </div>
+    <FDialog
+      v-model:open="configOpen"
+      :title="rotation ? (rotation.applied ? '配置密钥已生效' : '配置密钥已保存，尚未生效') : configKeySet ? '轮换配置密钥' : '设置配置密钥'"
+      :width="520"
+      :dismissible="!busy"
+    >
+      <template v-if="!rotation">
+        <p class="t-secondary">
+          新密钥会写入 config.json。已为你生成一个随机密钥，也可以输入自己的值（最多 4096 个可见 ASCII 字符，不含空白）。
+        </p>
+        <FInfoBar
+          v-if="pendingRestart"
+          severity="warning"
+          message="服务有待重启的配置：本次更改会保存，但在重启服务前不会生效，旧密钥继续可用，新密钥暂时会被拒绝。"
+        />
+        <div class="field">
+          <label for="config-key">新密钥</label>
+          <SecretInput id="config-key" v-model="configValue" :invalid="!configValid" />
+          <button class="hyperlink" type="button" @click="configValue = randomKey()"><FIcon name="arrow_sync" :size="14" />重新生成</button>
+        </div>
+      </template>
+      <template v-else>
+        <FInfoBar v-if="rotation.applied" severity="success" message="服务已使用新密钥，旧配置密钥已失效。请更新使用它的客户端。" />
+        <FInfoBar
+          v-else
+          severity="warning"
+          title="重启后生效"
+          message="新密钥已写入配置文件，但当前服务仍使用旧密钥：重启前旧密钥继续有效，新密钥会返回 401。请在重启服务后再更新客户端配置。"
+        />
+        <div class="field">
+          <label>{{ rotation.applied ? '新密钥' : '新密钥（尚未生效）' }}</label>
+          <div class="secret mono break">{{ rotation.value }}</div>
+          <span class="hint">关闭此对话框后将无法再次查看完整密钥。</span>
+        </div>
+      </template>
       <template #footer>
-        <button class="btn accent" :disabled="!configValid" @click="submitConfigKey">保存并复制</button>
-        <button class="btn" @click="configOpen = false">取消</button>
+        <template v-if="!rotation">
+          <button class="btn accent" :disabled="!configValid || busy" @click="submitConfigKey"><ProgressRing v-if="busy" />保存</button>
+          <button class="btn" :disabled="busy" @click="configOpen = false">取消</button>
+        </template>
+        <template v-else>
+          <button class="btn accent" @click="copyText(rotation.value, rotation.applied ? '新密钥已复制' : '新密钥已复制（重启后生效）')">
+            <FIcon name="copy" />复制
+          </button>
+          <button class="btn" @click="configOpen = false">完成</button>
+        </template>
       </template>
     </FDialog>
   </div>
 </template>
 
 <style scoped>
+.url {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--radius-control);
+  background: var(--control-alt-secondary);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.url:hover {
+  background: var(--subtle-secondary);
+}
+@media (max-width: 640px) {
+  .client .setting-control {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+}
 .secret {
   padding: 10px 12px;
   border-radius: var(--radius-control);

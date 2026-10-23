@@ -106,6 +106,16 @@ const appVersion = __APP_VERSION__
             <button class="btn" @click="logout"><FIcon name="sign_out" />退出登录</button>
           </div>
         </div>
+        <div class="setting">
+          <FIcon name="key_reset" :size="20" />
+          <div class="setting-text">
+            <div>管理密码</div>
+            <div class="desc">修改登录管理面板使用的密码（config.json 中的 admin_key），立即生效。</div>
+          </div>
+          <div class="setting-control">
+            <RouterLink class="btn" to="/change-password">修改密码</RouterLink>
+          </div>
+        </div>
       </section>
 
       <section class="settings-group">

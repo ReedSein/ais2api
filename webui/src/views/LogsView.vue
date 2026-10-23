@@ -65,11 +65,34 @@ async function loadSources() {
   }
 }
 
+// Journal event names emitted by the service, with short descriptions.
+const EVENT_LABELS: Record<string, string> = {
+  listening: '服务开始监听',
+  stopped: '服务已停止',
+  http_request: 'HTTP 请求',
+  config_saved: '配置已保存',
+  maintenance_started: '维护任务开始',
+  maintenance_done: '维护任务完成',
+  maintenance_failed: '维护任务失败',
+  generation: '生成完成',
+  generation_attempt: '生成尝试',
+  generation_parameters_ignored: '已忽略不支持的参数',
+  account_failure: '账号失败并冷却',
+  session_recovery: '会话就地恢复后重试',
+  browser_failure: '浏览器适配失败',
+  cookie_import: 'Cookie 导入',
+  cookie_import_failed: 'Cookie 导入失败',
+  setup_stage: '安装阶段',
+  setup_download: '安装下载',
+}
+
 function journalTone(record: Record<string, unknown>): Line['tone'] {
   const event = String(record.event ?? '')
   const status = typeof record.status === 'number' ? record.status : 0
-  if (/fail|error/.test(event) || status >= 500 || (typeof record.error === 'string' && record.error && status >= 400)) return 'critical'
-  if (status >= 400 || /ignored|cooldown|retry|expired/.test(event)) return 'caution'
+  // Account failures put one account on cooldown; the service keeps working.
+  if (event === 'account_failure') return 'caution'
+  if (/fail|error/.test(event) || status >= 500) return 'critical'
+  if (status >= 400 || /ignored|cooldown|retry|expired|recovery/.test(event)) return 'caution'
   return ''
 }
 
@@ -243,7 +266,9 @@ onBeforeUnmount(() => {
 const visible = computed(() => {
   void version.value
   const q = query.value.trim().toLowerCase()
-  const matched = q ? lines.filter((l) => l.text.toLowerCase().includes(q) || l.event?.toLowerCase().includes(q)) : lines
+  const matched = q
+    ? lines.filter((l) => l.text.toLowerCase().includes(q) || l.event?.toLowerCase().includes(q) || (l.event && EVENT_LABELS[l.event]?.includes(q)))
+    : lines
   return { total: matched.length, rows: matched.slice(-RENDER_LIMIT) }
 })
 
@@ -338,6 +363,7 @@ function clearView() {
             >
               <span class="time">{{ formatTimestamp(line.time) }}</span>
               <span class="event">{{ line.event }}</span>
+              <span v-if="line.event && EVENT_LABELS[line.event]" class="event-label">{{ EVENT_LABELS[line.event] }}</span>
               <span class="text">{{ line.text }}</span>
               <pre v-if="expanded === line.n" class="detail" @click.stop>{{ JSON.stringify(line.record, null, 2) }}</pre>
             </div>
@@ -426,7 +452,13 @@ function clearView() {
 }
 .journal .event {
   font-weight: 600;
+  margin-right: 8px;
+}
+.journal .event-label {
   margin-right: 12px;
+  font-family: var(--font-text);
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 .journal .text {
   color: var(--text-secondary);

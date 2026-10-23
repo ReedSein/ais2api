@@ -1,0 +1,33 @@
+import { describe, expect, it } from 'vitest'
+import { accountState } from './accounts'
+import { formatRelative, formatTime, formatTimestamp } from './format'
+
+// The backend stores INT64_MAX as the deadline of permission cooldowns; after
+// JSON parsing it is far outside the JavaScript Date range.
+const FOREVER = JSON.parse('9223372036854775807') as number
+const NOW = 1_800_000_000
+
+describe('indefinite cooldown deadlines', () => {
+  it('formats without throwing', () => {
+    expect(formatTimestamp(FOREVER)).toBe('无限期')
+    expect(formatTime(FOREVER)).toBe('无限期')
+    expect(formatRelative(FOREVER, NOW)).toBe('无限期')
+  })
+
+  it('marks a global permission cooldown as needing manual recovery', () => {
+    const state = accountState({ id: 'a', failures: [{ model: '*', until: FOREVER, count: 1 }] }, NOW)
+    expect(state).toMatchObject({ tone: 'critical', available: false, text: '权限受限' })
+  })
+
+  it('keeps timed quota cooldowns as ordinary cooldowns', () => {
+    expect(accountState({ id: 'a', failures: [{ model: '*', until: NOW + 3600, count: 0 }] }, NOW)).toMatchObject({
+      tone: 'caution',
+      available: false,
+    })
+    expect(accountState({ id: 'a', failures: [{ model: 'gemini-pro', until: NOW + 60, count: 0 }] }, NOW)).toMatchObject({
+      available: true,
+      text: '1 个模型冷却',
+    })
+    expect(accountState({ id: 'a', failures: [{ model: '*', until: NOW - 1, count: 2 }] }, NOW).available).toBe(true)
+  })
+})

@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
-import { isSignedIn } from './stores/session'
+import { isSignedIn, session } from './stores/session'
 import type { IconName } from './icons'
 
 declare module 'vue-router' {
@@ -9,11 +9,19 @@ declare module 'vue-router' {
     public?: boolean
     /** Navigation pane placement. */
     nav?: 'main' | 'footer'
+    /** Signed-in page rendered without the navigation shell. */
+    bare?: boolean
   }
 }
 
 export const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('./views/LoginView.vue'), meta: { title: '登录', public: true } },
+  {
+    path: '/change-password',
+    name: 'change-password',
+    component: () => import('./views/ChangePasswordView.vue'),
+    meta: { title: '修改管理密码', bare: true },
+  },
   { path: '/', name: 'dashboard', component: () => import('./views/DashboardView.vue'), meta: { title: '概览', icon: 'home', nav: 'main' } },
   { path: '/accounts', name: 'accounts', component: () => import('./views/AccountsView.vue'), meta: { title: '账号', icon: 'people', nav: 'main' } },
   { path: '/models', name: 'models', component: () => import('./views/ModelsView.vue'), meta: { title: '模型', icon: 'cube', nav: 'main' } },
@@ -35,6 +43,8 @@ export const router = createRouter({
 router.beforeEach((to) => {
   if (!to.meta.public && !isSignedIn.value) return { name: 'login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : {} }
   if (to.name === 'login' && isSignedIn.value) return { name: 'dashboard' }
+  // The service refuses everything else until the default password is replaced.
+  if (isSignedIn.value && session.mustChangePassword && to.name !== 'change-password') return { name: 'change-password' }
 })
 
 router.afterEach((to) => {

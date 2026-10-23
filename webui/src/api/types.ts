@@ -34,6 +34,21 @@ export interface Account {
   disabled?: boolean
   expired?: boolean
   failures?: Cooldown[]
+  /** Stored per-account browser identity; empty timezone/locale follow the host. */
+  fingerprint?: { seed: number; timezone: string; locale: string }
+}
+
+/** GET/PATCH /accounts/{id}/fingerprint and POST .../regenerate. */
+export interface FingerprintView {
+  seed: number
+  platform: string
+  /** Stored overrides; empty means "follow this computer". */
+  timezone: string
+  locale: string
+  effective_timezone: string
+  effective_locale: string
+  host_timezone: string
+  host_locale: string
 }
 
 export interface Rotation {
@@ -174,4 +189,21 @@ export interface RawLogPage {
 export interface Capabilities {
   api_version?: string
   [key: string]: unknown
+}
+
+/** GET /diagnostics → browser: safe adapter state, never page data or cookies. */
+export interface BrowserDiagnostics {
+  status?: string
+  phase?: string
+  bridgeSource?: string
+  bridgeSha256?: string
+  running?: boolean
+  isolatedContext?: boolean
+  templateCaptured?: boolean
+  modelDiscovery?: 'not_loaded' | 'live_rpc_cache' | string
+  chunkBytes?: number
+  /** Last cookie write-back result: saved | unchanged | failed | not_attempted. */
+  cookieRefresh?: string
+  /** Identity the running browser process was launched with. */
+  fingerprint?: { seed: number; platform: string; timezone: string; locale: string } | null
 }

@@ -1,0 +1,289 @@
+<script setup lang="ts">
+// Per-account browser identity: a permanent CloakBrowser seed plus timezone and
+// language, which follow this computer unless overridden. Changes apply the
+// next time the account is used (the browser restarts with the new identity).
+import { computed, ref, watch } from 'vue'
+import FDialog from './FDialog.vue'
+import FIcon from './FIcon.vue'
+import FInfoBar from './FInfoBar.vue'
+import ProgressRing from './ProgressRing.vue'
+import { api, describeError, enc } from '../api/client'
+import type { Account, FingerprintView } from '../api/types'
+import { notify } from '../stores/ui'
+
+const props = defineProps<{ account: Account | null }>()
+const open = defineModel<boolean>('open', { default: false })
+const emit = defineEmits<{ changed: [] }>()
+
+const view = ref<FingerprintView | null>(null)
+const loading = ref(false)
+const saving = ref(false)
+const error = ref('')
+const timezoneMode = ref<'auto' | 'custom'>('auto')
+const timezone = ref('')
+const localeMode = ref<'auto' | 'custom'>('auto')
+const locale = ref('')
+const confirmingRegenerate = ref(false)
+
+// Same rules as the service (IANA zone names, BCP 47 tags).
+const TIMEZONE = /^[A-Za-z][A-Za-z0-9/_+-]{0,63}$/
+const LOCALE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/
+const timezones: string[] = (() => {
+  try {
+    return (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf?.('timeZone') ?? []
+  } catch {
+    return []
+  }
+})()
+const COMMON_LOCALES = ['zh-CN', 'zh-TW', 'zh-HK', 'en-US', 'en-GB', 'ja-JP', 'ko-KR', 'de-DE', 'fr-FR', 'es-ES', 'pt-BR', 'ru-RU']
+
+const path = computed(() => (props.account ? `/accounts/${enc(props.account.id)}/fingerprint` : ''))
+
+function adopt(next: FingerprintView) {
+  view.value = next
+  timezoneMode.value = next.timezone ? 'custom' : 'auto'
+  timezone.value = next.timezone || next.host_timezone
+  localeMode.value = next.locale ? 'custom' : 'auto'
+  locale.value = next.locale || next.host_locale
+}
+
+watch(open, async (value) => {
+  if (!value || !props.account) return
+  error.value = ''
+  confirmingRegenerate.value = false
+  view.value = null
+  loading.value = true
+  try {
+    adopt(await api.get<FingerprintView>(path.value))
+  } catch (e) {
+    error.value = describeError(e)
+  } finally {
+    loading.value = false
+  }
+}, { immediate: true })
+
+const timezoneValid = computed(() => timezoneMode.value === 'auto' || (TIMEZONE.test(timezone.value) && !timezone.value.includes('//')))
+const localeValid = computed(() => localeMode.value === 'auto' || LOCALE.test(locale.value))
+const desired = computed(() => ({
+  timezone: timezoneMode.value === 'auto' ? '' : timezone.value.trim(),
+  locale: localeMode.value === 'auto' ? '' : locale.value.trim(),
+}))
+const dirty = computed(() => !!view.value && (desired.value.timezone !== view.value.timezone || desired.value.locale !== view.value.locale))
+
+async function save() {
+  if (!dirty.value || !timezoneValid.value || !localeValid.value) return
+  saving.value = true
+  error.value = ''
+  try {
+    adopt(
+      await api.patch<FingerprintView>(path.value, {
+        timezone: desired.value.timezone || null,
+        locale: desired.value.locale || null,
+      }),
+    )
+    notify('success', '浏览器时区与语言已保存', '下次使用该账号时生效。')
+    emit('changed')
+    open.value = false
+  } catch (e) {
+    error.value = describeError(e)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function regenerate() {
+  saving.value = true
+  error.value = ''
+  try {
+    adopt(await api.post<FingerprintView>(`${path.value}/regenerate`))
+    confirmingRegenerate.value = false
+    notify('success', '已生成新的浏览器指纹', '下次使用该账号时浏览器会以新指纹重启。')
+    emit('changed')
+  } catch (e) {
+    error.value = describeError(e)
+  } finally {
+    saving.value = false
+  }
+}
+
+const platformLabel = (platform: string | undefined) => (platform === 'macos' ? 'macOS' : platform === 'windows' ? 'Windows' : platform ?? '—')
+</script>
+
+<template>
+  <FDialog v-model:open="open" title="浏览器指纹" :width="540" :dismissible="!saving">
+    <p class="t-secondary">
+      每个账号拥有固定的浏览器指纹，让 Google 始终看到同一台设备。平台对所有账号统一；时区和语言默认跟随本机地区设置。
+    </p>
+    <FInfoBar v-if="error" severity="error" :message="error" />
+    <div v-if="loading" class="stack" style="--gap: 8px">
+      <div v-for="i in 3" :key="i" class="skeleton" style="height: 56px" />
+    </div>
+
+    <template v-else-if="view">
+      <div class="identity card">
+        <div>
+          <span class="t-caption t-secondary">指纹种子</span>
+          <strong class="mono">{{ view.seed }}</strong>
+        </div>
+        <div>
+          <span class="t-caption t-secondary">平台</span>
+          <strong>{{ platformLabel(view.platform) }}</strong>
+        </div>
+        <div>
+          <span class="t-caption t-secondary">当前生效</span>
+          <strong class="mono truncate" :title="`${view.effective_timezone} · ${view.effective_locale}`">
+            {{ view.effective_timezone }} · {{ view.effective_locale }}
+          </strong>
+        </div>
+      </div>
+
+      <fieldset class="field">
+        <legend class="label">时区</legend>
+        <div class="segmented" role="radiogroup" aria-label="时区来源">
+          <button type="button" role="radio" :aria-checked="timezoneMode === 'auto'" :aria-pressed="timezoneMode === 'auto'" @click="timezoneMode = 'auto'">
+            跟随本机
+          </button>
+          <button type="button" role="radio" :aria-checked="timezoneMode === 'custom'" :aria-pressed="timezoneMode === 'custom'" @click="timezoneMode = 'custom'">
+            自定义
+          </button>
+        </div>
+        <span v-if="timezoneMode === 'auto'" class="hint">本机时区：<code>{{ view.host_timezone }}</code></span>
+        <template v-else>
+          <input
+            id="fp-timezone"
+            v-model.trim="timezone"
+            class="input mono"
+            list="fp-timezones"
+            placeholder="Asia/Shanghai"
+            aria-label="自定义时区"
+            :aria-invalid="!timezoneValid || undefined"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <datalist id="fp-timezones">
+            <option v-for="zone in timezones" :key="zone" :value="zone" />
+          </datalist>
+          <span v-if="!timezoneValid" class="error-text">请输入 IANA 时区名，例如 Asia/Shanghai</span>
+          <span v-else class="hint">建议与代理出口所在地区一致。</span>
+        </template>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend class="label">语言</legend>
+        <div class="segmented" role="radiogroup" aria-label="语言来源">
+          <button type="button" role="radio" :aria-checked="localeMode === 'auto'" :aria-pressed="localeMode === 'auto'" @click="localeMode = 'auto'">
+            跟随本机
+          </button>
+          <button type="button" role="radio" :aria-checked="localeMode === 'custom'" :aria-pressed="localeMode === 'custom'" @click="localeMode = 'custom'">
+            自定义
+          </button>
+        </div>
+        <span v-if="localeMode === 'auto'" class="hint">本机语言：<code>{{ view.host_locale }}</code></span>
+        <template v-else>
+          <input
+            id="fp-locale"
+            v-model.trim="locale"
+            class="input mono"
+            list="fp-locales"
+            placeholder="zh-CN"
+            aria-label="自定义语言"
+            :aria-invalid="!localeValid || undefined"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <datalist id="fp-locales">
+            <option v-for="tag in COMMON_LOCALES" :key="tag" :value="tag" />
+          </datalist>
+          <span v-if="!localeValid" class="error-text">请输入语言标签，例如 zh-CN、en-US</span>
+          <span v-else class="hint">同时决定页面语言与 Accept-Language 请求头。</span>
+        </template>
+      </fieldset>
+
+      <div class="regenerate card">
+        <template v-if="!confirmingRegenerate">
+          <div class="grow">
+            <strong>重新生成指纹</strong>
+            <p class="t-caption t-secondary">换成全新的设备特征。仅在账号疑似因设备特征受限时使用。</p>
+          </div>
+          <button type="button" class="btn" :disabled="saving" @click="confirmingRegenerate = true">
+            <FIcon name="arrow_sync" />重新生成
+          </button>
+        </template>
+        <template v-else>
+          <FInfoBar
+            severity="warning"
+            title="确认重新生成？"
+            message="Google 会把该账号视为在一台新设备上登录，可能触发额外的安全验证。此操作无法撤销。"
+          />
+          <div class="row confirm-row">
+            <button type="button" class="btn danger" :disabled="saving" @click="regenerate">
+              <ProgressRing v-if="saving" />确认重新生成
+            </button>
+            <button type="button" class="btn" :disabled="saving" @click="confirmingRegenerate = false">取消</button>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <template #footer>
+      <button class="btn accent" :disabled="!dirty || !timezoneValid || !localeValid || saving" @click="save">
+        <ProgressRing v-if="saving && !confirmingRegenerate" class="on-accent" />保存
+      </button>
+      <button class="btn" :disabled="saving" @click="open = false">关闭</button>
+    </template>
+  </FDialog>
+</template>
+
+<style scoped>
+.identity {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px 24px;
+  padding: 12px 16px;
+}
+.identity > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+fieldset.field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+fieldset .label {
+  padding: 0;
+  margin-bottom: 6px;
+}
+.segmented {
+  align-self: flex-start;
+}
+.regenerate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 12px 16px;
+}
+.regenerate p {
+  margin-top: 2px;
+}
+.regenerate :deep(.infobar) {
+  flex-basis: 100%;
+}
+.confirm-row {
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+.on-accent {
+  color: var(--text-on-accent);
+}
+@media (max-width: 640px) {
+  .identity {
+    grid-template-columns: 1fr 1fr;
+  }
+  .identity > div:last-child {
+    grid-column: 1 / -1;
+  }
+}
+</style>

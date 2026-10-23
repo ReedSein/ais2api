@@ -42,7 +42,7 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     fields: [
       { key: 'bind', label: '监听地址', desc: '默认 127.0.0.1；改为 0.0.0.0 会对局域网开放。', type: 'text', restart: true },
       { key: 'port', label: '端口', desc: '默认 18451。', type: 'number', restart: true, min: 1, max: 65535 },
-      { key: 'proxy', label: '上游代理', desc: '浏览器访问 Google 使用的代理，例如 http://127.0.0.1:7890。凭据显示为 ***，修改时需完整重填。', type: 'text', restart: true, placeholder: '不使用代理' },
+      { key: 'proxy', label: '上游代理', desc: '浏览器访问 Google 以及服务端下载请求中的远程图片时使用的代理，例如 http://127.0.0.1:7890。凭据显示为 ***，修改时需完整重填。', type: 'text', restart: true, placeholder: '不使用代理' },
     ],
   },
   {

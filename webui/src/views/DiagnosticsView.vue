@@ -5,9 +5,10 @@ import FInfoBar from '../components/FInfoBar.vue'
 import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
 import { api, describeError } from '../api/client'
-import type { Capabilities, ConfigView, LogSource, Status } from '../api/types'
+import type { BrowserDiagnostics, Capabilities, ConfigView, LogSource, Status } from '../api/types'
 import { refreshStatus } from '../stores/service'
 import { confirm, copyText, downloadFile, notify, notifyError } from '../stores/ui'
+import { browserPhase, browserStatus, cookieRefreshLabel, modelDiscoveryLabel } from '../utils/browser'
 import { formatBytes, formatDuration } from '../utils/format'
 
 interface Diagnostics {
@@ -16,6 +17,7 @@ interface Diagnostics {
   config?: ConfigView
   stats?: { records?: unknown[] }
   logs?: { sources?: LogSource[] }
+  browser?: BrowserDiagnostics
   google_verified?: boolean
 }
 
@@ -44,6 +46,9 @@ onMounted(load)
 
 const json = computed(() => JSON.stringify(data.value, null, 2))
 const sources = computed(() => data.value?.logs?.sources ?? [])
+const browser = computed(() => data.value?.browser)
+const browserState = computed(() => browserStatus(browser.value?.status))
+const yesNo = (value: boolean | undefined, yes: string, no: string) => (value === undefined ? '—' : value ? yes : no)
 const logBytes = computed(() => sources.value.reduce((sum, s) => sum + s.bytes, 0))
 
 async function exportSnapshot() {
@@ -133,6 +138,51 @@ const capabilityList = computed(() =>
               </button>
             </div>
           </div>
+        </section>
+
+        <section v-if="browser" class="settings-group">
+          <h3>浏览器适配器</h3>
+          <FInfoBar
+            v-if="browserState.tone === 'critical'"
+            severity="error"
+            title="页面适配失败"
+            message="AI Studio 页面结构可能已变化，生成请求会以 browser_incompatible 失败。请查看日志中的 browser_failure 记录。"
+          />
+          <div class="card info-grid">
+            <div>
+              <span class="t-caption t-secondary">状态</span>
+              <strong class="row" style="--gap: 6px">
+                <span class="dot" :class="browserState.tone !== 'neutral' ? browserState.tone : ''" />{{ browserState.text }}
+              </strong>
+            </div>
+            <div><span class="t-caption t-secondary">当前阶段</span><strong>{{ browserPhase(browser.phase) }}</strong></div>
+            <div><span class="t-caption t-secondary">浏览器进程</span><strong>{{ yesNo(browser.running, '运行中', '未运行') }}</strong></div>
+            <div><span class="t-caption t-secondary">隔离上下文</span><strong>{{ yesNo(browser.isolatedContext, '已创建', '未创建') }}</strong></div>
+            <div><span class="t-caption t-secondary">请求模板</span><strong>{{ yesNo(browser.templateCaptured, '已捕获', '未捕获') }}</strong></div>
+            <div><span class="t-caption t-secondary">模型发现</span><strong>{{ modelDiscoveryLabel(browser.modelDiscovery) }}</strong></div>
+            <div v-if="browser.chunkBytes"><span class="t-caption t-secondary">中继分块</span><strong>{{ formatBytes(browser.chunkBytes) }}</strong></div>
+            <div v-if="browser.fingerprint" class="wide">
+              <span class="t-caption t-secondary">当前浏览器指纹</span>
+              <strong class="mono">
+                #{{ browser.fingerprint.seed || '—' }} · {{ browser.fingerprint.platform }} · {{ browser.fingerprint.timezone }} ·
+                {{ browser.fingerprint.locale }}
+              </strong>
+            </div>
+            <div v-if="browser.cookieRefresh">
+              <span class="t-caption t-secondary" title="会话中被 Google 轮换的 Cookie 会写回账号，延长凭据有效期">Cookie 写回</span>
+              <strong>{{ cookieRefreshLabel(browser.cookieRefresh) }}</strong>
+            </div>
+            <div class="wide">
+              <span class="t-caption t-secondary">桥接脚本（{{ browser.bridgeSource === 'embedded' ? '内嵌' : browser.bridgeSource ?? '—' }}）SHA-256</span>
+              <button v-if="browser.bridgeSha256" class="path mono" title="复制摘要" @click="copyText(browser.bridgeSha256, '摘要已复制')">
+                <span class="break">{{ browser.bridgeSha256 }}</span><FIcon name="copy" :size="14" />
+              </button>
+              <strong v-else>—</strong>
+            </div>
+          </div>
+          <p class="t-caption t-tertiary">
+            桥接脚本内嵌在可执行文件中，旁边的 browser/bridge.js 仅作参考，不会覆盖内嵌版本。状态在浏览器忙碌时可能只显示“处理中”。
+          </p>
         </section>
 
         <section class="settings-group">

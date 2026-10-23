@@ -14,6 +14,12 @@ export const session = reactive({
   remember: false,
   /** Set when the backend rejected the stored key, shown on the sign-in page. */
   expiredReason: '',
+  /**
+   * The service still uses the default management password, so every route
+   * except the password change is refused. Derived from the server (auth check
+   * or a 403 admin_password_change_required), never persisted.
+   */
+  mustChangePassword: false,
 })
 
 function load() {
@@ -65,6 +71,7 @@ export function signIn(baseUrl: string, adminKey: string, remember: boolean) {
 export function signOut(reason = '') {
   session.adminKey = ''
   session.expiredReason = reason
+  session.mustChangePassword = false
   localStorage.removeItem(STORAGE_KEY)
   sessionStorage.removeItem(STORAGE_KEY)
 }

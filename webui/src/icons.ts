@@ -78,6 +78,7 @@ import ic_status from '@fluentui/svg-icons/icons/status_20_regular.svg?raw'
 import ic_color from '@fluentui/svg-icons/icons/color_20_regular.svg?raw'
 import ic_open from '@fluentui/svg-icons/icons/open_20_regular.svg?raw'
 import ic_code from '@fluentui/svg-icons/icons/code_20_regular.svg?raw'
+import ic_circle from '@fluentui/svg-icons/icons/circle_20_regular.svg?raw'
 import ic_homeFilled from '@fluentui/svg-icons/icons/home_20_filled.svg?raw'
 import ic_peopleFilled from '@fluentui/svg-icons/icons/people_20_filled.svg?raw'
 import ic_cubeFilled from '@fluentui/svg-icons/icons/cube_20_filled.svg?raw'
@@ -173,6 +174,7 @@ const regular = {
   color: ic_color,
   open: ic_open,
   code: ic_code,
+  circle: ic_circle,
 }
 
 const filled: Partial<Record<IconName, string>> = {

@@ -5,6 +5,7 @@ import FDialog from '../components/FDialog.vue'
 import FIcon from '../components/FIcon.vue'
 import FInfoBar from '../components/FInfoBar.vue'
 import FMenu, { type MenuItem } from '../components/FMenu.vue'
+import FingerprintDialog from '../components/FingerprintDialog.vue'
 import ImportAccountDialog from '../components/ImportAccountDialog.vue'
 import PageHeader from '../components/PageHeader.vue'
 import ProgressRing from '../components/ProgressRing.vue'
@@ -13,7 +14,7 @@ import type { Account, ProbeResult, Rotation } from '../api/types'
 import { refreshStatus, service } from '../stores/service'
 import { confirm, notify, notifyError } from '../stores/ui'
 import { accountLabel, accountState, now } from '../utils/accounts'
-import { formatRelative, formatTimestamp } from '../utils/format'
+import { formatRelative, formatTimestamp, isIndefinite } from '../utils/format'
 import { usePolling } from '../utils/media'
 
 const rotation = ref<Rotation | null>(null)
@@ -142,6 +143,13 @@ function probeText(entry: ProbeResult | undefined): string {
   return '身份未确认（页面尚未加载出邮箱）'
 }
 
+// ---------- Browser fingerprint dialog ----------
+const fingerprintTarget = ref<Account | null>(null)
+const fingerprintOpen = computed({
+  get: () => !!fingerprintTarget.value,
+  set: (v) => !v && (fingerprintTarget.value = null),
+})
+
 // ---------- Rename dialog ----------
 const renameTarget = ref<Account | null>(null)
 const renameValue = ref('')
@@ -167,6 +175,7 @@ function menuFor(a: Account): MenuItem[] {
     { divider: true },
     { label: '探测登录状态', icon: 'scan', action: () => probe(a, 'probe') },
     { label: '检测并更新邮箱', icon: 'mail', action: () => probe(a, 'detect-email') },
+    { label: '浏览器指纹…', icon: 'desktop', action: () => (fingerprintTarget.value = a) },
     { divider: true },
     { label: '清除全部冷却', icon: 'timer', disabled: !(a.failures?.length ?? 0), action: () => clearCooldown(a) },
     { label: '重置失败与禁用状态', icon: 'arrow_reset', action: () => reset(a) },
@@ -235,6 +244,13 @@ function menuFor(a: Account): MenuItem[] {
                 <span v-if="account.email" class="truncate"><FIcon name="mail" :size="12" /> {{ account.email }}</span>
                 <span v-if="account.auth_user !== undefined && account.auth_user !== ''">authuser={{ account.auth_user }}</span>
                 <span class="mono id truncate" :title="account.id">{{ account.id }}</span>
+                <span
+                  v-if="account.fingerprint"
+                  class="mono"
+                  :title="`浏览器指纹种子 ${account.fingerprint.seed}；时区 ${account.fingerprint.timezone || '跟随本机'}；语言 ${account.fingerprint.locale || '跟随本机'}`"
+                >
+                  <FIcon name="desktop" :size="12" /> #{{ account.fingerprint.seed }}
+                </span>
               </div>
             </div>
             <span class="badge state" :class="accountState(account, clock).tone !== 'neutral' ? accountState(account, clock).tone : ''">
@@ -275,7 +291,7 @@ function menuFor(a: Account): MenuItem[] {
               <thead>
                 <tr>
                   <th>模型</th>
-                  <th>失败次数</th>
+                  <th>计数</th>
                   <th>冷却至</th>
                   <th />
                 </tr>
@@ -285,7 +301,10 @@ function menuFor(a: Account): MenuItem[] {
                   <td class="mono break">{{ f.model === '*' ? '全局（所有模型）' : f.model }}</td>
                   <td class="num">{{ f.count }}</td>
                   <td>
-                    <span :class="f.until > clock ? '' : 't-tertiary'" :title="formatTimestamp(f.until)">
+                    <span v-if="isIndefinite(f.until)" class="badge critical" title="权限类失败不会自动解除">
+                      <FIcon name="person_prohibited" filled />需手动清除
+                    </span>
+                    <span v-else :class="f.until > clock ? '' : 't-tertiary'" :title="formatTimestamp(f.until)">
                       {{ f.until > clock ? formatRelative(f.until, clock) : '已结束' }}
                     </span>
                   </td>
@@ -295,12 +314,16 @@ function menuFor(a: Account): MenuItem[] {
                 </tr>
               </tbody>
             </table>
+            <p class="cooldown-hint t-caption t-secondary">
+              额度类限制（每分钟、每日、按模型）会持久记录：同一太平洋时间日内重复触发时冷却逐级延长，按上游重试提示最长可达一天，凭据刷新后仍然保留；清除冷却会同时清除额度计数。权限类失败不会自动解除。
+            </p>
           </div>
         </li>
       </ul>
     </div>
 
     <ImportAccountDialog v-model:open="importOpen" @imported="load" />
+    <FingerprintDialog v-model:open="fingerprintOpen" :account="fingerprintTarget" @changed="load" />
 
     <FDialog v-model:open="renameOpen" title="重命名账号" :width="400">
       <div class="field">
@@ -413,6 +436,10 @@ function menuFor(a: Account): MenuItem[] {
 }
 .probe.bad .icon {
   color: var(--caution);
+}
+.cooldown-hint {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--divider);
 }
 .cooldowns {
   margin: 0 12px 12px;

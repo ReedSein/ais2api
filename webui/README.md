@@ -10,6 +10,7 @@
 npm ci
 npm run dev
 npm run typecheck
+npm test
 npm run build
 ```
 

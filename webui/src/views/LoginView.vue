@@ -44,10 +44,12 @@ async function submit() {
   }
   busy.value = true
   try {
-    await api.get('/auth/check', { adminKey: key, baseUrl: base })
+    const check = await api.get<{ password_change_required?: boolean }>('/auth/check', { adminKey: key, baseUrl: base })
     signIn(base === location.origin ? '' : base, key, remember.value)
     const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') ? route.query.redirect : '/'
-    router.replace(redirect)
+    // The default password only unlocks the password change.
+    session.mustChangePassword = check.password_change_required === true
+    router.replace(session.mustChangePassword ? { name: 'change-password', query: redirect !== '/' ? { redirect } : {} } : redirect)
   } catch (e) {
     error.value = describeError(e)
   } finally {
@@ -95,6 +97,7 @@ async function submit() {
       <div class="field">
         <label for="admin-key">管理密钥</label>
         <SecretInput id="admin-key" v-model="adminKey" placeholder="admin_key" autocomplete="current-password" />
+        <span class="hint">首次使用：默认管理密码为 <code>admin</code>（仅限本机或局域网），登录后需立即修改。</span>
       </div>
 
       <label class="check">
@@ -113,8 +116,11 @@ async function submit() {
       </button>
       <div v-if="showHelp" class="help t-secondary">
         <ol>
-          <li>在 ais2api 的 <code>config.json</code> 中设置独立的 <code>admin_key</code>（不能与 <code>api_key</code> 相同用途）。</li>
-          <li>执行 <code>ais2api config reload</code> 或重启服务。</li>
+          <li>新安装默认启用管理 API，初始密码为 <code>admin</code>，首次登录后必须修改。初始密码只能在本机或局域网内使用。</li>
+          <li>
+            也可以直接在 <code>config.json</code> 中设置独立的 <code>admin_key</code>，然后执行
+            <code>ais2api config reload</code> 或重启服务；<code>admin_key</code> 为空表示关闭管理 API。
+          </li>
           <li>
             从 ais2api 服务地址打开内置控制台，后端地址留空即可，无需配置跨域。开发时也可通过
             <code>npm run dev</code> 的代理访问；跨域连接需在 <code>admin_origins</code> 中列出控制台的完整来源。
