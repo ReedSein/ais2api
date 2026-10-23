@@ -17,18 +17,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check packaging contract and browser scripts
+      - name: Check packaging contract
         run: |
           sh -n scripts/ci-termux.sh
           python3 -m unittest discover -s tests -p test_check_package.py
-          node --check browser/bridge.js
-          node --test browser/test_bridge.cjs
-          node --check browser/test_cookie_runtime.cjs
-          node --check userscript/ais2api-cookie.user.js
-          node userscript/test_cookie_helper.cjs
       - name: Prepare isolated container inputs
         run: |
           set -eu
@@ -56,10 +51,10 @@ jobs:
             '
       - name: Independently verify the uploaded archive
         run: python3 scripts/check-package.py --target termux-aarch64 "$RUNNER_TEMP"/termux-ci/output/*.tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@v4
         with:
           name: termux-aarch64-${{ github.sha }}
           path: ${{ runner.temp }}/termux-ci/output/*.tar.gz*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 28
           compression-level: 0

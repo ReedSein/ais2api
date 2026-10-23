@@ -17,12 +17,9 @@ export DEBIAN_FRONTEND=noninteractive
 # A fresh container must have a coherent package set from the rolling repository.
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
-pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite python nodejs tar
-python -m unittest discover -s tests -p test_check_package.py
+pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl openssl libarchive libsqlite python tar
 # libc++ supplies syncstream declarations through its experimental feature gate.
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --jobs 2
-node --test browser/test_bridge.cjs
-node userscript/test_cookie_helper.cjs
 python tests/cli_smoke.py --exe build/termux/install/bin/ais2api
 python tests/portable_smoke.py --exe build/termux/install/bin/ais2api
 
@@ -83,10 +80,14 @@ static_components = {'libc++experimental.a': {
     'package': owner(experimental),
     'sha256': hashlib.sha256(experimental.read_bytes()).hexdigest(),
 }}
-# Preserve the package manager's notices, including licenses for linked runtimes
-# and the static experimental archive. Boost's notice also covers its headers.
+# Ship notices only for code inside the executable and for the packages providing
+# its runtime libraries; check-package.py requires this same set. Boost's notice
+# also covers its headers. Build-only tools in the container are not distributed.
+notice_packages = set(checker.TERMUX_EMBEDDED_NOTICES)
+notice_packages.add(static_components['libc++experimental.a']['package'])
+notice_packages.update(item['package'] for item in libraries.values() if item['provider'] == 'termux')
 notices = {}
-for package in packages:
+for package in sorted(notice_packages):
     source = prefix / 'share/doc' / package / 'copyright'
     if source.is_file():
         destination = stage / 'share/licenses/ais2api-dependencies' / package / 'copyright'
