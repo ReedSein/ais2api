@@ -84,7 +84,9 @@ TEST_CASE("loading a partial configuration fills defaults, preserves values and 
     const auto second = Config::load(file);
     CHECK(second.port == config.port);
     CHECK(read_text(file) == migrated);
-    CHECK(fs::last_write_time(file) == preserved_time);
+    // libc++ file times can use __int128, which Catch2 cannot stringify.
+    // Compare before assertion decomposition to preserve full time precision.
+    CHECK((fs::last_write_time(file) == preserved_time));
 }
 
 TEST_CASE("CLI overrides are not persisted and a missing config is not created", "[config][migration]") {
