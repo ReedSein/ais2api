@@ -42,15 +42,27 @@ struct FakeUpstream {
         try { asio::io_context local; tcp::socket wake{local}; wake.connect({asio::ip::address_v4::loopback(), port}); } catch (...) {}
     }
 };
+// Reads one header block; bytes that arrived after it stay in `buffered`.
+std::string read_head(tcp::socket& socket, std::string& buffered) {
+    const auto size = asio::read_until(socket, asio::dynamic_buffer(buffered), "\r\n\r\n");
+    auto head = buffered.substr(0, size);
+    buffered.erase(0, size);
+    return head;
+}
 std::string read_head(tcp::socket& socket) {
-    std::string head;
-    const auto size = asio::read_until(socket, asio::dynamic_buffer(head), "\r\n\r\n");
-    return head.substr(0, size);
+    std::string buffered;
+    return read_head(socket, buffered);
+}
+std::string read_exactly(tcp::socket& socket, std::size_t size, std::string& buffered) {
+    if (buffered.size() < size)
+        asio::read(socket, asio::dynamic_buffer(buffered), asio::transfer_exactly(size - buffered.size()));
+    auto data = buffered.substr(0, size);
+    buffered.erase(0, size);
+    return data;
 }
 std::string read_exactly(tcp::socket& socket, std::size_t size) {
-    std::string data(size, '\0');
-    asio::read(socket, asio::buffer(data));
-    return data;
+    std::string buffered;
+    return read_exactly(socket, size, buffered);
 }
 // Echoes everything after greeting the client with `hello`.
 void echo(tcp::socket& socket, std::string_view hello) {
@@ -67,12 +79,15 @@ void echo(tcp::socket& socket, std::string_view hello) {
 struct Browser {
     asio::io_context io;
     tcp::socket socket{io};
+    // Tunnel bytes that arrived together with the CONNECT reply.
+    std::string buffered;
     explicit Browser(unsigned short port) { socket.connect({asio::ip::address_v4::loopback(), port}); }
     std::string connect(std::string_view target) {
         const auto request = "CONNECT " + std::string(target) + " HTTP/1.1\r\nHost: " + std::string(target) + "\r\n\r\n";
         asio::write(socket, asio::buffer(request));
-        return read_head(socket);
+        return read_head(socket, buffered);
     }
+    std::string read(std::size_t size) { return read_exactly(socket, size, buffered); }
 };
 ProxyEndpoint endpoint(const std::string& url) {
     auto parsed = parse_proxy(url);
@@ -123,11 +138,11 @@ TEST_CASE("the relay authenticates CONNECT to an HTTP proxy and carries both dir
     CHECK(head.starts_with("CONNECT aistudio.google.com:443 HTTP/1.1\r\n"));
     // base64("user@x:p:ss")
     CHECK(head.find("\r\nProxy-Authorization: Basic dXNlckB4OnA6c3M=\r\n") != std::string::npos);
-    CHECK(read_exactly(browser.socket, 19) == "hello-from-upstream");
+    CHECK(browser.read(19) == "hello-from-upstream");
     std::string payload(1024 * 1024, '\0');
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>(i * 31 % 251);
     std::jthread writer([&] { asio::write(browser.socket, asio::buffer(payload)); });
-    CHECK(read_exactly(browser.socket, payload.size()) == payload);
+    CHECK(browser.read(payload.size()) == payload);
     CHECK(relay.tunnels() == 1);
     writer.join();
     browser.socket.close();
@@ -188,9 +203,9 @@ TEST_CASE("the relay logs in to a SOCKS5 proxy and leaves name resolution to it"
     Browser browser(relay.start(endpoint("socks5://alice:s3cret@127.0.0.1:" + std::to_string(upstream.port))));
     CHECK(browser.connect("aistudio.google.com:443").starts_with("HTTP/1.1 200"));
     CHECK(target.get_future().get() == std::string("\x05\x01\x00\x03", 4) + "aistudio.google.com" + std::string("\x01\xbb", 2));
-    CHECK(read_exactly(browser.socket, 11) == "socks-ready");
+    CHECK(browser.read(11) == "socks-ready");
     asio::write(browser.socket, asio::buffer(std::string_view("ping")));
-    CHECK(read_exactly(browser.socket, 4) == "ping");
+    CHECK(browser.read(4) == "ping");
 }
 
 TEST_CASE("the relay reports a SOCKS5 login failure", "[proxy][relay]") {
@@ -211,12 +226,13 @@ TEST_CASE("the relay reports a SOCKS5 login failure", "[proxy][relay]") {
 }
 
 TEST_CASE("the relay reports an unreachable upstream proxy", "[proxy][relay]") {
-    unsigned short closed = 0;
-    {
-        asio::io_context io;
-        tcp::acceptor probe(io, {asio::ip::address_v4::loopback(), 0});
-        closed = probe.local_endpoint().port();
-    }
+    // Bound but not listening: connections are refused, and the port cannot
+    // be handed to the relay's own listener while the test runs.
+    asio::io_context io;
+    tcp::socket reserved(io);
+    reserved.open(tcp::v4());
+    reserved.bind({asio::ip::address_v4::loopback(), 0});
+    const auto closed = reserved.local_endpoint().port();
     browser_detail::ProxyRelay relay;
     Browser browser(relay.start(endpoint("http://127.0.0.1:" + std::to_string(closed))));
     CHECK(browser.connect("aistudio.google.com:443").starts_with("HTTP/1.1 502"));
