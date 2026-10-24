@@ -36,6 +36,16 @@ Node.js 和原项目的 Python 服务都不是后端依赖。Termux 的发行版
 
 配置默认位于可执行文件旁的 `config.json`，数据库、日志、下载和浏览器资料放在旁边的 `data/`，不使用用户的 AppData、HOME 或 XDG 配置目录。请将程序放在当前用户可写的文件夹。内置浏览器包会自动识别旁边的 `browser-runtime/`，不必下载浏览器。Windows 构建可执行文件位于 `build/windows/ais2api.exe`，其他平台对应各自构建目录。
 
+GitHub CI 生成的运行包根目录带有一键启动脚本：Linux 和 Termux 包中是 `start.sh`（执行 `sh start.sh` 或 `./start.sh`），Windows 包中是 `start.cmd`，双击即可运行。脚本的流程如下：
+
+- 首次运行时自动执行 `init`，并在 `api_key` 为空或仍在使用默认管理密码时给出提示。
+- 没有可用浏览器时运行 `setup`。Linux 和 Termux 会先询问，确认后才安装系统依赖。
+- 最后以 `serve` 在当前窗口运行服务，按 Ctrl+C 停止。加 `--background` 改为后台启动；其他参数（如 `--port 18452`）原样传给各个命令。
+- 服务已在运行时只显示查看状态和停止服务的命令，不会重复启动。
+- `start.cmd` 会把控制台切换为 UTF-8（代码页 65001），这样中文版 Windows 默认的 GBK 控制台也能正常显示中文，退出时恢复原来的代码页。
+
+手动操作的完整流程如下：
+
 ```text
 ais2api init
 ais2api setup --yes
@@ -47,7 +57,7 @@ ais2api models list
 ais2api status
 ```
 
-`init` 只创建配置和数据库，不生成或输出 API Key。请在 `config.json` 的 `api_key` 字段填写自己的密钥，再启动服务。重复 `init` 不覆盖密钥；结果中的 `api_key_configured` 和 `next_step` 提示配置状态与下一步。所有 CLI 输出采用 JSON，日志写到 stderr。`start` 的日志保存到数据目录的 `service.log`。`serve` 在当前终端运行。`stop` 使用当前用户专属的本地控制通道停止服务。
+`init` 只创建配置和数据库，不生成或输出 API Key。请在 `config.json` 的 `api_key` 字段填写自己的密钥，再启动服务。重复 `init` 不覆盖密钥；结果中的 `api_key_configured` 和 `next_step` 提示配置状态与下一步。在控制台窗口中运行时，命令结果显示为缩进的 JSON，`serve` 的日志显示为带时间和级别的中文单行文字（例如 `10-24 22:35:43 信息 生成完成  chatcmpl-1cdf…  gemini-3.1-flash-lite  耗时 2.4s`），日常成功的 HTTP 请求不显示，失败的才显示。输出被重定向到文件或管道时，命令结果仍为单行 JSON，日志仍为每行一条 JSON 记录，便于脚本读取；设置 `AIS2API_CONSOLE_FORMAT=json` 或 `text` 可强制指定格式，设置 `NO_COLOR=1` 可关闭颜色。日志写到 stderr，`start` 的日志保存到数据目录的 `service.log`（JSON）。WebUI 的实时日志不受影响。`serve` 在当前终端运行。`stop` 使用当前用户专属的本地控制通道停止服务。
 
 也可使用 userscript 直接抓取并推送 Cookie：在配置里填写独立的 `cookie_import_key`，执行 `config reload`，安装 [ais2api 专用脚本](userscript/ais2api-cookie.user.js)，在 AI Studio 页面点击导入。原项目脚本的“抓取并推送”同样兼容，地址改为 `http://127.0.0.1:18451`，“管理密码”填写 `cookie_import_key`。后端验证唯一账号身份后才保存，重复推送更新原账号；详见 [脚本安装与兼容范围](docs/userscript.md)。导入仅验证浏览器登录身份，不代表生成能力已验收。
 
@@ -83,6 +93,8 @@ Cherry Studio 使用 OpenAI 兼容提供商时，Base URL 填 `http://127.0.0.1:
 RikkaHub 的 Google 提供商 Base URL 填 `http://127.0.0.1:18451/v1beta`；SillyTavern 选择 Google AI Studio，反向代理可填根地址 `http://127.0.0.1:18451`，也支持社区常用的 `http://127.0.0.1:18451/v1beta/`（末尾斜杠可省略），代理密码填本服务 API Key（移动设备需使用可访问的服务地址）。SillyTavern 自动追加版本路径导致的重复 `/v1beta` 及版本之间的多余斜杠会在 Gemini 模型接口路由时归一化，支持模型列表、详情、普通与流式生成。支持客户端的默认安全设置、单候选、思考显示开关和工具字段别名。`thinkingBudget` 与 `seed` 当前接受但忽略，不保证预算或固定随机种子生效；具体边界见 [协议合同](docs/protocol.md)。
 
 Google 提供商的搜索、代码执行、URL context 等内置工具会转换为 AI Studio 原生选项，搜索声明自动去重，文本工具请求带浏览器时区。兼容 RikkaHub 混用函数与搜索时附带的 `includeServerSideToolInvocations`，但该参数要求的额外调用记录暂未实现；旧搜索动态阈值也不生效，两者会记录为忽略参数。搜索是否执行由模型决定，引用/搜索来源元数据尚未解析。详见 [搜索工具修复与验证](docs/reports/grounding-tools-2026-10-22.md)。
+
+模型列表会为每个 Gemini、Gemma 和图片模型追加一个 `<模型>-search` 条目。使用这类 id 时，即使客户端不传 tools 也默认开启 Google 搜索（图片模型同时开启网页和图片搜索），实际请求、账号统计和响应里的 `model` 都使用基础模型名；不带后缀的模型在不传 tools 时不搜索。上游不允许搜索与自定义函数同时使用：`*-search` 模型收到自定义函数时，默认舍弃函数、保留搜索，可在管理控制台「配置 → API 兼容性」关闭「搜索模型舍弃自定义函数」，改为保留客户端工具、不加搜索。OpenAI 客户端也可以用 Chat Completions 的 `web_search_options` 或 Responses 的 `web_search` 工具开启搜索。详见 [搜索修复报告](docs/reports/search-fix-2026-10-24.md)。
 
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 

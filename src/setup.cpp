@@ -8,6 +8,7 @@
 #include "ais2api/media.hpp"
 #include "ais2api/browser.hpp"
 #include "ais2api/bundle.hpp"
+#include "ais2api/console.hpp"
 #include <archive.h>
 #include <archive_entry.h>
 #include <curl/curl.h>
@@ -293,11 +294,10 @@ json::object setup_runtime(Config &config, bool approved) {
     secure_directory(root);
     auto journal = root / "setup.json";
     auto stage = [&](std::string name) {
-        std::cerr << json::serialize(json::object{{"event", "setup_stage"},
-                                                  {"stage", name},
-                                                  {"browser_version", version},
-                                                  {"platform", system}})
-                  << '\n';
+        console::emit_record({{"event", "setup_stage"},
+                              {"stage", name},
+                              {"browser_version", version},
+                              {"platform", system}});
         atomic_write(journal,
                      json::serialize(json::object{{"version", 1},
                                                   {"stage", name},

@@ -570,8 +570,14 @@ class Service {
             Clock::time_point start = Clock::now(), normalized = start;
             std::string error;
             unsigned attempts = 0;
+            // Upstream wire locations skipped while decoding, across attempts.
+            json::array upstream_ignored;
             ~Trace() {
                 try {
+                    // Only wire locations are logged, never their content.
+                    if (!upstream_ignored.empty())
+                        service.log({{"event", "upstream_fields_ignored"}, {"request_id", work.id},
+                                     {"locations", upstream_ignored}});
                     auto elapsed = [](auto begin, auto end) {
                         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin)
                             .count();
@@ -579,6 +585,8 @@ class Service {
                     service.log(json::object{
                                      {"event", "generation"},
                                      {"request_id", work.id},
+                                     {"model", work.model},
+                                     {"stream", work.stream},
                                      {"queue_ms", elapsed(work.queued, start)},
                                      {"normalize_ms", elapsed(start, normalized)},
                                      {"generation_ms", elapsed(normalized, Clock::now())},
@@ -659,6 +667,12 @@ class Service {
                         request, *account,
                         [&](json::object event) {
                             check_cancel(token);
+                            for (auto &location : take_upstream_ignored(event))
+                                if (std::find(trace.upstream_ignored.begin(), trace.upstream_ignored.end(), location) ==
+                                    trace.upstream_ignored.end())
+                                    trace.upstream_ignored.push_back(location);
+                            if (event.empty())
+                                return;
                             received = true;
                             if (auto p = event.if_contains("usageMetadata"); p && p->is_object())
                                 usage = p->as_object();
@@ -1366,7 +1380,33 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         }
         json::array list;
         auto available = service.cached_models();
+        // Each eligible model is followed by its "<id>-search" variant, which
+        // enables Google Search by default; real ids are never shadowed.
+        std::set<std::string> listed;
+        for (auto &value : available)
+            if (value.is_object()) {
+                auto id = string_or(value.as_object(), "id", string_or(value.as_object(), "name"));
+                listed.insert(id.starts_with("models/") ? id.substr(7) : id);
+            }
+        json::array expanded;
         for (auto &value : available) {
+            expanded.push_back(value);
+            if (!value.is_object())
+                continue;
+            auto object = value.as_object();
+            auto id = string_or(object, "id", string_or(object, "name"));
+            if (id.starts_with("models/"))
+                id.erase(0, 7);
+            if (id.empty() || !lists_search_variant(id, object) || listed.contains(id + "-search"))
+                continue;
+            object.erase("id");
+            object["name"] = "models/" + id + "-search";
+            auto display = string_or(object, "displayName");
+            object["displayName"] = (display.empty() ? id : display) + " (Search)";
+            object["source"] = "search_variant";
+            expanded.push_back(std::move(object));
+        }
+        for (auto &value : expanded) {
             if (!value.is_object())
                 continue;
             auto object = value.as_object();

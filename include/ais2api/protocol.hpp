@@ -19,12 +19,20 @@ struct Request {
 };
 using EventSink = std::function<void(json::object)>;
 Request normalize_gemini(std::string model, const json::object& body, bool stream, const Config& config);
+// Whether model listings add a "<id>-search" variant (Google Search on by
+// default) for this discovered or configured model entry.
+bool lists_search_variant(std::string_view id, const json::object& entry);
 Request normalize_openai(const json::object& body, const Config& config, Store* store = nullptr, std::string principal = {});
 json::array encode_contents(const json::array& contents);
 json::array encode_schema(const json::object& schema);
 json::array encode_request(const Request& request, const json::array& base_template, std::string_view browser_snapshot,
                            std::string_view timezone = "UTC");
+// Wire locations skipped while decoding (unknown or malformed non-function
+// slots) are reported under this internal key so the service can log them;
+// take_upstream_ignored removes it before the event reaches a client.
+inline constexpr std::string_view upstream_ignored_key = "ais2apiUpstreamIgnored";
 json::object decode_chunk(const json::value& wire_chunk);
+json::array take_upstream_ignored(json::object& event);
 void filter_thoughts(json::object& event);
 bool has_content(const json::object& event);
 // Merges one streamed event into `aggregate`, failing without changes when the

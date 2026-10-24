@@ -6,6 +6,7 @@
 
 #include "ais2api/runtime.hpp"
 #include "ais2api/download.hpp"
+#include "ais2api/console.hpp"
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <array>
@@ -199,7 +200,7 @@ bool segmented(std::string_view url, const fs::path &part, std::string_view dige
             if(message->msg==CURLMSG_DONE && message->data.result!=CURLE_OK) transport_ok=false;
         if(Clock::now()-logged>=std::chrono::seconds(5)){
             std::uint64_t bytes=0; for(auto &t:transfers) bytes+=t.existing+t.received;
-            std::cerr<<json::serialize(json::object{{"event","setup_download"},{"received_bytes",bytes},{"maximum_bytes",total},{"connections",4}})<<'\n';logged=Clock::now();
+            console::emit_record({{"event","setup_download"},{"received_bytes",bytes},{"maximum_bytes",total},{"connections",4}});logged=Clock::now();
         }
         if(running && transport_ok) {int ready=0; if(curl_multi_poll(multi.get(),nullptr,0,1000,&ready)!=CURLM_OK) transport_ok=false;}
     }while(running && transport_ok);
@@ -294,10 +295,9 @@ void download_detail::download_with_options(std::string_view url, const fs::path
                 try {
                 auto &state = *static_cast<Download *>(p);
                 if (Clock::now() - state.logged >= std::chrono::seconds(5)) {
-                    std::cerr << json::serialize(json::object{{"event", "setup_download"},
-                                                              {"received_bytes", state.bytes},
-                                                              {"maximum_bytes", state.cap}})
-                              << '\n';
+                    console::emit_record({{"event", "setup_download"},
+                                          {"received_bytes", state.bytes},
+                                          {"maximum_bytes", state.cap}});
                     state.logged = Clock::now();
                 }
                 return 0;

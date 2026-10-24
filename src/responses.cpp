@@ -10,6 +10,11 @@ namespace {
 [[noreturn]] void bad(std::string message) {
     throw Error(400, "invalid_request_error", std::move(message));
 }
+bool web_search(const json::value &v) {
+    if (!v.is_object()) return false;
+    auto type = v.as_object().if_contains("type");
+    return type && (*type == "web_search" || *type == "web_search_preview");
+}
 const json::object &obj(const json::value &v) {
     if (!v.is_object())
         bad("Expected an object");
@@ -232,8 +237,9 @@ void discard_unsupported_responses(json::object &in, json::array &ignored) {
     };
     if (auto p = in.if_contains("tools"); p && p->is_array()) {
         auto &a = p->as_array();
+        // Web search maps to Google Search instead of being discarded.
         for (std::size_t i = a.size(); i-- > 0;)
-            if (builtin(a[i], false)) {
+            if (builtin(a[i], false) && !web_search(a[i])) {
                 ignored.push_back(json::value("tools[" + std::to_string(i) + "]"));
                 a.erase(a.begin() + i);
             }
@@ -410,13 +416,48 @@ json::object responses_to_chat(const json::object &in) {
         json::array tools;
         for (auto &v : p->as_array()) {
             auto f = obj(v);
+            if (web_search(v)) {
+                keys(f, {"type", "user_location", "filters", "search_context_size"});
+                if (out.if_contains("web_search_options"))
+                    bad("Only one web_search tool is supported");
+                json::object options;
+                if (auto size = f.if_contains("search_context_size")) {
+                    if (!(*size == "low" || *size == "medium" || *size == "high"))
+                        bad("search_context_size must be low, medium or high");
+                    options["search_context_size"] = *size;
+                }
+                // Chat Completions nests the approximate location fields.
+                if (auto p = f.if_contains("user_location")) {
+                    auto location = obj(*p);
+                    keys(location, {"type", "city", "country", "region", "timezone"});
+                    if (required(location, "type") != "approximate")
+                        bad("user_location.type must be approximate");
+                    location.erase("type");
+                    for (auto &kv : location)
+                        if (!kv.value().is_string()) bad("user_location fields must be strings");
+                    options["user_location"] = json::object{{"type", "approximate"}, {"approximate", location}};
+                }
+                if (auto p = f.if_contains("filters")) {
+                    auto &filters = obj(*p);
+                    keys(filters, {"allowed_domains"});
+                    if (auto domains = filters.if_contains("allowed_domains")) {
+                        if (!domains->is_array()) bad("allowed_domains must be an array");
+                        for (auto &domain : domains->as_array())
+                            if (!domain.is_string()) bad("allowed_domains must contain strings");
+                    }
+                    options["filters"] = filters;
+                }
+                out["web_search_options"] = std::move(options);
+                continue;
+            }
             if (required(f, "type") != "function")
-                bad("Only function tools are supported");
+                bad("Only function and web_search tools are supported");
             keys(f, {"type", "name", "description", "parameters", "strict"});
             f.erase("type");
             tools.push_back(json::object{{"type", "function"}, {"function", f}});
         }
-        out["tools"] = tools;
+        if (!tools.empty() || !out.if_contains("web_search_options"))
+            out["tools"] = tools;
     }
     if (auto p = in.if_contains("tool_choice")) {
         if (p->is_object()) {

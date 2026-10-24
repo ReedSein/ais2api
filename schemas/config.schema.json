@@ -72,6 +72,11 @@
       "default": false,
       "description": "Discard optional data API parameters explicitly unsupported by the upstream. Takes effect without restarting."
     },
+    "search_model_drop_functions": {
+      "type": "boolean",
+      "default": true,
+      "description": "When a *-search model request carries function declarations, drop them and keep Google Search (true), or keep the caller's tools unchanged without injecting search (false). Takes effect without restarting."
+    },
     "browser_idle_seconds": {
       "type": "integer",
       "default": 0,

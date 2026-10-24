@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Mana Nekoha (mananekoha114)
 // SPDX-License-Identifier: MPL-2.0
 #include "ais2api/logs.hpp"
+#include "ais2api/console.hpp"
 #include <charconv>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
-#include <syncstream>
 #ifdef _WIN32
 #include <windows.h>
 #include <aclapi.h>
@@ -268,18 +268,22 @@ void Journal::append(json::object record) {
 }
 void Journal::append(std::vector<json::object> records) {
     std::string data;
+    std::vector<json::object> written;
     bool oversized = false;
     for (auto &record : records) {
         if (!record.contains("timestamp")) record["timestamp"] = unix_seconds();
         if (!record.contains("id")) record["id"] = random_hex(12);
         auto line = json::serialize(record) + '\n';
         if (line.size() > max_record_bytes) oversized = true;
-        else data += line;
+        else {
+            data += line;
+            written.push_back(record);
+        }
     }
     if (!data.empty()) {
         std::lock_guard lock(mutex_);
         // Emit once even when persistence fails; the caller still receives the error.
-        std::osyncstream(std::cerr) << data << std::flush;
+        console::emit_records(written, data);
         std::optional<Writer> writer(std::in_place, file_);
         if (!writer->complete())
             throw Error(500, "log_record", "Journal has an incomplete final entry");

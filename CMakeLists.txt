@@ -25,7 +25,7 @@ else()
 endif()
 find_package(LibArchive REQUIRED)
 find_package(Threads REQUIRED)
-add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
+add_library(ais2api_core src/common.cpp src/config.cpp src/store.cpp src/cookie_import.cpp src/schema.cpp src/protocol.cpp src/responses.cpp src/browser.cpp src/runtime.cpp src/setup.cpp src/download.cpp src/bundle.cpp src/server.cpp src/control.cpp src/management.cpp src/logs.cpp src/console.cpp src/log_sources.cpp src/webui.cpp src/region.cpp)
 set(browser_bridge_inc "${CMAKE_CURRENT_BINARY_DIR}/generated/browser_bridge.inc")
 add_custom_command(OUTPUT "${browser_bridge_inc}"
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/browser/bridge.js"
@@ -74,6 +74,13 @@ install(FILES browser/bridge.js DESTINATION bin/browser)
 install(FILES userscript/ais2api-cookie.user.js DESTINATION bin/userscript)
 install(FILES runtime-manifest.json DESTINATION bin)
 install(DIRECTORY schemas DESTINATION share/ais2api)
+# One-click launchers at the archive root, beside bin/ and share/.
+if(WIN32)
+  install(FILES launcher/start.cmd DESTINATION .)
+  install(FILES launcher/start-messages.txt DESTINATION share/ais2api)
+else()
+  install(PROGRAMS launcher/start.sh DESTINATION .)
+endif()
 include(scripts/browser-bundle.cmake)
 
 # Optional developer fuzzing. This block does not change normal builds.

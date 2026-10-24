@@ -25,6 +25,9 @@ jobs:
       - name: Check scripts and browser bridge
         run: |
           sh -n scripts/build.sh
+          sh -n launcher/start.sh
+          python3 -m unittest discover -s tests -p 'test_launcher.py'
+          python3 -m unittest discover -s tests -p 'test_check_package.py'
           node --check browser/bridge.js
           node --check browser/test_cookie_runtime.cjs
           node --test browser/test_bridge.cjs
@@ -73,6 +76,10 @@ jobs:
         run: |
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
+      - name: One-click launcher smoke without a browser download
+        run: |
+          sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
+          build/linux/install/bin/ais2api stop
       - name: Short wire-parser fuzz smoke
         if: matrix.compiler == 'clang' && matrix.sanitize == 'ON'
         run: build/linux/ais2api_fuzz_wire -max_total_time=15 -max_len=65536
@@ -116,6 +123,10 @@ jobs:
         run: |
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
           python3 tests/portable_smoke.py --exe build/linux/install/bin/ais2api
+      - name: One-click launcher smoke without a browser download
+        run: |
+          sh build/linux/install/start.sh --background --port 18460 --browser /usr/bin/true < /dev/null
+          build/linux/install/bin/ais2api stop
       - name: Verify runtime archive contents and checksum
         run: python3 scripts/check-package.py build/linux/packages/*.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -159,6 +170,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CLI smoke failed' }
           python tests/portable_smoke.py --exe build/windows/install/bin/ais2api.exe
           if ($LASTEXITCODE -ne 0) { throw 'Portable smoke failed' }
+      - name: One-click launcher smoke without a browser download
+        shell: cmd
+        run: |
+          call build\windows\install\start.cmd --background --port 18460 --browser %SystemRoot%\System32\whoami.exe < NUL || exit /b 1
+          build\windows\install\bin\ais2api.exe stop
       - name: Verify runtime archive contents and checksum
         shell: pwsh
         run: |

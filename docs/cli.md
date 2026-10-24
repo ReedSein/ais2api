@@ -4,6 +4,8 @@ The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and servic
 
 `--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. The configured API key is in `config.json`; the management API can create additional persisted generation keys. CLI output redacts secrets. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
 
+Output written to an interactive console is formatted for people instead: command results are indented JSON, errors are one line (`错误：message（reason，HTTP status）`), and service logs from `serve` or `setup` are single Chinese lines with local time, level (信息/提示/警告/错误), event and key fields, colored unless `NO_COLOR` is set. Successful HTTP requests are left out of the console; failed ones are shown. Files and pipes, including `service.log` under `start`, keep the single-line JSON contract, and the management journal and live log stream are unchanged. `AIS2API_CONSOLE_FORMAT=json` or `text` overrides the automatic choice (`auto`). Generation records also carry the resolved `model` and the `stream` flag.
+
 ## Initialization and service lifecycle
 
 ```text
@@ -43,6 +45,8 @@ the executable. `init`/`start` can use this browser without downloading it;
 
 `serve` runs in the foreground; `start` launches a background process and waits up to five seconds for local control readiness. The service log is `data_dir/service.log`. `status` returning `running: true` means the process and local control are reachable. Readiness describes local prerequisites, not a successful Google generation. `stop` requests orderly shutdown; callers can poll `status` until `running: false`.
 
+Runtime archives also ship a one-click launcher at their root: `start.sh` for Linux and Termux, `start.cmd` for Windows. It chains `init`, `doctor`, `setup` when no browser exists, and `serve` (or `start` with `--background`), forwarding other options. See [archive layout](platforms.md#install-and-archive-layout).
+
 If `start` times out, inspect `data/service.log`. HTTP listener errors include the
 operation, address, port and numeric OS error. On Windows, `os_error=10013` can
 mean the port falls in a system reservation; inspect with
@@ -74,6 +78,8 @@ The effective configuration combines defaults, the configuration file, `AIS2API_
 `browser_idle_seconds` is an optional, hot-reloadable memory saving, default 0 (off). With a value of 10..86400, the service stops the browser after that many seconds without any work (requests, probes, model listing), writing back the session's cookies first; the next request starts it again, which is a cold start. Set it in `config.json` and run `ais2api config reload`, or use `AIS2API_BROWSER_IDLE_SECONDS` or `--browser-idle-seconds N`. Each release is logged as `browser_idle_released`.
 
 `ignore_unsupported_parameters` is a hot-reloadable config boolean, default false. Set it to true and run `ais2api config reload`, or set `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`, to discard known unsupported optional generation controls. No dedicated CLI flag is required. Dropped fields are logged by name; see [compatibility behavior](protocol.md#optional-unsupported-parameter-dropping).
+
+`search_model_drop_functions` is a hot-reloadable config boolean, default true. It decides what a `*-search` model does with a request that also declares custom functions, which upstream refuses to combine with Google Search: true drops the functions and keeps search, false keeps the caller's tools and adds no search. Set it in `config.json` and run `ais2api config reload`, or use `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS=false`. See [search models](protocol.md#search-models).
 
 ## Accounts and keys
 

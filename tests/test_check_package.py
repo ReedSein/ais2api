@@ -51,6 +51,7 @@ class RuntimeArchiveTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.files = {
             'bin/ais2api': executable(),
+            'start.sh': b'#!/bin/sh\n',
             'bin/browser/bridge.js': b'// fixture',
             'bin/runtime-manifest.json': b'{}',
             'bin/userscript/ais2api-cookie.user.js': b'// fixture',
@@ -60,6 +61,8 @@ class RuntimeArchiveTests(unittest.TestCase):
             'share/doc/ais2api/NOTICE': b'fixture',
             'share/doc/ais2api/THIRD_PARTY_NOTICES.md': b'fixture',
         }
+        self.executables = {'bin/ais2api', 'start.sh'}
+        self.batch = b'@echo off\r\necho ready\r\n'
         for package in ['boost', 'libc++', 'ndk-sysroot']:
             self.files[f'share/licenses/ais2api-dependencies/{package}/copyright'] = b'fixture license'
         self.metadata = {
@@ -83,6 +86,10 @@ class RuntimeArchiveTests(unittest.TestCase):
             files['share/ais2api/termux-build.json'] = json.dumps(self.metadata).encode()
         if windows:
             files['bin/ais2api.exe'] = files.pop('bin/ais2api')
+            if 'start.sh' in files:
+                files['start.cmd'] = files.pop('start.sh')
+                files['start.cmd'] = self.batch
+            files['share/ais2api/start-messages.txt'] = '启动|中文\n'.encode()
         path = self.directory / ('runtime.zip' if windows else 'runtime.tar.gz')
         if windows:
             with zipfile.ZipFile(path, 'w') as output:
@@ -93,7 +100,7 @@ class RuntimeArchiveTests(unittest.TestCase):
                 for name, content in files.items():
                     entry = tarfile.TarInfo('runtime/' + name)
                     entry.size = len(content)
-                    entry.mode = 0o755 if name == 'bin/ais2api' else 0o644
+                    entry.mode = 0o755 if name in self.executables else 0o644
                     output.addfile(entry, io.BytesIO(content))
         Path(str(path) + '.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
         return path
@@ -201,6 +208,32 @@ class RuntimeArchiveTests(unittest.TestCase):
         Path(str(path) + '.sha256').write_text('0' * 64 + '\n')
         with self.assertRaisesRegex(ValueError, 'archive_checksum_mismatch'):
             self.verify(path)
+
+    def test_launcher_is_required(self):
+        for windows in (False, True):
+            with self.subTest(windows=windows):
+                files = dict(self.files)
+                del self.files['start.sh']
+                with self.assertRaisesRegex(ValueError, 'missing_runtime_assets'):
+                    self.verify(self.archive(metadata=False, windows=windows), target='desktop')
+                self.files = files
+
+    def test_launcher_must_be_executable(self):
+        self.executables.remove('start.sh')
+        with self.assertRaisesRegex(ValueError, 'launcher_is_not_executable'):
+            self.verify()
+
+    def test_windows_launcher_must_be_ascii_with_crlf(self):
+        for batch, error in [('@echo off\r\necho 中文\r\n'.encode(), 'launcher_must_be_ascii'),
+                             (b'@echo off\necho ready\n', 'launcher_requires_crlf')]:
+            with self.subTest(error=error):
+                self.batch = batch
+                with self.assertRaisesRegex(ValueError, error):
+                    self.verify(self.archive(metadata=False, windows=True), target='desktop')
+
+    def test_repository_windows_launcher_is_packageable(self):
+        self.batch = (ROOT / 'launcher/start.cmd').read_bytes()
+        self.assertEqual(self.verify(self.archive(metadata=False, windows=True), target='desktop'), 0)
 
     def test_missing_runtime_assets_are_rejected(self):
         del self.files['bin/browser/bridge.js']

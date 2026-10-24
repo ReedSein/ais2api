@@ -13,7 +13,7 @@ import { session, signIn } from '../stores/session'
 import { confirm, copyText, notify, notifyError } from '../stores/ui'
 import { formatBytes } from '../utils/format'
 
-type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
+type ScalarKey = 'bind' | 'port' | 'proxy' | 'browser_proxy_relay' | 'data_dir' | 'browser_executable' | 'headless' | 'ignore_unsupported_parameters' | 'search_model_drop_functions' | 'browser_idle_seconds' | 'cookie_import_max_accounts' | 'cookie_import_timeout_seconds'
 
 interface FieldDef {
   key: ScalarKey | `limits.${keyof Limits}`
@@ -34,6 +34,7 @@ const groups: { title: string; icon: IconName; fields: FieldDef[] }[] = [
     icon: 'globe',
     fields: [
       { key: 'ignore_unsupported_parameters', label: '忽略不支持的参数', desc: '默认关闭。开启后，数据 API 会丢弃上游明确不支持的可选参数；保存后立即生效。', type: 'bool' },
+      { key: 'search_model_drop_functions', label: '搜索模型舍弃自定义函数', desc: '默认开启。上游不允许 Google 搜索与自定义函数同时使用：开启时，*-search 模型收到自定义函数会舍弃函数、保留搜索；关闭时保留客户端传来的工具，不再自动加入搜索。保存后立即生效。', type: 'bool' },
     ],
   },
   {

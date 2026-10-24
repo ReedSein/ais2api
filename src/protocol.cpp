@@ -158,9 +158,11 @@ void canonical_gemini(json::object &o) {
             aliases(t, {"functionDeclarations", "codeExecution", "googleSearch",
                         "googleSearchRetrieval", "googleMaps", "urlContext", "computerUse", "fileSearch", "enterpriseWebSearch"});
             if (auto search = t.if_contains("googleSearch"); search && search->is_object()) {
-                aliases(search->as_object(), {"searchTypes"});
+                aliases(search->as_object(), {"searchTypes", "timeRangeFilter", "excludeDomains"});
                 if (auto types = search->as_object().if_contains("searchTypes"); types && types->is_object())
                     aliases(types->as_object(), {"webSearch", "imageSearch"});
+                if (auto range = search->as_object().if_contains("timeRangeFilter"); range && range->is_object())
+                    aliases(range->as_object(), {"startTime", "endTime"});
             }
             if (auto retrieval = t.if_contains("googleSearchRetrieval"); retrieval && retrieval->is_object()) {
                 aliases(retrieval->as_object(), {"dynamicRetrievalConfig"});
@@ -529,24 +531,35 @@ std::string finish_name(std::int64_t n) {
                                   "IMAGE_OTHER"};
     return n >= 0 && n < 18 ? names[n] : names[0];
 }
-json::object decode_part(const json::array &a) {
+// Records an ignored upstream wire location once per chunk.
+void note_ignored(std::vector<std::string> &ignored, std::string location) {
+    if (std::find(ignored.begin(), ignored.end(), location) == ignored.end())
+        ignored.push_back(std::move(location));
+}
+// Unknown or malformed non-function slots are upstream additions (for example
+// grounding data with Google Search). Like the reference client, skip them
+// instead of failing the generation; only function payloads stay strict
+// because silently losing a call would break tool-using clients.
+json::object decode_part(const json::array &a, std::vector<std::string> &ignored) {
     json::object p;
     for (std::size_t i = 0; i < a.size(); ++i)
         if (!a[i].is_null() && i != 0 && i != 1 && i != 2 && i != 3 && i != 4 &&
             i != 7 && i != 8 && i != 10 && i != 11 && i != 12 && i != 14)
-            throw Error(502, "invalid_upstream", "Unsupported upstream part payload");
-    if (!at(a, 14).is_null() && !at(a, 14).is_string())
-        throw Error(502, "invalid_upstream", "Malformed thought signature");
+            note_ignored(ignored, "part[" + std::to_string(i) + "]");
     if (at(a, 1).is_string())
         p["text"] = a[1];
+    else if (!at(a, 1).is_null())
+        note_ignored(ignored, "part[1]");
     bool thinking = (!at(a, 0).is_null() && (at(a, 0) == true || at(a, 0) == 1)) ||
                     at(a, 10) == true || at(a, 12) == 1;
     if (thinking)
         p["thought"] = true;
-    if (at(a, 2).is_array()) {
-        auto &x = a[2].as_array();
-        if (at(x, 0).is_string() && at(x, 1).is_string())
-            p["inlineData"] = json::object{{"mimeType", x[0]}, {"data", x[1]}};
+    if (!at(a, 2).is_null()) {
+        auto &x = at(a, 2);
+        if (x.is_array() && at(x.as_array(), 0).is_string() && at(x.as_array(), 1).is_string())
+            p["inlineData"] = json::object{{"mimeType", x.as_array()[0]}, {"data", x.as_array()[1]}};
+        else
+            note_ignored(ignored, "part[2]");
     }
     for (auto [key, primary, fallback] :
          {std::tuple{"functionCall", 3, 10}, std::tuple{"functionResponse", 4, 11}}) {
@@ -568,38 +581,37 @@ json::object decode_part(const json::array &a) {
         auto &v = at(a, 7);
         if (!v.is_array() || !at(v.as_array(), 1).is_string() ||
             (at(v.as_array(), 0) != 0 && at(v.as_array(), 0) != 1))
-            throw Error(502, "invalid_upstream", "Malformed executable code part");
-        auto &code = v.as_array();
-        p["executableCode"] = json::object{
-            {"language", number(code[0]) == 1 ? "PYTHON" : "LANGUAGE_UNSPECIFIED"},
-            {"code", code[1]}};
+            note_ignored(ignored, "part[7]");
+        else {
+            auto &code = v.as_array();
+            p["executableCode"] = json::object{
+                {"language", number(code[0]) == 1 ? "PYTHON" : "LANGUAGE_UNSPECIFIED"},
+                {"code", code[1]}};
+        }
     }
     if (!at(a, 8).is_null()) {
         auto &v = at(a, 8);
         if (!v.is_array() || !at(v.as_array(), 1).is_string() ||
             !at(v.as_array(), 0).is_number() || number(v.as_array()[0], -1) < 0 ||
             number(v.as_array()[0], -1) > 3)
-            throw Error(502, "invalid_upstream", "Malformed code execution result");
-        auto &code = v.as_array();
-        static const char *outcomes[] = {"OUTCOME_UNSPECIFIED", "OUTCOME_OK", "OUTCOME_FAILED",
-                                         "OUTCOME_DEADLINE_EXCEEDED"};
-        auto n = number(at(code, 0));
-        if (at(code, 1).is_string())
-            p["codeExecutionResult"] = json::object{
-                {"outcome", n >= 0 && n < 4 ? outcomes[n] : outcomes[0]}, {"output", code[1]}};
+            note_ignored(ignored, "part[8]");
+        else {
+            static const char *outcomes[] = {"OUTCOME_UNSPECIFIED", "OUTCOME_OK", "OUTCOME_FAILED",
+                                             "OUTCOME_DEADLINE_EXCEEDED"};
+            auto &code = v.as_array();
+            p["codeExecutionResult"] = json::object{{"outcome", outcomes[number(code[0])]}, {"output", code[1]}};
+        }
     }
     if (at(a, 14).is_string())
         p["thoughtSignature"] = a[14];
+    else if (!at(a, 14).is_null())
+        note_ignored(ignored, "part[14]");
     bool payload = false;
     for (auto key : {"text", "inlineData", "functionCall", "functionResponse",
                      "executableCode", "codeExecutionResult"})
         payload = payload || p.if_contains(key);
-    if (!payload) {
-        for (std::size_t i = 0; i < a.size(); ++i)
-            if (!a[i].is_null() && i != 0 && i != 10 && i != 12 && i != 14)
-                throw Error(502, "invalid_upstream", "Unsupported upstream part payload");
-        if (!p.if_contains("thoughtSignature")) return {};
-    }
+    if (!payload && !p.if_contains("thoughtSignature"))
+        return {};
     if (p.size() <= 2 && p.if_contains("text") && string_or(p, "text").empty() &&
         !p.if_contains("thoughtSignature"))
         return {};
@@ -769,8 +781,9 @@ json::array tool_wire(const json::array &tools, const json::object *config, bool
                                      ? (search_web ? "[null,null,null,[null,[[],[]]]]"
                                                    : "[null,null,null,[null,[null,[]]]]")
                                      : "[null,null,null,[null,[[]]]]").as_array());
+    // Function declarations follow the builtins, as in the reference client.
     if (!functions.empty())
-        out.insert(out.begin(), json::array{nullptr, std::move(functions)});
+        out.push_back(json::array{nullptr, std::move(functions)});
     if (mode == "ANY" && out.empty())
         invalid("No tools match tool choice");
     return out;
@@ -921,6 +934,90 @@ void discard_parameter(json::object &object, std::string_view key, json::array &
                        std::string_view name) {
     if (object.erase(key)) ignored_parameter(ignored, name);
 }
+// `<model>-search` selects <model> with Google Search enabled by default.
+bool strip_search_suffix(std::string &model) {
+    constexpr std::string_view suffix = "-search";
+    if (model.size() <= suffix.size()) return false;
+    for (std::size_t i = 0; i < suffix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(model[model.size() - suffix.size() + i])) != suffix[i])
+            return false;
+    model.erase(model.size() - suffix.size());
+    return true;
+}
+// Public Gemini API Google Search options without a verified private wire
+// mapping. They are validated, then dropped without disabling the search.
+void discard_search_options(json::object &body, json::array &ignored) {
+    auto tools = body.if_contains("tools");
+    if (!tools || !tools->is_array()) return;
+    for (auto &tool : tools->as_array()) {
+        if (!tool.is_object()) continue;
+        auto search = tool.as_object().if_contains("googleSearch");
+        if (!search || !search->is_object()) continue;
+        auto &options = search->as_object();
+        if (auto range = options.if_contains("timeRangeFilter")) {
+            auto &r = object(*range, "timeRangeFilter");
+            keys(r, {"startTime", "endTime"}, "timeRangeFilter");
+            for (auto &kv : r)
+                if (!kv.value().is_string()) invalid("timeRangeFilter times must be strings");
+            discard_parameter(options, "timeRangeFilter", ignored, "tools.googleSearch.timeRangeFilter");
+        }
+        if (auto domains = options.if_contains("excludeDomains")) {
+            for (auto &domain : array(*domains, "excludeDomains"))
+                if (!domain.is_string()) invalid("excludeDomains must contain strings");
+            discard_parameter(options, "excludeDomains", ignored, "tools.googleSearch.excludeDomains");
+        }
+    }
+}
+// Adds the reference project's default search tool to a `*-search` request.
+// Upstream rejects Google Search combined with function declarations, so the
+// configured policy either drops the functions or leaves the tools unchanged.
+void apply_search_model(json::object &body, bool image, bool drop_functions, json::array &ignored) {
+    json::object options;
+    if (image) {
+        json::object types;
+        types["webSearch"] = json::object{};
+        types["imageSearch"] = json::object{};
+        options["searchTypes"] = std::move(types);
+    }
+    json::object search;
+    search["googleSearch"] = std::move(options);
+    auto tools = body.if_contains("tools");
+    if (!tools) {
+        body["tools"] = json::array{search};
+        return;
+    }
+    if (!tools->is_array()) return;
+    auto &list = tools->as_array();
+    bool functions = false, searching = false;
+    for (auto &tool : list) {
+        if (!tool.is_object()) continue;
+        auto &t = tool.as_object();
+        if (auto f = t.if_contains("functionDeclarations"); f && !(f->is_array() && f->as_array().empty()))
+            functions = true;
+        searching = searching || t.if_contains("googleSearch") || t.if_contains("googleSearchRetrieval");
+    }
+    if (functions) {
+        if (!drop_functions) return;
+        for (auto it = list.begin(); it != list.end();) {
+            if (it->is_object()) {
+                it->as_object().erase("functionDeclarations");
+                if (it->as_object().empty()) {
+                    it = list.erase(it);
+                    continue;
+                }
+            }
+            ++it;
+        }
+        ignored_parameter(ignored, "tools.functionDeclarations");
+        // Function calling controls have nothing left to select; NONE still
+        // disables every tool, search included.
+        if (auto config = body.if_contains("toolConfig"); config && config->is_object())
+            if (auto calling = config->as_object().if_contains("functionCallingConfig"); calling && calling->is_object() &&
+                string_or(calling->as_object(), "mode", "AUTO") != "NONE")
+                discard_parameter(config->as_object(), "functionCallingConfig", ignored, "toolConfig.functionCallingConfig");
+    }
+    if (!searching) list.push_back(search);
+}
 void discard_gemini_controls(json::object &body, std::string model, json::array &ignored) {
     if (auto cached = body.if_contains("cachedContent")) {
         if (!cached->is_string()) invalid("cachedContent must be a string");
@@ -1010,8 +1107,10 @@ void prepare_optional_schema(json::object &owner, std::string_view key, Request 
 }
 } // namespace
 
-Request normalize_gemini(std::string model, const json::object &input, bool stream,
-                         const Config &config) {
+namespace {
+// `search` enables the `*-search` behavior for an explicit OpenAI search request.
+Request normalize_native(std::string model, const json::object &input, bool stream,
+                         const Config &config, bool search) {
     auto canonical = input;
     canonical_gemini(canonical);
     if (!config.ignore_unsupported_parameters && canonical.if_contains("cachedContent"))
@@ -1022,6 +1121,7 @@ Request normalize_gemini(std::string model, const json::object &input, bool stre
          "Gemini request");
     Request r;
     r.model = model_name(std::move(model), config);
+    const bool search_model = strip_search_suffix(r.model) || search;
     r.stream = stream;
     r.gemini = std::move(canonical);
     if (auto p = r.gemini.if_contains("ais2api")) {
@@ -1040,6 +1140,9 @@ Request normalize_gemini(std::string model, const json::object &input, bool stre
         merge_request_defaults(r.gemini, defaults);
     }
     const bool image = image_model(r.model);
+    discard_search_options(r.gemini, r.ignored_parameters);
+    if (search_model)
+        apply_search_model(r.gemini, image, config.search_model_drop_functions, r.ignored_parameters);
     json::object family_generation{{"thinkingConfig", json::object{{"thinkingLevel", image ? "MINIMAL" : "HIGH"}}}};
     if (image) family_generation["responseModalities"] = json::array{"IMAGE"};
     json::object family_defaults{{"generationConfig", family_generation}};
@@ -1107,6 +1210,30 @@ Request normalize_gemini(std::string model, const json::object &input, bool stre
                 retrieval->as_object().if_contains("dynamicRetrievalConfig"))
                 r.ignored_parameters.push_back("tools.googleSearchRetrieval.dynamicRetrievalConfig");
     return r;
+}
+} // namespace
+
+Request normalize_gemini(std::string model, const json::object &input, bool stream,
+                         const Config &config) {
+    return normalize_native(std::move(model), input, stream, config, false);
+}
+
+bool lists_search_variant(std::string_view id, const json::object &entry) {
+    std::string model(id);
+    std::transform(model.begin(), model.end(), model.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto copy = model;
+    if (strip_search_suffix(copy) || model.find("embedding") != std::string::npos ||
+        model.find("tts") != std::string::npos)
+        return false;
+    if (!model.starts_with("gemini-") && !model.starts_with("gemma-") && !image_model(model))
+        return false;
+    // Live discovery reports generation methods; configured entries may not.
+    if (auto methods = entry.if_contains("supportedGenerationMethods"); methods && methods->is_array() &&
+        !methods->as_array().empty())
+        return std::find(methods->as_array().begin(), methods->as_array().end(), json::value("generateContent")) !=
+               methods->as_array().end();
+    return true;
 }
 
 json::array encode_request(const Request &r, const json::array &base, std::string_view snapshot,
@@ -1203,6 +1330,10 @@ json::object decode_chunk(const json::value &wire) {
         throw Error(502, "invalid_upstream", "Wire chunk must be an array");
     auto &a = wire.as_array();
     json::object out;
+    std::vector<std::string> ignored;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (!a[i].is_null() && i != 0 && i != 2 && i != 7)
+            note_ignored(ignored, "chunk[" + std::to_string(i) + "]");
     if (at(a, 0).is_array()) {
         json::array candidates;
         std::size_t index = 0;
@@ -1210,6 +1341,9 @@ json::object decode_chunk(const json::value &wire) {
             if (!v.is_array())
                 continue;
             auto &c = v.as_array();
+            for (std::size_t i = 0; i < c.size(); ++i)
+                if (!c[i].is_null() && i != 0 && i != 1 && i != 3 && i != 4)
+                    note_ignored(ignored, "candidate[" + std::to_string(i) + "]");
             json::object candidate{{"index", index++}};
             if (at(c, 0).is_array()) {
                 auto &content = c[0].as_array();
@@ -1217,11 +1351,11 @@ json::object decode_chunk(const json::value &wire) {
                 if (at(content, 0).is_array())
                     for (auto &part : content[0].as_array())
                         if (part.is_array()) {
-                            auto p = decode_part(part.as_array());
+                            auto p = decode_part(part.as_array(), ignored);
                             if (!p.empty())
                                 parts.push_back(p);
-                        } else
-                            throw Error(502, "invalid_upstream", "Malformed upstream part");
+                        } else if (!part.is_null())
+                            note_ignored(ignored, "part");
                 candidate["content"] = json::object{
                     {"role", str(at(content, 1)).empty() ? "model" : str(at(content, 1))},
                     {"parts", parts}};
@@ -1252,7 +1386,20 @@ json::object decode_chunk(const json::value &wire) {
     }
     if (at(a, 7).is_string())
         out["responseId"] = a[7];
+    if (!ignored.empty()) {
+        json::array locations;
+        for (auto &location : ignored) locations.push_back(json::value(location));
+        out[upstream_ignored_key] = std::move(locations);
+    }
     return out;
+}
+
+json::array take_upstream_ignored(json::object &event) {
+    json::array locations;
+    if (auto p = event.if_contains(upstream_ignored_key); p && p->is_array())
+        locations = std::move(p->as_array());
+    event.erase(upstream_ignored_key);
+    return locations;
 }
 
 bool has_content(const json::object &event) {
@@ -1695,6 +1842,7 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
           "user",
           "metadata",
           "store",
+          "web_search_options",
           "ais2api"},
          "OpenAI request");
     auto model = model_name(required_string(input, "model"), config);
@@ -1968,7 +2116,39 @@ Request normalize_openai(const json::object &raw_input, const Config &config, St
             apply_extension(body, extension);
         }
     }
-    auto request = normalize_gemini(model, body, bool_or(input, "stream"), config);
+    // Search runs as on a `*-search` model; its options have no verified
+    // private wire mapping and only select the tool.
+    const bool search = input.if_contains("web_search_options") != nullptr;
+    if (auto p = input.if_contains("web_search_options")) {
+        auto &options = object(*p, "web_search_options");
+        keys(options, {"search_context_size", "user_location", "filters"}, "web_search_options");
+        if (auto size = options.if_contains("search_context_size");
+            size && !(size->is_string() && (*size == "low" || *size == "medium" || *size == "high")))
+            invalid("search_context_size must be low, medium or high");
+        if (auto value = options.if_contains("user_location")) {
+            auto &location = object(*value, "user_location");
+            keys(location, {"type", "approximate"}, "user_location");
+            if (string_or(location, "type") != "approximate")
+                invalid("user_location.type must be approximate");
+            if (auto approximate = location.if_contains("approximate")) {
+                auto &fields = object(*approximate, "user_location.approximate");
+                keys(fields, {"city", "country", "region", "timezone"}, "user_location.approximate");
+                for (auto &kv : fields)
+                    if (!kv.value().is_string()) invalid("user_location fields must be strings");
+            }
+        }
+        // Responses web_search domain filters arrive here through the bridge.
+        if (auto value = options.if_contains("filters")) {
+            auto &filters = object(*value, "filters");
+            keys(filters, {"allowed_domains"}, "filters");
+            if (auto domains = filters.if_contains("allowed_domains"))
+                for (auto &domain : array(*domains, "allowed_domains"))
+                    if (!domain.is_string()) invalid("allowed_domains must contain strings");
+        }
+        for (auto &kv : options)
+            ignored_parameter(discarded, "web_search_options." + std::string(kv.key()));
+    }
+    auto request = normalize_native(model, body, bool_or(input, "stream"), config, search);
     for (const auto &parameter : discarded)
         ignored_parameter(request.ignored_parameters, str(parameter));
     request.protocol = Protocol::openai;

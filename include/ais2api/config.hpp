@@ -41,6 +41,10 @@ struct Config {
     bool browser_proxy_relay = false;
     bool headless = true;
     bool ignore_unsupported_parameters = false;
+    // A `*-search` model request carrying function declarations either drops
+    // them to keep Google Search (true) or keeps the caller's tools unchanged
+    // without injecting search (false); upstream rejects mixing the two.
+    bool search_model_drop_functions = true;
     // Optional memory saving: stop the browser after this many seconds without
     // work (0 = keep it running). The next request starts it again.
     unsigned browser_idle_seconds = 0;

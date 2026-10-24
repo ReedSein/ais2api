@@ -133,6 +133,25 @@ generator. [CPack Archive documentation](https://cmake.org/cmake/help/latest/cpa
 assets, dependency licenses, SHA-256 and exclusion of known private/build paths
 without extracting the package. This helper requires Python 3.11+ for development.
 
+Each archive root also has a one-click launcher: `start.sh` (executable) in the
+Linux and Termux `.tar.gz` archives, and `start.cmd` in the Windows `.zip`.
+The launcher leaves an already running service alone. Otherwise it runs
+`init` and prints hints for an empty `api_key` or the default management
+password, and runs `setup` when `doctor` reports no browser. `start.sh` asks
+before running `setup --yes`, because that step can install system packages
+(it refuses in a non-interactive shell). Windows setup only downloads the
+browser, so `start.cmd` runs it without asking. The service then runs with
+`serve` in that terminal until Ctrl+C. `--background` uses `start` instead,
+and any other arguments (for example `--port 18452`) are passed to every
+command. `start.cmd` switches the console to UTF-8 (code page 65001) so
+Chinese text displays on GBK systems, and restores the previous code page on
+exit. Under 65001, cmd misreads batch files that contain multi-byte text, so
+`start.cmd` stays ASCII with CRLF line endings; its messages live in
+`share/ais2api/start-messages.txt`. The package checker enforces both. On
+Windows, `init` and `start` each wait about five seconds for the local control
+pipe when the service is stopped, so the first launch takes a few seconds
+longer.
+
 The default archives contain the backend. Optional `Browser-Local` archives
 also contain a verified browser. The Linux executable still depends on the target OS ABI;
 Ubuntu-built artifacts are not claimed to run on older glibc systems, musl, or
