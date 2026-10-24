@@ -50,6 +50,16 @@ cd "$project"
 case "$build_dir" in /*) ;; *) build_dir="$project/$build_dir" ;; esac
 build_type=${BUILD_TYPE:-Release}
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing build tool: $1" >&2; exit 1; }; }
+# GitHub occasionally times out (HTTP 408) on large partial-clone fetches.
+retry() {
+  attempt=1
+  until "$@"; do
+    [ "$attempt" -lt 3 ] || return 1
+    echo "Command failed, retrying ($attempt/3): $*" >&2
+    sleep $((attempt * 15))
+    attempt=$((attempt + 1))
+  done
+}
 if [ "$target" = termux ]; then
   [ -n "${PREFIX:-}" ] && command -v pkg >/dev/null 2>&1 || { echo 'Run in the Termux host, outside proot.' >&2; exit 1; }
   [ "$(uname -m)" = aarch64 ] || { echo 'Supported Termux target: ARM64 (aarch64).' >&2; exit 1; }
@@ -93,8 +103,9 @@ else
   vcpkg_root=${VCPKG_ROOT:-"$project/build/deps/vcpkg"}
   if [ ! -e "$vcpkg_root" ]; then
     mkdir -p "$(dirname -- "$vcpkg_root")"
-    git clone --filter=blob:none --no-checkout https://github.com/microsoft/vcpkg.git "$vcpkg_root"
-    git -C "$vcpkg_root" checkout --detach "$baseline"
+    clone_vcpkg() { rm -rf "$vcpkg_root" && git clone --filter=blob:none --no-checkout https://github.com/microsoft/vcpkg.git "$vcpkg_root"; }
+    retry clone_vcpkg
+    retry git -C "$vcpkg_root" checkout --detach "$baseline"
   fi
   actual=$(git -C "$vcpkg_root" rev-parse HEAD)
   [ "$actual" = "$baseline" ] || { echo 'VCPKG_ROOT must match the manifest baseline; existing checkout was left unchanged.' >&2; exit 1; }

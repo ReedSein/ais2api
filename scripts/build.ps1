@@ -27,6 +27,18 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Native command failed: $Program (exit $LASTEXITCODE)" }
 }
+# GitHub occasionally times out (HTTP 408) on large partial-clone fetches.
+function Invoke-Retried([scriptblock]$Action, [scriptblock]$Cleanup = {}) {
+    for ($attempt = 1; ; $attempt++) {
+        try { & $Action; return }
+        catch {
+            if ($attempt -ge 3) { throw }
+            Write-Warning "$($_.Exception.Message); retrying ($attempt/3)"
+            & $Cleanup
+            Start-Sleep -Seconds (15 * $attempt)
+        }
+    }
+}
 $project = Split-Path -Parent $PSScriptRoot
 if (-not [IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory = Join-Path $project $BuildDirectory }
 if ([string]::IsNullOrEmpty($VcpkgRoot)) { $VcpkgRoot = Join-Path $project 'build/deps/vcpkg' }
@@ -46,8 +58,8 @@ $baseline = (Get-Content -Raw -LiteralPath (Join-Path $project 'vcpkg.json') | C
 if ($baseline -notmatch '^[0-9a-f]{40}$') { throw 'vcpkg builtin-baseline must be a full commit SHA.' }
 if (-not (Test-Path -LiteralPath $VcpkgRoot)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $VcpkgRoot) | Out-Null
-    Invoke-Checked git.exe @('clone', '--filter=blob:none', '--no-checkout', 'https://github.com/microsoft/vcpkg.git', $VcpkgRoot)
-    Invoke-Checked git.exe @('-C', $VcpkgRoot, 'checkout', '--detach', $baseline)
+    Invoke-Retried { Invoke-Checked git.exe @('clone', '--filter=blob:none', '--no-checkout', 'https://github.com/microsoft/vcpkg.git', $VcpkgRoot) } { if (Test-Path -LiteralPath $VcpkgRoot) { Remove-Item -Recurse -Force -LiteralPath $VcpkgRoot } }
+    Invoke-Retried { Invoke-Checked git.exe @('-C', $VcpkgRoot, 'checkout', '--detach', $baseline) }
 }
 $revision = & git.exe -C $VcpkgRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or $revision -ne $baseline) { throw 'VcpkgRoot must match the manifest baseline; existing checkout was left unchanged.' }
