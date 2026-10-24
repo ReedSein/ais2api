@@ -36,6 +36,16 @@ Node.js 和原项目的 Python 服务都不是后端依赖。Termux 的发行版
 
 配置默认位于可执行文件旁的 `config.json`，数据库、日志、下载和浏览器资料放在旁边的 `data/`，不使用用户的 AppData、HOME 或 XDG 配置目录。请将程序放在当前用户可写的文件夹。内置浏览器包会自动识别旁边的 `browser-runtime/`，不必下载浏览器。Windows 构建可执行文件位于 `build/windows/ais2api.exe`，其他平台对应各自构建目录。
 
+GitHub CI 生成的运行包根目录带有一键启动脚本：Linux 和 Termux 包中是 `start.sh`（执行 `sh start.sh` 或 `./start.sh`），Windows 包中是 `start.cmd`，双击即可运行。脚本的流程如下：
+
+- 首次运行时自动执行 `init`，并在 `api_key` 为空或仍在使用默认管理密码时给出提示。
+- 没有可用浏览器时运行 `setup`。Linux 和 Termux 会先询问，确认后才安装系统依赖。
+- 最后以 `serve` 在当前窗口运行服务，按 Ctrl+C 停止。加 `--background` 改为后台启动；其他参数（如 `--port 18452`）原样传给各个命令。
+- 服务已在运行时只显示查看状态和停止服务的命令，不会重复启动。
+- `start.cmd` 会把控制台切换为 UTF-8（代码页 65001），这样中文版 Windows 默认的 GBK 控制台也能正常显示中文，退出时恢复原来的代码页。
+
+手动操作的完整流程如下：
+
 ```text
 ais2api init
 ais2api setup --yes

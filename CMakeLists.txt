@@ -74,6 +74,13 @@ install(FILES browser/bridge.js DESTINATION bin/browser)
 install(FILES userscript/ais2api-cookie.user.js DESTINATION bin/userscript)
 install(FILES runtime-manifest.json DESTINATION bin)
 install(DIRECTORY schemas DESTINATION share/ais2api)
+# One-click launchers at the archive root, beside bin/ and share/.
+if(WIN32)
+  install(FILES launcher/start.cmd DESTINATION .)
+  install(FILES launcher/start-messages.txt DESTINATION share/ais2api)
+else()
+  install(PROGRAMS launcher/start.sh DESTINATION .)
+endif()
 include(scripts/browser-bundle.cmake)
 
 # Optional developer fuzzing. This block does not change normal builds.

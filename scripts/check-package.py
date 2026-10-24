@@ -208,9 +208,21 @@ def check(path: Path, with_browser=False, target='desktop') -> int:
         if len(roots) != 1:
             raise ValueError('archive_must_have_one_root')
         executable = 'bin/ais2api.exe' if path.suffix == '.zip' else 'bin/ais2api'
-        required = {executable, 'bin/browser/bridge.js', 'bin/runtime-manifest.json', 'bin/userscript/ais2api-cookie.user.js', 'share/doc/ais2api/LICENSE', 'share/doc/ais2api/platforms.md', 'share/doc/ais2api/NOTICE', 'share/doc/ais2api/THIRD_PARTY_NOTICES.md'}
+        launcher = 'start.cmd' if path.suffix == '.zip' else 'start.sh'
+        required = {executable, launcher, *(['share/ais2api/start-messages.txt'] if launcher == 'start.cmd' else []), 'bin/browser/bridge.js', 'bin/runtime-manifest.json', 'bin/userscript/ais2api-cookie.user.js', 'share/doc/ais2api/LICENSE', 'share/doc/ais2api/platforms.md', 'share/doc/ais2api/NOTICE', 'share/doc/ais2api/THIRD_PARTY_NOTICES.md'}
         if not required.issubset(relative):
             raise ValueError('missing_runtime_assets')
+        if launcher == 'start.sh' and not names[original[launcher]].mode & 0o100:
+            raise ValueError('launcher_is_not_executable')
+        if launcher == 'start.cmd':
+            # cmd misreads batch files holding multi-byte text under code page
+            # 65001 and mishandles labels in LF-only files; text lives in
+            # start-messages.txt instead.
+            script = read(original[launcher], 1_000_000)
+            if any(byte > 0x7f for byte in script):
+                raise ValueError('launcher_must_be_ascii')
+            if script.count(b'\n') != script.count(b'\r\n'):
+                raise ValueError('launcher_requires_crlf')
         if not any(name.startswith('share/ais2api/schemas/') for name in relative):
             raise ValueError('missing_schemas')
         if not any(name.startswith('share/licenses/ais2api-dependencies/') and name.endswith('/copyright') for name in relative):

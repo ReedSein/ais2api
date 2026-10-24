@@ -45,6 +45,8 @@ the executable. `init`/`start` can use this browser without downloading it;
 
 `serve` runs in the foreground; `start` launches a background process and waits up to five seconds for local control readiness. The service log is `data_dir/service.log`. `status` returning `running: true` means the process and local control are reachable. Readiness describes local prerequisites, not a successful Google generation. `stop` requests orderly shutdown; callers can poll `status` until `running: false`.
 
+Runtime archives also ship a one-click launcher at their root: `start.sh` for Linux and Termux, `start.cmd` for Windows. It chains `init`, `doctor`, `setup` when no browser exists, and `serve` (or `start` with `--background`), forwarding other options. See [archive layout](platforms.md#install-and-archive-layout).
+
 If `start` times out, inspect `data/service.log`. HTTP listener errors include the
 operation, address, port and numeric OS error. On Windows, `os_error=10013` can
 mean the port falls in a system reservation; inspect with

@@ -22,6 +22,12 @@ pkg install -y clang cmake ninja git curl pkg-config boost boost-headers libcurl
 CC=clang CXX=clang++ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --jobs 2
 python tests/cli_smoke.py --exe build/termux/install/bin/ais2api
 python tests/portable_smoke.py --exe build/termux/install/bin/ais2api
+# The archive is packed from the install tree, so the launcher runs in a copy.
+launcher_smoke=$(mktemp -d)
+cp -R build/termux/install "$launcher_smoke/ais2api"
+sh "$launcher_smoke/ais2api/start.sh" --background --port 18460 --browser "$PREFIX/bin/true" < /dev/null
+"$launcher_smoke/ais2api/bin/ais2api" stop
+rm -rf "$launcher_smoke"
 
 python - "$SOURCE_COMMIT" "$TERMUX_CI_IMAGE" <<'PY'
 import hashlib
