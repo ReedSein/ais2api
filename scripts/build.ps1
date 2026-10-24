@@ -10,6 +10,7 @@ param(
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
     [string]$BrowserBundleDirectory = '',
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo')][string]$Configuration = 'Release',
+    [ValidateSet('x64-windows-static', 'x64-windows-static-release')][string]$Triplet = 'x64-windows-static',
     [ValidateRange(1, 256)][int]$Jobs = 2,
     [switch]$Package,
     [switch]$WebUI,
@@ -19,10 +20,12 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($Help) {
-    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-BrowserBundleDirectory PATH] [-Configuration Release] [-Jobs 2] [-Package] [-WebUI] [-SkipTests]'
+    Write-Output 'Usage: ./scripts/build.ps1 [-BuildDirectory build/windows] [-VcpkgRoot PATH] [-BrowserBundleDirectory PATH] [-Configuration Release] [-Triplet x64-windows-static] [-Jobs 2] [-Package] [-WebUI] [-SkipTests]'
     Write-Output 'Requires Visual Studio C++ tools, Git and CMake/Ninja. New dependencies go under build/deps; existing .tools is not changed.'
     return
 }
+# The -release triplet skips debug dependency builds, so it cannot link a Debug (/MTd) configuration.
+if ($Configuration -eq 'Debug' -and $Triplet.EndsWith('-release')) { throw "Triplet $Triplet has no debug libraries; use x64-windows-static for Debug." }
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Native command failed: $Program (exit $LASTEXITCODE)" }
@@ -68,7 +71,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $VcpkgRoot 'vcpkg.exe'))) {
 }
 $testing = if ($SkipTests) { 'OFF' } else { 'ON' }
 $webUiBuild = if ($WebUI) { 'ON' } else { 'OFF' }
-Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", '-DVCPKG_TARGET_TRIPLET=x64-windows-static', "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", "-DAIS2API_BUILD_WEBUI=$webUiBuild")
+Invoke-Checked cmake.exe @('-S', $project, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DBUILD_TESTING=$testing", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake", "-DVCPKG_TARGET_TRIPLET=$Triplet", "-DCMAKE_INSTALL_PREFIX=$BuildDirectory/install", "-DAIS2API_BROWSER_BUNDLE_DIR=$BrowserBundleDirectory", "-DAIS2API_BUILD_WEBUI=$webUiBuild")
 Invoke-Checked cmake.exe @('--build', $BuildDirectory, '--parallel', "$Jobs")
 if (-not $SkipTests) { Invoke-Checked ctest.exe @('--test-dir', $BuildDirectory, '--output-on-failure') }
 Invoke-Checked cmake.exe @('--install', $BuildDirectory)
