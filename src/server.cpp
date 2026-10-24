@@ -635,6 +635,7 @@ class Service {
             std::optional<Error> previous;
             std::optional<Account> retry_account;
             bool delivered = false;
+            json::array upstream_ignored;
             // One in-place session rebuild or browser restart per request.
             bool recovered = false;
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
@@ -659,6 +660,19 @@ class Service {
                         request, *account,
                         [&](json::object event) {
                             check_cancel(token);
+                            json::array fresh;
+                            for (auto &location : take_upstream_ignored(event))
+                                if (std::find(upstream_ignored.begin(), upstream_ignored.end(), location) ==
+                                    upstream_ignored.end()) {
+                                    upstream_ignored.push_back(location);
+                                    fresh.push_back(location);
+                                }
+                            // Only wire locations are logged, never their content.
+                            if (!fresh.empty())
+                                log({{"event", "upstream_fields_ignored"}, {"request_id", work->id},
+                                     {"locations", std::move(fresh)}});
+                            if (event.empty())
+                                return;
                             received = true;
                             if (auto p = event.if_contains("usageMetadata"); p && p->is_object())
                                 usage = p->as_object();
@@ -1366,7 +1380,33 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         }
         json::array list;
         auto available = service.cached_models();
+        // Each eligible model is followed by its "<id>-search" variant, which
+        // enables Google Search by default; real ids are never shadowed.
+        std::set<std::string> listed;
+        for (auto &value : available)
+            if (value.is_object()) {
+                auto id = string_or(value.as_object(), "id", string_or(value.as_object(), "name"));
+                listed.insert(id.starts_with("models/") ? id.substr(7) : id);
+            }
+        json::array expanded;
         for (auto &value : available) {
+            expanded.push_back(value);
+            if (!value.is_object())
+                continue;
+            auto object = value.as_object();
+            auto id = string_or(object, "id", string_or(object, "name"));
+            if (id.starts_with("models/"))
+                id.erase(0, 7);
+            if (id.empty() || !lists_search_variant(id, object) || listed.contains(id + "-search"))
+                continue;
+            object.erase("id");
+            object["name"] = "models/" + id + "-search";
+            auto display = string_or(object, "displayName");
+            object["displayName"] = (display.empty() ? id : display) + " (Search)";
+            object["source"] = "search_variant";
+            expanded.push_back(std::move(object));
+        }
+        for (auto &value : expanded) {
             if (!value.is_object())
                 continue;
             auto object = value.as_object();

@@ -63,13 +63,21 @@ inline std::optional<Error> rpc_error(const json::value& value, unsigned retry_a
     }
     if (!value.is_array()) return {};
     const auto& array = value.as_array();
-    // A recognized candidate/content tuple is payload, not a status envelope.
-    // Never inspect generated tool arguments for status-looking user JSON.
-    if (!array.empty() && array[0].is_array()) for (const auto& candidate : array[0].as_array()) {
-        if (!candidate.is_array() || candidate.as_array().empty() || !candidate.as_array()[0].is_array()) continue;
-        const auto& content = candidate.as_array()[0].as_array();
-        if (!content.empty() && content[0].is_array()) return {};
-    }
+    // A candidate container is payload, not a status envelope: never inspect
+    // generated tool arguments or grounding data for status-looking values.
+    // Candidates begin with null or their [parts, role] content tuple, while
+    // a wrapped status begins with its integer code.
+    auto content_tuple = [](const json::value& content) {
+        if (content.is_null()) return true;
+        if (!content.is_array()) return false;
+        const auto& tuple = content.as_array();
+        return tuple.empty() || tuple[0].is_null() || tuple[0].is_array();
+    };
+    if (!array.empty() && array[0].is_array() && !array[0].as_array().empty() &&
+        std::all_of(array[0].as_array().begin(), array[0].as_array().end(), [&](const json::value& candidate) {
+            return candidate.is_array() && !candidate.as_array().empty() && content_tuple(candidate.as_array()[0]);
+        }))
+        return {};
     // google.rpc.Status in JSON+protobuf: [code, message, details?].
     if (array.size() >= 2 && array.size() <= 3 && array[0].is_int64() && array[1].is_string() && !array[1].as_string().empty()) {
         if (auto error = rpc_status_error(array[0].as_int64(), retry_after, array[1].as_string())) {

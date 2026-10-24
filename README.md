@@ -84,6 +84,8 @@ RikkaHub 的 Google 提供商 Base URL 填 `http://127.0.0.1:18451/v1beta`；Sil
 
 Google 提供商的搜索、代码执行、URL context 等内置工具会转换为 AI Studio 原生选项，搜索声明自动去重，文本工具请求带浏览器时区。兼容 RikkaHub 混用函数与搜索时附带的 `includeServerSideToolInvocations`，但该参数要求的额外调用记录暂未实现；旧搜索动态阈值也不生效，两者会记录为忽略参数。搜索是否执行由模型决定，引用/搜索来源元数据尚未解析。详见 [搜索工具修复与验证](docs/reports/grounding-tools-2026-10-22.md)。
 
+模型列表会为每个 Gemini、Gemma 和图片模型追加一个 `<模型>-search` 条目。使用这类 id 时，即使客户端不传 tools 也默认开启 Google 搜索（图片模型同时开启网页和图片搜索），实际请求、账号统计和响应里的 `model` 都使用基础模型名；不带后缀的模型在不传 tools 时不搜索。上游不允许搜索与自定义函数同时使用：`*-search` 模型收到自定义函数时，默认舍弃函数、保留搜索，可在管理控制台「配置 → API 兼容性」关闭「搜索模型舍弃自定义函数」，改为保留客户端工具、不加搜索。OpenAI 客户端也可以用 Chat Completions 的 `web_search_options` 或 Responses 的 `web_search` 工具开启搜索。详见 [搜索修复报告](docs/reports/search-fix-2026-10-24.md)。
+
 `/health` 只代表 HTTP 进程存活。`/ready` 检查 API Key、本地账号与浏览器前提，明确返回 `google_verified:false`；真实可用性必须通过账号探测和实际生成确认。
 
 Responses 使用无状态完整历史模式，不提供服务端响应存储、`previous_response_id` 续接及后台任务。不提供 Files、embeddings、独立图片/音频接口。HTTP 提供可选的 userscript Cookie 导入入口，以及独立管理密钥保护的 `/api/admin/v1/` 管理接口；启用 WebUI 构建后，根路径 `/` 提供管理控制台。`fileData`、强制工具执行和协议合同以外的参数会明确报错。

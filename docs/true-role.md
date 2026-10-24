@@ -4,7 +4,7 @@
 
 ## Gemini 原生入口
 
-`/v1beta/models/MODEL:generateContent` 和 `:streamGenerateContent` 保留每条 content 的角色、消息边界与部件顺序。连续 user/user、model/model 原样编码。systemInstruction 位于独立槽位；未声明 tools 时不会自动启用搜索。
+`/v1beta/models/MODEL:generateContent` 和 `:streamGenerateContent` 保留每条 content 的角色、消息边界与部件顺序。连续 user/user、model/model 原样编码。systemInstruction 位于独立槽位；未声明 tools 时不会自动启用搜索；模型 id 以 `-search` 结尾时除外，见 [搜索模型](protocol.md#search-models)。
 
 下一轮应把响应候选的整个 content 放回历史，而不是仅提取可见文字：
 

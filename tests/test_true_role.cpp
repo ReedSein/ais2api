@@ -99,7 +99,7 @@ TEST_CASE("Tool signatures roundtrip in client ids without a Store", "[protocol]
     }
     REQUIRE_THROWS_AS(normalize_openai(read(R"({"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"call_gemini_invalid!","type":"function","function":{"name":"f","arguments":"{}"}}]}]})"), Config{}), Error);
 }
-TEST_CASE("Unknown signed payloads and malformed code fail explicitly", "[protocol][true-role]") {
+TEST_CASE("Unknown signed payloads and malformed code are skipped and reported", "[protocol][true-role]") {
     auto decode = [](json::array part) {
         json::array values;
         values.push_back(part);
@@ -111,11 +111,20 @@ TEST_CASE("Unknown signed payloads and malformed code fail explicitly", "[protoc
     };
     json::array unknown(15);
     unknown[6] = json::array{"unknown"};
-    unknown[14] = "do not discard this signed payload";
-    REQUIRE_THROWS_AS(decode(unknown), Error);
+    unknown[14] = "signed payload with an upstream addition";
+    auto skipped = decode(unknown);
+    REQUIRE(parts(skipped)[0].as_object().at("thoughtSignature") == "signed payload with an upstream addition");
+    REQUIRE(take_upstream_ignored(skipped) == json::array{"part[6]"});
+    REQUIRE_FALSE(skipped.contains(upstream_ignored_key));
     json::array malformed(8);
+    malformed[1] = "text";
     malformed[7] = json::array{1};
-    REQUIRE_THROWS_AS(decode(malformed), Error);
+    auto code = decode(malformed);
+    REQUIRE(parts(code)[0].as_object() == json::object{{"text", "text"}});
+    REQUIRE(take_upstream_ignored(code) == json::array{"part[7]"});
+    json::array call(4);
+    call[3] = json::array{1};
+    REQUIRE_THROWS_AS(decode(call), Error);
     json::array signature(15);
     signature[1] = "";
     signature[14] = "signature-only";

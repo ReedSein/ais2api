@@ -58,6 +58,21 @@ TEST_CASE("unsupported parameter compatibility config persists and updates witho
     }
     CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
 }
+TEST_CASE("search model function policy defaults to dropping functions and updates without restart", "[config][admin][search-model]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK(Config{}.search_model_drop_functions);
+    CHECK(cfg.search_model_drop_functions);
+    CHECK(cfg.to_json().at("search_model_drop_functions") == true);
+    auto keep = cfg.patched({{"search_model_drop_functions", false}});
+    CHECK_FALSE(keep.search_model_drop_functions);
+    CHECK_FALSE(restart_required(cfg, keep));
+    keep.save();
+    CHECK_FALSE(Config::load(cfg.config_file).search_model_drop_functions);
+    CHECK(json::parse(read_file(cfg.config_file)).as_object().at("search_model_drop_functions") == false);
+    for (const auto& invalid : json::array{0, "false", nullptr, json::object{}})
+        CHECK_THROWS_AS(cfg.patched({{"search_model_drop_functions", invalid}}), Error);
+}
 TEST_CASE("idle browser release is off by default and updates without restart", "[config][admin][idle-release]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");

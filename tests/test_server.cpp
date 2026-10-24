@@ -192,6 +192,32 @@ TEST_CASE("HTTP model contracts provide Gemini display names and preserve metada
     }
 }
 
+TEST_CASE("HTTP model lists follow eligible models with search variants","[http][models][search-model]"){
+    LiveServer server(true,{
+        json::object{{"id","gemini-text"},{"displayName","Gemini Text"}},
+        "gemma-test",
+        "gemini-real",
+        "gemini-real-search",
+        "other-model"
+    });
+    auto response=server.call(http::verb::get,"/v1beta/models",{},server.key);
+    REQUIRE(response.result_int()==200);
+    std::vector<std::string> names;
+    const auto listing=json::parse(response.body());
+    for(const auto& value:listing.as_object().at("models").as_array())
+        names.push_back(string_or(value.as_object(),"name"));
+    REQUIRE(names==std::vector<std::string>{"models/gemini-text","models/gemini-text-search","models/gemma-test",
+                                            "models/gemma-test-search","models/gemini-real","models/gemini-real-search","models/other-model"});
+    auto detail=json::parse(server.call(http::verb::get,"/v1beta/models/gemini-text-search",{},server.key).body()).as_object();
+    REQUIRE(string_or(detail,"displayName")=="Gemini Text (Search)");
+    REQUIRE(string_or(detail,"source")=="search_variant");
+    response=server.call(http::verb::get,"/v1/models/gemma-test-search",{},server.key);
+    REQUIRE(response.result_int()==200);
+    auto openai=json::parse(response.body()).as_object();
+    REQUIRE(openai.at("ais2api").as_object().at("source")=="search_variant");
+    REQUIRE(json::parse(server.call(http::verb::get,"/v1/models",{},server.key).body()).as_object().at("data").as_array().size()==7);
+}
+
 TEST_CASE("Gemini-compatible clients accept version-prefixed model routes without rewriting resources", "[http][gemini-clients]") {
     LiveServer server;
     const std::array<std::string, 4> bases{

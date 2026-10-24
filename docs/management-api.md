@@ -67,6 +67,8 @@ Managed generation keys have independent persisted records. Existing legacy data
 
 `ignore_unsupported_parameters` is a boolean, defaults to false and applies immediately when patched. It controls dropping known unsupported optional generation parameters across Gemini, Chat and Responses; it does not relax configuration, authentication or content validation. See [the compatibility switch](protocol.md#optional-unsupported-parameter-dropping).
 
+`search_model_drop_functions` is a boolean, defaults to true and applies immediately when patched. It selects whether `*-search` models drop custom function declarations to keep Google Search (true) or keep the caller's tools without adding search (false); see [search models](protocol.md#search-models).
+
 `browser_proxy_relay` is a boolean, default false, and requires a restart. When true, `proxy` must be a single `http://` or `socks5://` URL (credentials optional); otherwise the patch is rejected. Browser diagnostics report `proxy.mode` (`none`, `direct` or `relay`) and `proxy.relayError`, the relay's latest upstream failure without credentials.
 
 `browser_idle_seconds` is an integer, 0 (default, off) or 10..86400, and applies immediately when patched. When set, the browser stops after that many seconds without work and the next request starts it again; browser diagnostics then report the status `idle_closed`.

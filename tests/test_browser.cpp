@@ -509,6 +509,18 @@ TEST_CASE("generated tool arguments cannot masquerade as RPC errors") {
     CHECK_FALSE(browser_detail::rpc_error(wire));
 }
 
+TEST_CASE("content-less grounding chunks cannot masquerade as RPC errors", "[grounding]") {
+    // A finish or grounding chunk carries a candidate without content.
+    for (auto wire : {R"([[[null,1,null,null,[],null,null,null,null,[[8,"source title"],[16,"segment"]]]],null,[1,2,3]])",
+                      R"([[[null,null,null,null,null,null,null,null,null,[3,"query"]]]])",
+                      R"([[[[null,"model"],1,null,null,null,[5,"metadata"]]]])"})
+        CHECK_FALSE(browser_detail::rpc_text_error(wire));
+    // Deeper wrapping of a real status envelope is still recognized.
+    auto wrapped = browser_detail::rpc_text_error(R"([[[[8,"quota exhausted"]]]])");
+    REQUIRE(wrapped.has_value());
+    CHECK(wrapped->status == 429);
+}
+
 TEST_CASE("RPC recovery metadata distinguishes route glitches quota windows and ordinary errors", "[upstream-policy]") {
     auto route = browser_detail::rpc_text_error(R"([[5,"Ambiguous request for service '' and method '/GenerativeService.GenerateContent'"]])");
     REQUIRE(route); CHECK(route->status == 404); CHECK(route->code == "transient_rpc_route");

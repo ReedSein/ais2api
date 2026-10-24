@@ -910,3 +910,18 @@ TEST_CASE("json_size matches serialized length without serializing", "[protocol]
     CHECK(json_size(values) == json::serialize(values).size());
     CHECK(json_size(nested) == json::serialize(nested).size());
 }
+
+TEST_CASE("Upstream additions are skipped and reported instead of failing generation", "[protocol][grounding]") {
+    // Part slots 9 and 15, candidate slot 9 and chunk slot 8 carry additions;
+    // a scalar where a part belongs is skipped as well.
+    auto chunk = json::parse(R"([[[[[[null,"answer",null,null,null,null,null,null,null,["moved"],null,null,null,null,null,[["https://example.com","Example"]]],null,5],"model"],1,null,null,null,null,null,null,null,[["query"]]]],null,null,null,null,null,null,null,["grounding"]])");
+    auto event = decode_chunk(chunk);
+    auto &parts = event.at("candidates").as_array()[0].as_object().at("content").as_object().at("parts").as_array();
+    REQUIRE(parts == json::array{json::object{{"text", "answer"}}});
+    REQUIRE(take_upstream_ignored(event) ==
+            json::parse(R"(["chunk[8]","candidate[9]","part[9]","part[15]","part"])"));
+    REQUIRE_FALSE(event.contains(upstream_ignored_key));
+    REQUIRE(take_upstream_ignored(event).empty());
+    auto plain = decode_chunk(response_wire(one(json::array{nullptr, "plain"})));
+    REQUIRE_FALSE(plain.contains(upstream_ignored_key));
+}

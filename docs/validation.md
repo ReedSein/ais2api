@@ -4,7 +4,7 @@
 
 ## 已执行
 
-Google 搜索与内置工具转换的后续修复和验证见 [专项报告](reports/grounding-tools-2026-10-22.md)。本轮没有可用的已导入账号，未进行真实 Google 搜索验收。
+Google 搜索与内置工具转换的后续修复和验证见 [专项报告](reports/grounding-tools-2026-10-22.md)。本轮没有可用的已导入账号，未进行真实 Google 搜索验收。2026-10-24 的搜索 502 修复与 `*-search` 模型见 [专项报告](reports/search-fix-2026-10-24.md)，已在本机实例上用 `gemini-3.1-flash-lite` 完成真实账号验收。
 
 | 范围 | 环境与结果 | 能证明的范围 |
 |---|---|---|

@@ -141,6 +141,7 @@ export interface Config {
   browser_proxy_relay?: boolean
   headless?: boolean
   ignore_unsupported_parameters?: boolean
+  search_model_drop_functions?: boolean
   browser_idle_seconds?: number
   model_aliases?: Record<string, string>
   configured_models?: Array<string | Record<string, unknown>>

@@ -382,7 +382,6 @@ TEST_CASE("Compatibility config reload changes all data APIs without restarting"
         REQUIRE(response.result_int() == 200);
         REQUIRE(response.body().find("\"strict\":true") == std::string::npos);
         REQUIRE(response.body().find("\"background\":true") == std::string::npos);
-        REQUIRE(response.body().find("web_search") == std::string::npos);
         REQUIRE(server.call(std::string("/v1beta/models/synthetic-schema:") + (streaming ? "streamGenerateContent?alt=sse" : "generateContent"),
             R"({"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"candidateCount":2},"toolConfig":{"functionCallingConfig":{"mode":"ANY"}},"tools":[{"urlContext":{}}]})").result_int() == 200);
     }
@@ -832,7 +831,7 @@ TEST_CASE("Responses terminal states distinguish token exhaustion and upstream f
 TEST_CASE("Unsupported Responses state and tools fail before generation", "[generation][http][responses]") {
     GenerationServer server;
     for (const auto &extra : {R"("store":true)", R"("previous_response_id":"resp_other")",
-                              R"("background":true)", R"("tools":[{"type":"web_search"}])",
+                              R"("background":true)", R"("tools":[{"type":"file_search","vector_store_ids":["vs_1"]}])",
                               R"("stream":"true")"}) {
         auto response = server.call("/v1/responses", std::string(R"({"model":"synthetic-stream","input":"question",)") + extra + "}");
         INFO(response.body());

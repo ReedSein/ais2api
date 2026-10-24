@@ -2,6 +2,8 @@
 
 [Google 请求逻辑对齐](upstream-request-alignment-2026-10-22.md)整理模型默认、会员等级头、重试、配额冷却与完成判定的落地范围、保留差异及验证证据。
 
+[搜索 502 修复与搜索模型](search-fix-2026-10-24.md)记录与参考项目的搜索差异、响应容错解析、`*-search` 模型、OpenAI 搜索入口，以及 `gemini-3.1-flash-lite` 的真实账号验收。
+
 [Google Search 与内置工具转换修复](grounding-tools-2026-10-22.md)记录 RikkaHub 混用工具的拒绝原因、搜索参数与时区转换、回归覆盖和真实账号验收边界。
 
 [Gemini 客户端兼容修复](gemini-clients-2026-10-22.md)记录 RikkaHub / SillyTavern 源码核查、请求合同修复和离线 HTTP/SSE 回归，标明预算及种子限制。

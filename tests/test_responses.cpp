@@ -34,7 +34,6 @@ TEST_CASE("Responses reject unsupported state and input items", "[responses]") {
          R"({"model":"m","input":"x","background":true})",
          R"({"model":"m","input":"x","previous_response_id":"resp_old"})",
          R"({"model":"m","input":[{"type":"item_reference","id":"x"}]})",
-         R"({"model":"m","input":"x","tools":[{"type":"web_search"}]})",
          R"({"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"file:///secret"}]}]})"})
         REQUIRE_THROWS_AS(responses_to_chat(read(text)), Error);
 }
@@ -229,8 +228,8 @@ TEST_CASE("Responses opt-in sanitizer discards known optional features", "[respo
     auto input = read(R"({"model":"m","input":"hello","store":true,"background":true,"previous_response_id":"resp_old","conversation":{"id":"conv_old"},"include":["reasoning.encrypted_content"],"truncation":"auto","service_tier":"priority","parallel_tool_calls":false,"reasoning":{"effort":"low","summary":"concise"},"tools":[{"type":"web_search"},{"type":"function","name":"f"},{"type":"file_search","vector_store_ids":["vs_1"]}],"tool_choice":{"type":"web_search"}})");
     json::array ignored;
     discard_unsupported_responses(input, ignored);
-    REQUIRE(ignored.size() == 12);
-    REQUIRE(input.at("tools").as_array().size() == 1);
+    REQUIRE(ignored.size() == 11);
+    REQUIRE(input.at("tools").as_array().size() == 2);
     REQUIRE(input.at("reasoning").as_object().at("effort") == "low");
     REQUIRE(input.at("input") == "hello");
     REQUIRE_NOTHROW(responses_to_chat(input));
@@ -268,7 +267,6 @@ TEST_CASE("Responses sanitizer removes strict flags before echo options", "[resp
 TEST_CASE("Responses sanitizer understands common built-in tool configuration", "[responses]") {
     for (auto tool : {
         R"({"type":"code_interpreter","container":{"type":"auto","file_ids":["file_1"],"memory_limit":"4g"}})",
-        R"({"type":"web_search","filters":{"allowed_domains":["example.com"]},"user_location":{"type":"approximate","city":"Tokyo","country":"JP","region":"Tokyo","timezone":"Asia/Tokyo"}})",
         R"({"type":"mcp","server_label":"docs","headers":{"Authorization":"secret"},"allowed_tools":["lookup"],"require_approval":"never"})",
         R"({"type":"mcp","server_label":"docs","allowed_tools":{"tool_names":["lookup"],"read_only":true},"require_approval":{"always":{"tool_names":["write"]},"never":{"tool_names":["lookup"]}}})"}) {
         auto input = read(std::string(R"({"model":"m","input":"x","tools":[)") + tool + "]}");
@@ -278,6 +276,21 @@ TEST_CASE("Responses sanitizer understands common built-in tool configuration", 
         REQUIRE(ignored.size() == 1);
         REQUIRE_NOTHROW(responses_to_chat(input));
     }
+}
+TEST_CASE("Responses web_search maps to Chat web_search_options", "[responses][grounding]") {
+    for (bool sanitize : {false, true}) {
+        auto input = read(R"({"model":"m","input":"x","tools":[{"type":"web_search","search_context_size":"high","filters":{"allowed_domains":["example.com"]},"user_location":{"type":"approximate","city":"Tokyo","country":"JP","timezone":"Asia/Tokyo"}},{"type":"function","name":"f"}]})");
+        json::array ignored;
+        if (sanitize) discard_unsupported_responses(input, ignored);
+        REQUIRE(ignored.empty());
+        auto chat = responses_to_chat(input);
+        REQUIRE(chat.at("web_search_options") == json::parse(R"({"search_context_size":"high","user_location":{"type":"approximate","approximate":{"city":"Tokyo","country":"JP","timezone":"Asia/Tokyo"}},"filters":{"allowed_domains":["example.com"]}})"));
+        REQUIRE(chat.at("tools").as_array().size() == 1);
+    }
+    auto only = responses_to_chat(read(R"({"model":"m","input":"x","tools":[{"type":"web_search_preview"}]})"));
+    REQUIRE(only.at("web_search_options") == json::object{});
+    REQUIRE_FALSE(only.contains("tools"));
+    REQUIRE_THROWS_AS(responses_to_chat(read(R"({"model":"m","input":"x","tools":[{"type":"web_search"},{"type":"web_search_preview"}]})")), Error);
 }
 TEST_CASE("Responses sanitizer preserves malformed built-in configuration", "[responses]") {
     for (auto tool : {

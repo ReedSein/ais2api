@@ -147,6 +147,7 @@ json::object Config::to_json(bool portable_paths) const {
           {"browser_proxy_relay", browser_proxy_relay},
           {"headless", headless},
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
+          {"search_model_drop_functions", search_model_drop_functions},
           {"browser_idle_seconds", browser_idle_seconds},
           {"limits",
            {{"request_bytes", limits.request_bytes},
@@ -216,6 +217,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
        {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
         {"AIS2API_BROWSER_PROXY_RELAY", "browser_proxy_relay"},
         {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
+        {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
         {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"}}) {
     auto v = env(pair.first);
     if (env_exists(pair.first)) {
@@ -280,7 +282,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters", "browser_idle_seconds", "limits", "model_aliases",
+             "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -325,6 +327,9 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (!o.at("ignore_unsupported_parameters").is_bool())
     throw Error(400, "invalid_config", "ignore_unsupported_parameters must be boolean");
   c.ignore_unsupported_parameters = o.at("ignore_unsupported_parameters").as_bool();
+  if (!o.at("search_model_drop_functions").is_bool())
+    throw Error(400, "invalid_config", "search_model_drop_functions must be boolean");
+  c.search_model_drop_functions = o.at("search_model_drop_functions").as_bool();
   const auto idle = number(o.at("browser_idle_seconds"));
   if (idle > 86400)
     throw Error(400, "invalid_config", "browser_idle_seconds must be 0 or 10..86400");

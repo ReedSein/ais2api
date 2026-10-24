@@ -75,6 +75,8 @@ The effective configuration combines defaults, the configuration file, `AIS2API_
 
 `ignore_unsupported_parameters` is a hot-reloadable config boolean, default false. Set it to true and run `ais2api config reload`, or set `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`, to discard known unsupported optional generation controls. No dedicated CLI flag is required. Dropped fields are logged by name; see [compatibility behavior](protocol.md#optional-unsupported-parameter-dropping).
 
+`search_model_drop_functions` is a hot-reloadable config boolean, default true. It decides what a `*-search` model does with a request that also declares custom functions, which upstream refuses to combine with Google Search: true drops the functions and keeps search, false keeps the caller's tools and adds no search. Set it in `config.json` and run `ais2api config reload`, or use `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS=false`. See [search models](protocol.md#search-models).
+
 ## Accounts and keys
 
 ```text

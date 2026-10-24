@@ -153,3 +153,96 @@ TEST_CASE("OpenAI extension forwards native grounding options", "[protocol][grou
     REQUIRE(wire[6] == json::parse("[[null,null,null,[null,[null,[]]]]]"));
     REQUIRE(empty_slot(wire, 13));
 }
+
+TEST_CASE("Search model ids enable Google Search on the base model", "[protocol][grounding][search-model]") {
+    auto omitted = grounding_body("[]");
+    omitted.erase("tools");
+    for (auto [model, expected] : {std::pair{"gemini-text-search", "[[null,null,null,[null,[[]]]]]"},
+                                   std::pair{"models/gemma-test-SEARCH", "[[null,null,null,[null,[[]]]]]"},
+                                   std::pair{"gemini-image-search", "[[null,null,null,[null,[[],[]]]]]"}}) {
+        auto request = normalize_gemini(model, omitted, false, Config{});
+        REQUIRE_FALSE(request.model.ends_with("-search"));
+        REQUIRE_FALSE(request.model.ends_with("-SEARCH"));
+        auto wire = encode_request(request, {}, "s", "Asia/Tokyo");
+        REQUIRE(wire[0] == json::value("models/" + request.model));
+        REQUIRE(wire[6] == json::parse(expected));
+    }
+    // Ordinary models keep search off unless the caller asks for it.
+    auto plain = encode_request(normalize_gemini("gemini-text", omitted, false, Config{}), {}, "s");
+    REQUIRE(empty_slot(plain, 6));
+    REQUIRE(empty_slot(plain, 13));
+    REQUIRE(empty_slot(encode_request(normalize_gemini("-search", omitted, false, Config{}), {}, "s"), 6));
+    // Aliases resolve first and model defaults apply to the base model.
+    Config cfg;
+    cfg.model_aliases["web"] = "gemini-text-search";
+    cfg.model_defaults["gemini-text"] = json::parse(R"({"generationConfig":{"temperature":0.2}})");
+    auto aliased = normalize_gemini("web", omitted, false, cfg);
+    REQUIRE(aliased.model == "gemini-text");
+    REQUIRE(aliased.gemini.at("generationConfig").as_object().at("temperature") == 0.2);
+    REQUIRE(encode_request(aliased, {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+}
+
+TEST_CASE("Search models keep caller builtins and do not duplicate search", "[protocol][grounding][search-model]") {
+    auto builtins = encode_request(grounding_request(R"([{"urlContext":{}}])", "gemini-text-search"), {}, "s");
+    REQUIRE(builtins[6] == json::parse("[[null,null,null,null,null,null,null,[]],[null,null,null,[null,[[]]]]]"));
+    auto image_only = encode_request(grounding_request(R"([{"googleSearch":{"searchTypes":{"imageSearch":{}}}}])", "gemini-image-search"), {}, "s");
+    REQUIRE(image_only[6] == json::parse("[[null,null,null,[null,[null,[]]]]]"));
+    auto none = grounding_body("[]");
+    none.erase("tools");
+    none["toolConfig"] = json::parse(R"({"functionCallingConfig":{"mode":"NONE"}})");
+    REQUIRE(empty_slot(encode_request(normalize_gemini("gemini-text-search", none, false, Config{}), {}, "s"), 6));
+}
+
+TEST_CASE("Search model function policy follows the configuration switch", "[protocol][grounding][search-model]") {
+    auto body = grounding_body(R"([{"functionDeclarations":[{"name":"lookup"}]},{"codeExecution":{}}])");
+    body["toolConfig"] = json::parse(R"({"functionCallingConfig":{"mode":"AUTO","allowedFunctionNames":["lookup"]}})");
+    Config drop;
+    REQUIRE(drop.search_model_drop_functions);
+    auto dropped = normalize_gemini("gemini-text-search", body, false, drop);
+    REQUIRE(dropped.ignored_parameters == json::parse(R"(["tools.functionDeclarations","toolConfig.functionCallingConfig"])"));
+    REQUIRE(encode_request(dropped, {}, "s")[6] == json::parse("[[[]],[null,null,null,[null,[[]]]]]"));
+    Config keep;
+    keep.search_model_drop_functions = false;
+    auto kept = normalize_gemini("gemini-text-search", body, false, keep);
+    REQUIRE(kept.ignored_parameters.empty());
+    REQUIRE(encode_request(kept, {}, "s")[6] == json::parse(R"([[[]],[null,[["lookup"]]]])"));
+    // Without the suffix, functions and search pass through as requested.
+    auto plain = encode_request(grounding_request(R"([{"functionDeclarations":[{"name":"lookup"}]},{"googleSearch":{}}])"), {}, "s");
+    REQUIRE(plain[6] == json::parse(R"([[null,null,null,[null,[[]]]],[null,[["lookup"]]]])"));
+}
+
+TEST_CASE("OpenAI web_search_options enables search like a search model", "[protocol][grounding][search-model]") {
+    auto body = json::parse(R"({"model":"gemini-text","messages":[{"role":"user","content":"news"}],"web_search_options":{"search_context_size":"low","user_location":{"type":"approximate","approximate":{"country":"JP"}}}})").as_object();
+    auto request = normalize_openai(body, Config{});
+    REQUIRE(request.model == "gemini-text");
+    REQUIRE(request.ignored_parameters == json::parse(R"(["web_search_options.search_context_size","web_search_options.user_location"])"));
+    REQUIRE(encode_request(request, {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+    auto suffixed = json::parse(R"({"model":"gemini-text-search","messages":[{"role":"user","content":"news"}],"tools":[{"type":"function","function":{"name":"lookup"}}]})").as_object();
+    REQUIRE(encode_request(normalize_openai(suffixed, Config{}), {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+    for (auto options : {R"({"search_context_size":"huge"})", R"({"user_location":{"type":"exact"}})",
+                         R"({"user_location":{"type":"approximate","approximate":{"city":1}}})", R"({"typo":true})"}) {
+        auto invalid = body;
+        invalid["web_search_options"] = json::parse(options);
+        REQUIRE_THROWS_AS(normalize_openai(invalid, Config{}), Error);
+    }
+}
+
+TEST_CASE("Google Search public options are reported without disabling search", "[protocol][grounding]") {
+    auto request = grounding_request(R"([{"google_search":{"time_range_filter":{"start_time":"2026-01-01T00:00:00Z"},"exclude_domains":["example.com"]}}])");
+    REQUIRE(request.ignored_parameters == json::parse(R"(["tools.googleSearch.timeRangeFilter","tools.googleSearch.excludeDomains"])"));
+    REQUIRE(encode_request(request, {}, "s")[6] == json::parse("[[null,null,null,[null,[[]]]]]"));
+    for (auto tools : {R"([{"googleSearch":{"timeRangeFilter":{"startTime":1}}}])",
+                       R"([{"googleSearch":{"timeRangeFilter":{"typo":"x"}}}])",
+                       R"([{"googleSearch":{"excludeDomains":[1]}}])",
+                       R"([{"googleSearch":{"unknown":true}}])"})
+        REQUIRE_THROWS_AS(grounding_request(tools), Error);
+}
+
+TEST_CASE("Search model listings cover generative Gemini, Gemma and image models", "[protocol][grounding][search-model]") {
+    for (auto id : {"gemini-2.5-flash", "gemma-3-27b-it", "imagen-image-preview"})
+        REQUIRE(lists_search_variant(id, {}));
+    for (auto id : {"gemini-2.5-flash-search", "gemini-embedding-001", "gemini-2.5-flash-preview-tts", "learnlm-2.0"})
+        REQUIRE_FALSE(lists_search_variant(id, {}));
+    REQUIRE_FALSE(lists_search_variant("gemini-x", json::object{{"supportedGenerationMethods", json::array{"countTokens"}}}));
+    REQUIRE(lists_search_variant("gemini-x", json::object{{"supportedGenerationMethods", json::array{"generateContent"}}}));
+}
