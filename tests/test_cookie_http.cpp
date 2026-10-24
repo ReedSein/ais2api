@@ -65,10 +65,13 @@ struct PushServer {
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
         thread = std::jthread([this] { try { serve_with_backend(config, std::make_unique<PushBackend>(state)); }
                                       catch (...) { failure = std::current_exception(); } });
-        for (unsigned i = 0; i < 150; ++i) {
+        // Sanitizer builds on shared runners can take seconds to start.
+        for (const auto deadline = Clock::now() + 30s; Clock::now() < deadline;) {
             try { local_call(config, {{"command", "status"}}); return; } catch (const Error &) {}
             std::this_thread::sleep_for(20ms);
         }
+        // A late start would otherwise block the jthread join forever.
+        try { local_call(config, {{"command", "stop"}}); } catch (...) {}
         throw std::runtime_error("Cookie HTTP test service did not start");
     }
     ~PushServer() {

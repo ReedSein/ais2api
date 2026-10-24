@@ -45,11 +45,18 @@ struct AdminServer {
             catch (...) { failure = std::current_exception(); }
         });
         bool ready = false;
-        for (int i = 0; i < 150; ++i) {
+        // Sanitizer builds on shared runners can take seconds to start.
+        for (const auto deadline = Clock::now() + 30s; Clock::now() < deadline;) {
             try { local_call(config, {{"command", "status"}}); ready = true; break; }
             catch (...) { std::this_thread::sleep_for(20ms); }
         }
-        if (!ready) { if (failure) std::rethrow_exception(failure); throw std::runtime_error("Admin test server failed to start"); }
+        if (!ready) {
+            // A late start would otherwise block the join forever.
+            try { local_call(config, {{"command", "stop"}}); } catch (...) {}
+            if (thread.joinable()) thread.join();
+            if (failure) std::rethrow_exception(failure);
+            throw std::runtime_error("Admin test server failed to start");
+        }
     }
     ~AdminServer() {
         try { local_call(config, {{"command", "stop"}}); } catch (...) {}

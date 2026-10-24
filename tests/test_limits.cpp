@@ -44,7 +44,8 @@ struct LimitsServer {
         config.api_key = key;
         atomic_write(config.config_file, json::serialize(config.to_json()), true);
         running = std::async(std::launch::async, [this] { return serve(config); });
-        for (unsigned i = 0; i < 100; ++i) {
+        // Sanitizer builds on shared runners can take seconds to start.
+        for (const auto deadline = Clock::now() + 30s; Clock::now() < deadline;) {
             if (running.wait_for(0ms) == std::future_status::ready) {
                 running.get();
                 throw std::runtime_error("Test service exited during startup");
@@ -55,6 +56,11 @@ struct LimitsServer {
             } catch (const Error &) {
             }
             std::this_thread::sleep_for(20ms);
+        }
+        // A late start would otherwise block the future's destructor forever.
+        try {
+            local_call(config, {{"command", "stop"}});
+        } catch (...) {
         }
         throw std::runtime_error("Test service failed to open its control endpoint");
     }

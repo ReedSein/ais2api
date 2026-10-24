@@ -31,8 +31,9 @@ struct LiveServer {
         key="http-test-"+random_hex(24);config.api_key=configured_key?key:"";
         fs::create_directories(directory);atomic_write(config.config_file,json::serialize(config.to_json()),true);
         thread=std::jthread([this]{try{serve(config);}catch(...){failure=std::current_exception();}});
-        bool ready=false;for(unsigned i=0;i<100;++i){try{local_call(config,{{"command","status"}});ready=true;break;}catch(const Error&){}std::this_thread::sleep_for(20ms);}
-        if(!ready){if(thread.joinable())thread.join();if(failure)std::rethrow_exception(failure);throw std::runtime_error("HTTP test service did not start");}
+        // Sanitizer builds on shared runners can take seconds to start; a late start would otherwise block the join forever.
+        bool ready=false;for(const auto deadline=Clock::now()+30s;Clock::now()<deadline;){try{local_call(config,{{"command","status"}});ready=true;break;}catch(const Error&){}std::this_thread::sleep_for(20ms);}
+        if(!ready){try{local_call(config,{{"command","stop"}});}catch(...){}if(thread.joinable())thread.join();if(failure)std::rethrow_exception(failure);throw std::runtime_error("HTTP test service did not start");}
     }
     ~LiveServer(){try{local_call(config,{{"command","stop"}});}catch(...){}if(thread.joinable())thread.join();std::error_code ec;fs::remove_all(directory,ec);}
     http::response<http::string_body> call(http::verb method,std::string target,std::string body={},std::string auth={},std::initializer_list<std::pair<std::string,std::string>> headers={}){

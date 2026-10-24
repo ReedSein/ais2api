@@ -242,7 +242,8 @@ struct GenerationServer {
             catch (...) { failed = true; }
         });
         bool ready = false;
-        for (unsigned i = 0; i < 100 && !failed; ++i) {
+        // Sanitizer builds on shared runners can take seconds to start.
+        for (const auto deadline = Clock::now() + 30s; Clock::now() < deadline && !failed;) {
             try { ready = bool_or(local_call(config, {{"command", "status"}}), "running"); }
             catch (const Error&) {}
             if (ready) break;
