@@ -108,7 +108,9 @@ uses `x64-windows-static`, checks the vcpkg baseline, builds and runs CTest.
 The installation is `build/windows/install`; the ZIP is under
 `build/windows/packages`. Use `-VcpkgRoot PATH` to reuse an existing pinned
 checkout, or `-BuildDirectory PATH` for a separate build. It does not reset an
-existing dependency checkout. `/MT` is configured for the project and the
+existing dependency checkout. `-Triplet x64-windows-static-release` builds
+release-only dependencies (about half the cold vcpkg time) for non-Debug
+configurations; CI uses it. `/MT` is configured for the project and the
 selected vcpkg triplet so the package does not depend on a separately installed
 MSVC redistributable for project code.
 
@@ -314,11 +316,15 @@ results. This work adds no claim that these device or account checks have run.
 
 ## Automated coverage and limits
 
-`.github/workflows/build.yml` defines Ubuntu 24.04 GCC and Clang builds with
-ASan/UBSan both enabled and disabled, a short Clang fuzz smoke, a Windows MSVC
-build, a Debian 13 container/GCC build, and Node bridge syntax/behavior checks. Desktop jobs run the isolated
-CLI/IPC/HTTP smoke harness without Google credentials and archive the installed
-runtime as an artifact retained for 28 days. The workflow has no path filter that could skip script-only changes.
+`.github/workflows/build.yml` defines an Ubuntu 24.04 GCC release build, an
+Ubuntu 24.04 Clang build with ASan/UBSan and a short fuzz smoke, a Windows MSVC
+build, a Debian 13 container/GCC build, and Node bridge syntax/behavior checks.
+Both workflows run for pull requests and pushes to `main`. Desktop jobs run the isolated
+CLI/IPC/HTTP smoke harness without Google credentials; the non-sanitizer jobs
+archive the installed runtime as an artifact retained for 28 days. vcpkg binary
+caches are scoped to the runner image (or the Debian toolchain packages), since
+vcpkg ABI hashes include the compiler, and are saved whenever a job builds new
+packages. The workflow has no path filter that could skip script-only changes.
 
 Workflow definitions are not successful remote runs. Real Google login, private
 RPC compatibility, browser downloads and Android process lifecycle remain

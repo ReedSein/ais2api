@@ -7,6 +7,7 @@
 name: Native builds
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -14,6 +15,9 @@ permissions:
 concurrency:
   group: native-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+# Dependency caches are scoped to the toolchain (vcpkg ABI hashes include the compiler),
+# keyed per run so newly built packages are always saved, and restored from the newest
+# entry of the same scope.
 jobs:
   bridge:
     runs-on: ubuntu-24.04
@@ -40,8 +44,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [gcc, clang]
-        sanitize: ['OFF', 'ON']
+        include:
+          - compiler: gcc
+            sanitize: 'OFF'
+          - compiler: clang
+            sanitize: 'ON'
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
@@ -56,11 +63,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang cmake ninja-build git curl zip unzip tar pkg-config autoconf automake libtool python3
-          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Compute dependency cache key
+        id: deps
+        run: echo "scope=ubuntu24-${{ matrix.compiler }}-x64-linux-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore dependency cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
-          key: ubuntu24-vcpkg-${{ matrix.compiler }}-${{ hashFiles('vcpkg.json') }}
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
+            ${{ steps.deps.outputs.scope }}-
+      - name: Count restored dependency archives
+        id: restored
+        run: |
+          mkdir -p build/vcpkg-cache
+          echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
       - name: Build, test, and stage native runtime
         shell: bash
         env:
@@ -71,7 +89,17 @@ jobs:
           options=()
           if [[ '${{ matrix.sanitize }}' == ON ]]; then options+=(--sanitizers); else options+=(--package); fi
           if [[ '${{ matrix.compiler }}' == clang && '${{ matrix.sanitize }}' == ON ]]; then options+=(--fuzzer); fi
-          sh scripts/build.sh linux --webui --jobs 2 "${options[@]}"
+          sh scripts/build.sh linux --webui --jobs "$(nproc)" "${options[@]}"
+      - name: Check for newly built dependencies
+        id: built
+        if: ${{ !cancelled() }}
+        run: echo "changed=$(( $(find build/vcpkg-cache -name '*.zip' | wc -l) > ${{ steps.restored.outputs.count || 0 }} ))" >> "$GITHUB_OUTPUT"
+      - name: Save dependency cache
+        if: ${{ !cancelled() && steps.built.outputs.changed == '1' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
       - name: CLI and IPC smoke without Google credentials
         run: |
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
@@ -101,7 +129,9 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}/build/deps/vcpkg
-      VCPKG_MAX_CONCURRENCY: '2'
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Install Debian development tools
         run: |
@@ -111,14 +141,37 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.12'
-      - name: Prepare dependency cache
-        run: mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # The container has no runner image version; fingerprint the toolchain packages instead.
+      - name: Compute dependency cache key
+        id: deps
+        run: |
+          toolchain=$(dpkg-query -W -f='${Package}=${Version}\n' gcc g++ cmake ninja-build binutils libc6-dev | sha256sum | cut -c1-16)
+          echo "scope=debian13-gcc-x64-linux-$toolchain" >> "$GITHUB_OUTPUT"
+      - name: Restore dependency cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
-          key: debian13-gcc-vcpkg-${{ hashFiles('vcpkg.json') }}
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
+            ${{ steps.deps.outputs.scope }}-
+      - name: Count restored dependency archives
+        id: restored
+        run: |
+          mkdir -p build/vcpkg-cache
+          echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
       - name: Build, test, install, and package
-        run: sh scripts/build.sh linux --webui --package --jobs 2
+        run: sh scripts/build.sh linux --webui --package --jobs "$(nproc)"
+      - name: Check for newly built dependencies
+        id: built
+        if: ${{ !cancelled() }}
+        run: echo "changed=$(( $(find build/vcpkg-cache -name '*.zip' | wc -l) > ${{ steps.restored.outputs.count || 0 }} ))" >> "$GITHUB_OUTPUT"
+      - name: Save dependency cache
+        if: ${{ !cancelled() && steps.built.outputs.changed == '1' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
       - name: CLI and IPC smoke without Google credentials
         run: |
           python3 tests/cli_smoke.py --exe build/linux/install/bin/ais2api
@@ -142,18 +195,32 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\build\vcpkg-cache
       VCPKG_ROOT: ${{ github.workspace }}\build\deps\vcpkg
+      # Release-only dependencies halve cold vcpkg builds; CI never builds the Debug configuration.
+      VCPKG_TRIPLET: x64-windows-static-release
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.12'
-      - name: Prepare dependency cache
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # MSVC and PowerShell are part of the vcpkg ABI and change with each runner image update.
+      - name: Compute dependency cache key
+        id: deps
+        shell: bash
+        run: echo "scope=windows-msvc-$VCPKG_TRIPLET-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore dependency cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/vcpkg-cache
-          key: windows-msvc-static-${{ hashFiles('vcpkg.json') }}
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-
+            ${{ steps.deps.outputs.scope }}-
+      - name: Count restored dependency archives
+        id: restored
+        shell: bash
+        run: |
+          mkdir -p build/vcpkg-cache
+          echo "count=$(find build/vcpkg-cache -name '*.zip' | wc -l)" >> "$GITHUB_OUTPUT"
       - name: Parse PowerShell build entry point
         shell: pwsh
         run: |
@@ -162,7 +229,18 @@ jobs:
           if ($parseErrors.Count) { throw 'PowerShell syntax check failed' }
       - name: Build, test, install, and package
         shell: pwsh
-        run: ./scripts/build.ps1 -Jobs 2 -Package -WebUI
+        run: ./scripts/build.ps1 -Triplet $env:VCPKG_TRIPLET -Jobs $env:NUMBER_OF_PROCESSORS -Package -WebUI
+      - name: Check for newly built dependencies
+        id: built
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: echo "changed=$(( $(find build/vcpkg-cache -name '*.zip' | wc -l) > ${{ steps.restored.outputs.count || 0 }} ))" >> "$GITHUB_OUTPUT"
+      - name: Save dependency cache
+        if: ${{ !cancelled() && steps.built.outputs.changed == '1' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/vcpkg-cache
+          key: ${{ steps.deps.outputs.scope }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
       - name: CLI and IPC smoke without Google credentials
         shell: pwsh
         run: |
