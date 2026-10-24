@@ -1,25 +1,21 @@
-# Security regression review
+# 安全回归审查
 
-This review is limited to the four fixes requested during implementation. Tests added in `tests/test_limits.cpp` use local files and loopback sockets; none of them download media, install packages, launch Chromium, or contact Google.
+本审查仅限于实现期间提出的四项修复，记录日期为 2026-10-20。新增于 `tests/test_limits.cpp` 的测试只使用本地文件和回环套接字，不下载媒体、不安装软件包、不启动 Chromium，也不访问 Google。
 
-## Automated regressions prepared
+## 自动化回归
 
-- An existing partial archive larger than the locked archive size must be rejected with `413/download_limit`, and removed, before network access.
-- A complete partial archive with the expected SHA-256 must promote to the download cache without network access.
-- Promotion must also replace an invalid previous cache on Windows. This specifically exercises the complete-partial branch, rather than the completed-network-download branch.
-- Thirty-two incomplete HTTP headers may occupy the configured fixed connection slots. The next accepted connection must close, and closing the original peers must release all slots. Status is observed through the independent local control endpoint.
-- A request containing an existing inline image and another remote image near the cumulative request limit must fail with `413/media_limit` before fetching the second image. A private loopback URL intentionally distinguishes budget rejection from URL validation; the assertion requires `media_limit`.
+- 已存在的下载残片大于锁定的归档大小时，必须在访问网络前以 `413/download_limit` 拒绝并删除。
+- SHA-256 符合预期的完整残片必须在不访问网络的情况下提升为下载缓存。
+- 在 Windows 上，提升操作也必须能替换先前无效的缓存。该用例专门覆盖“完整残片”分支，而不是“网络下载完成”分支。
+- 32 个未完成的 HTTP 请求头可以占满固定的连接槽位；下一个被接受的连接必须被关闭，关闭原有连接后所有槽位都必须释放。状态通过独立的本地控制通道观察。
+- 请求中已有一张内联图片、另一张远程图片接近累计请求上限时，必须在抓取第二张图片之前以 `413/media_limit` 失败。这里有意使用私有回环 URL，以区分预算拒绝与 URL 校验；断言要求的是 `media_limit`。
 
-These five regressions passed in the Windows MSVC full suite on 2026-10-20. They remain offline/local checks; the dynamic-network and real-Termux limitations below still apply.
+以上五项回归在 2026-10-20 的 Windows MSVC 全量测试中通过。它们仍然是离线/本地检查，下文所述的动态网络与真实 Termux 限制依然存在。
 
-## Static verification and remaining limits
+## 静态审查与剩余限制
 
-The Termux launcher is now inside the selected `chromium-<version>-<platform>` directory, rather than a shared runtime-level script. `setup_runtime` checks the executable before updating `config.browser_executable`, and records the previous launcher when changing versions. Thus a new-version verification failure does not overwrite the old-version launcher or switch the stored configuration. This is static review only: no real Termux/proot installation or upgrade-failure test was performed.
-
-Media preparation now keeps a cumulative serialized request budget and derives each remote download allowance from the remaining budget. The offline test exercises refusal before an additional fetch. Actual cumulative expansion across several successful HTTPS downloads was not tested because production currently has no injectable media-fetch seam and the review does not use external network fixtures.
-
-The connection cap is acquired immediately after accept and before the header-read coroutine. The live counter is released by the coroutine-owned connection slot. The test checks observable admission and release through real loopback connections.
-
-The downloader now rejects oversized partial files, caps write callbacks including resumed bytes, and has a total 1800-second timeout. Streaming download overflow remains statically reviewed; a local TLS server fixture would be required to exercise the callback without external network access.
-
-A Windows-specific cache-promotion issue was identified: the complete-partial fast path originally renamed onto an existing invalid destination, whereas the completed-download path removed the destination first. The replacement-cache regression above must pass before considering this edge case resolved.
+- **Termux 启动器**：启动器现在位于所选的 `chromium-<version>-<platform>` 目录内，而不是运行时层级的共享脚本。`setup_runtime` 在更新 `config.browser_executable` 之前先检查可执行文件，并在切换版本时记录之前的启动器。因此新版本验证失败不会覆盖旧版本启动器，也不会切换已保存的配置。这只是静态审查，没有进行真实 Termux/proot 安装或升级失败测试。
+- **媒体预算**：媒体准备现在维护一个累计的序列化请求预算，每次远程下载的允许大小由剩余预算推导。离线测试覆盖了“在额外抓取前拒绝”。多次成功 HTTPS 下载的实际累计扩展没有测试，因为生产代码目前没有可注入的媒体抓取接口，且审查不使用外部网络夹具。
+- **连接上限**：连接配额在 accept 之后、读取请求头的协程之前立即获取，由协程持有的连接槽位释放。测试通过真实的回环连接检查可观察的准入与释放。
+- **下载器**：现在会拒绝超大的残片，限制写回调（包括续传的字节），并设置 1800 秒总超时。流式下载溢出仍为静态审查；要在不访问外网的情况下覆盖该回调，需要本地 TLS 服务器夹具。
+- **Windows 缓存提升**：曾发现一个 Windows 特有的问题——完整残片的快速路径原本直接重命名到已存在的无效目标上，而下载完成路径会先删除目标。上述“替换缓存”回归通过后，该边界情况才视为解决。

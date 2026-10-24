@@ -1,92 +1,186 @@
-# Protocol contract
+# 协议合同
 
-The implementation is new C++ code. The reference project's `docs/WIRE_SPECIFICATION.md` is used only as an upstream protocol description; its implementation and test fixtures are not reused. Upstream protocol facts are centralized in `src/protocol.cpp`; the Responses adapter is in `src/responses.cpp`.
+本文定义三种数据 API（Gemini、OpenAI Chat Completions、OpenAI Responses）的支持范围与转换规则。面向使用者的简要说明见 [客户端接入](clients.md)。
 
-## Request and response representation
+本项目的实现是独立编写的 C++ 代码。参考项目的 `docs/WIRE_SPECIFICATION.md` 仅作为上游协议的描述来源，没有复用其实现或测试样例。上游协议细节集中在 `src/protocol.cpp`，Responses 适配器位于 `src/responses.cpp`。
 
-Native Gemini model routes accept repeated leading `/v1beta` segments and extra slashes immediately after those version segments, e.g. `/v1beta/v1beta/models` and `/v1beta//v1beta/models/MODEL:streamGenerateContent`. This supports SillyTavern proxy URLs that already end in `/v1beta/` before the client appends its API version. List, detail, unary generation and SSE requests use the canonical `/v1beta/models` handlers with unchanged authentication. Model resources, query strings, other API versions and non-Gemini routes are not normalized.
+## 总体流程
 
-Model discovery is independent of generation bootstrap. It waits for the selected account identity, captures the page's real ListModels request through fetch or XHR, and checks the account slot before replay. It does not require a prompt editor, Run button, generation template or snapshot service. Cached results remain scoped to the verified browser context; explicit configured models retain their source marker. Missing or ambiguous page identity is distinct from a confirmed different account and never authorizes cross-account reuse.
+所有 API 适配器先把请求归一化为标准 Gemini 请求对象，再由浏览器传输层基于页面中实时捕获的模板重新编码为 JSPB 请求：
 
-All API adapters normalize to a standard Gemini request object. The browser transport receives a newly encoded JSPB request based on the captured live template. Known generation fields, contents, model, signature, system instruction, tools and cached-content fields are replaced or cleared for every request. Unknown template fields are retained for upstream compatibility. Model aliases resolve before encoding.
+- 每次请求都会替换或清空模板中已知的生成字段、contents、model、签名、系统提示、tools 与缓存内容字段；未知字段保留，以兼容上游变化。
+- 模型别名（`model_aliases`）在编码前解析。
+- 服务不保存聊天历史，客户端每次提交完整历史，可以任意编辑或删除单条消息。
 
-Supported Gemini content payloads are text, inlineData, functionCall, functionResponse, executableCode and codeExecutionResult. Parts retain their individual thought flag and thoughtSignature. Request FunctionCall/Response use upstream slots 10/11; response slots 3/4 are read first, with 10/11 fallbacks. Executable code and execution results use slots 7/8, respectively. Function values use typed protobuf Struct/Value encoding, including null, nested objects, booleans, empty lists and single-item lists. fileData and the Files API are explicitly unsupported.
+## Gemini 路由
 
-Each content remains a separate user/model message in its original position, including consecutive messages with the same role. systemInstruction is encoded separately at request slot 5 with wire role user. Missing tools and an empty tools list leave slot 6 null; the codec adds no search or separator messages unless the model id selects a [search model](#search-models). Evergreen model and cached-content slots 7/11 are cleared. Clients supply complete history on every call and can edit or delete individual messages. The gateway does not maintain chat history. See [true role and client signatures](true-role.md) for examples and compatibility limits.
+原生 Gemini 模型路由允许重复的 `/v1beta` 前缀，以及版本段之后紧跟的多余斜杠，例如 `/v1beta/v1beta/models` 和 `/v1beta//v1beta/models/MODEL:streamGenerateContent`。这是为了兼容末尾已经带 `/v1beta/` 的 SillyTavern 代理地址。列表、详情、普通生成和 SSE 请求都使用标准的 `/v1beta/models` 处理逻辑，鉴权不变。模型资源名、查询字符串、其他 API 版本和非 Gemini 路由不做归一化。
 
-thinkingLevel uses the verified upstream [mode=1, null, null, level] representation and accepts either case. Missing levels default to HIGH for text models and MINIMAL for models whose id contains `image`, following the reference policy. includeThoughts accepts a boolean: false removes thought text from responses before aggregation or SSE delivery, preserving signatures, function calls and usage. It does not disable model reasoning. For compatibility with native Gemini clients, thinkingBudget (integer >= -1) and seed (integer) are accepted but ignored: the private upstream has no verified mapping. Their field names are recorded in a `generation_parameters_ignored` log event without their values. In particular, thinkingBudget=0 does not turn reasoning off or suppress the default level.
+## 模型发现
 
-Gemini request containers, content parts, generation settings and tool declarations accept their supported snake_case aliases (including SillyTavern's function_declarations and google_search); duplicate spellings fail rather than choosing one. Caller-owned function args, responses and schema property names are preserved. candidateCount=1 uses the single-candidate upstream behavior; other values fail explicitly. responseModalities accepts either case. The deprecated HARM_CATEGORY_CIVIC_INTEGRITY setting is a no-op only when OFF or BLOCK_NONE; unsupported categories and unsupported enabled civic filters still fail. The four supported safety filters retain their requested thresholds. Native model list/detail responses always provide a nonempty displayName, falling back to the model id when missing, null or empty.
+模型发现与生成引导相互独立：等待所选账号身份确认后，捕获页面真实的 ListModels 请求（fetch 或 XHR），重放前检查账号槽位。它不需要提示词编辑器、Run 按钮、生成模板或快照服务。
 
-Generation settings include sampling, stop sequences, token limits, response MIME/schema, penalties, logprob request flags, text/image modalities, thinking configuration, media resolution and image aspect/size. Exact `model_defaults` fill missing generation and thinking fields individually; explicit request fields take priority. Gemini/Gemma text models default the four safety categories to OFF when safetySettings is omitted. Image models default to IMAGE-only and apply the reference transport cleanup: safety, response MIME/schema and media resolution are omitted from the wire. Combined TEXT/IMAGE output is encoded in the canonical IMAGE,TEXT order. Requesting logprobs does not promise returned logprob detail: that upstream response field is not documented. Supplemental protocol facts from the reference typed wire definitions establish code as `[languageCode, source]` and execution results as `[outcomeCode, output]`; these enums are preserved. Response parts are decoded tolerantly, like the reference client: unknown slots and malformed non-function payloads (text, inlineData, code, results, signatures) are skipped instead of failing the generation, while malformed function calls/responses still fail with `invalid_upstream`. Skipped wire locations such as `part[9]` or `candidate[9]`, never their content, are logged once per request as `upstream_fields_ignored`. Function-response text/inlineData attachments expand into adjacent content parts. Request thought flags use slot 12, avoiding collision with request functionCall slot 10.
+- 实时结果来源为 `live`；成功结果按账号缓存 10 分钟（`cache`）。
+- 没有可用账号或发现失败时，可以返回显式配置的 `configured_models`（`configured`）。
+- 页面身份缺失或不明确，与“确认是另一个账号”是两种情况，都不允许跨账号复用结果。
+- 不会虚构模型目录或 API Key。
 
-Schema encoding covers concrete string/number/integer/boolean/array/object types, nullable type arrays, nested properties/items, enum/required, sizes, ranges, pattern, example, oneOf/anyOf/allOf/not and propertyOrdering. All three APIs share the same schema adapter for tools and response formats. Gemini also accepts responseJsonSchema / response_json_schema as an alternative to responseSchema, with conflicts rejected. Local object JSON Pointer `$ref` values, `$defs` and definitions are expanded (including `~0` / `~1` escaped keys); remote, recursive, unresolved and conflicting reference siblings fail explicitly. Expansion is bounded to depth 64, 4096 nodes and an 8 MiB cumulative copy/hint budget.
+## 内容与消息
 
-For non-strict schemas, additionalProperties (boolean or schema), title, default and non-string scalar enums are accepted. The private upstream has no verified wire fields for these: additionalProperties restrictions, title, default and non-string enum values become description guidance, while `$schema`, `$id` and `$comment` annotations are omitted. Downgraded keywords are deduplicated in `generation_parameters_ignored` without logging property names or values. This is model guidance, not enforcement; clients must validate model output and tool arguments. String const becomes a singleton enum; homogeneous scalar enum/const can infer type. Arbitrary schema keywords, boolean/tuple schemas and unconstrained schemas without an inferable concrete type remain unsupported. Unions still require a concrete or inferable type. Strict OpenAI JSON-schema/function mode is rejected by default because the upstream cannot guarantee those semantics; the opt-in switch below can discard that requirement.
+支持的 Gemini 内容部件：`text`、`inlineData`、`functionCall`、`functionResponse`、`executableCode`、`codeExecutionResult`。
 
-Tools include function declarations, code execution, Google search, Google Maps and URL context. `parametersJsonSchema` is accepted as an alternative to parameters, and supplying both fails. NONE removes all tools; allowedFunctionNames filters custom functions. ANY / OpenAI required / named tool choice and VALIDATED are rejected locally: the private upstream has no verified forced-call or validated-decoding field. The reference implementation only filtered tools for these modes; this implementation does not present filtering as forced execution.
+- 每个部件保留各自的 `thought` 标志和 `thoughtSignature`。
+- 函数值使用带类型的 protobuf Struct/Value 编码，正确处理 null、嵌套对象、布尔值、空列表与单元素列表。
+- `fileData` 与 Files API 明确不支持。
+- 每条 content 作为独立的 user/model 消息保留在原位置，包括连续的同角色消息。
+- `systemInstruction` 单独编码（上游以 user 角色表示）。
+- 未提供 tools 或 tools 为空时不启用任何工具，也不会插入搜索或分隔消息；[搜索模型](#search-models) 除外。
+- 函数结果中的文本/内联数据附件会展开为相邻的内容部件。
 
-Chat Completions and Responses reject parallel_tool_calls=false by default because the upstream cannot guarantee a single invocation. Authorization schemes and JSON media types are compared case-insensitively, with exact token boundaries; application/json with charset parameters is supported, application/jsonp is rejected.
+示例与客户端限制见 [真 role 与思考签名](true-role.md)。
 
-## Optional unsupported parameter dropping
+## 生成参数
 
-`ignore_unsupported_parameters` defaults to false. Enable it through the management console's Configuration / API compatibility toggle, a config PATCH, or `"ignore_unsupported_parameters": true` in config.json followed by `ais2api config reload`. `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true` also enables it. It is hot-reloadable and applies to subsequent generation requests across all three APIs. Disabling restores the default rejection policy; it does not change the established non-strict schema metadata conversions described above.
+### 思考
 
-With the switch enabled, known unsupported optional parameters are removed before encoding, and their field names appear in `generation_parameters_ignored` without values:
+- `thinkingLevel` 不区分大小写。未指定时，文本模型默认 `HIGH`，id 中含 `image` 的模型默认 `MINIMAL`（与参考项目一致）。
+- `includeThoughts` 接受布尔值。`false` 会在聚合或 SSE 输出前移除思考文本，保留签名、函数调用和 usage；它不会关闭模型推理。
+- `thinkingBudget`（≥ -1 的整数）与 `seed`（整数）为兼容原生 Gemini 客户端而接受，但**被忽略**：私有上游没有经过验证的对应字段。字段名（不含值）记录在 `generation_parameters_ignored` 日志中。`thinkingBudget: 0` 不会关闭推理，也不会取消默认等级。
 
-- Chat: strict function/JSON flags, forced/named tool_choice, parallel_tool_calls=false, n>1, store=true, seed, logit_bias, service_tier, and unmappable none/xhigh reasoning effort. Remaining tools and supported schema constraints are retained.
-- Gemini: candidateCount>1, ANY/VALIDATED function-calling modes, cachedContent, unsupported audio output/speech/routing/model-selection options, unsupported builtin tool options, model-incompatible code/Maps/URL tools, and enabled deprecated civic-integrity filters. Supported tools, content and history are retained. Whole unsupported option objects are discarded as units; their object shape is checked, but their inactive internals are not a second vendor schema implementation.
-- Responses: storage/background/continuation controls, requested extra include data, automatic truncation, service tier, summary requests, parallel restriction, forced tool choice, strict flags and recognized unsupported builtin tools. Requests proceed synchronously using supplied full history, with storage disabled. Response options reflect removed top-level controls and strict flags.
-- Schema: known unsupported JSON Schema constraints (such as multipleOf, exclusive bounds, patternProperties, tuple-prefix/contains/uniqueItems constraints, conditional/dependency/unevaluated constraints, content annotations and read/write flags) are removed individually after structural validation. If a valid optional schema cannot be represented at all (remote/recursive references, boolean/tuple/unconstrained/multi-type forms), that root schema is removed. A removed output schema retains application/json MIME mode; a removed function schema retains the function name/description.
+### 字段别名与取值
 
-Dropped capabilities are not enforced or emulated. Unknown request/schema keywords, malformed retained fields, missing required input, conflicting definitions, invalid references, unsupported content/file attachments, authentication failures and resource limits still fail explicitly. This is not a catch-and-retry policy for arbitrary upstream 400 responses, and does not add unsupported endpoints or silently discard conversation content.
+- 请求容器、内容部件、生成设置和工具声明接受对应的 snake_case 写法（包括 SillyTavern 的 `function_declarations` 与 `google_search`）。同一字段出现两种拼写时报错，而不是任选其一。调用方自己的函数参数、返回值和 schema 属性名保持原样。
+- `candidateCount: 1` 按单候选处理，其他值报错。
+- `responseModalities` 不区分大小写。文字与图片同时输出时按 `IMAGE,TEXT` 的规范顺序编码。
+- 已废弃的 `HARM_CATEGORY_CIVIC_INTEGRITY` 仅在 `OFF` 或 `BLOCK_NONE` 时作为无操作接受；启用该类别或其他不支持的类别仍报错。四个受支持的安全类别保留请求的阈值。
+- 原生模型列表与详情始终提供非空的 `displayName`，缺失时回退为模型 id。
 
-Builtin model restrictions follow the reference: image models allow search, other Gemini models allow search/code/Maps/URL context, and other model families allow search/code. Incompatible builtins fail locally instead of being silently removed. Function declarations retain their existing handling. These gates describe request compatibility, not a guarantee that Google grants a particular account access.
+### 支持的设置与默认值
 
-Google Search supports both `googleSearch` and `google_search`; searchTypes and its nested webSearch/imageSearch fields also accept snake_case. Repeated built-in tools are deduplicated and function declarations share one wire group, placed after the builtins as in the reference client. The public `timeRangeFilter` (`startTime`/`endTime` strings) and `excludeDomains` (string list) options are validated, then dropped and reported as ignored parameters; search stays enabled. Other unknown googleSearch fields still fail. Models whose resolved id contains `image` combine requested web/image search into one search tool; other models use ordinary web search, matching the reference conversion. Text requests with active tools receive a fresh timezone context from the browser (UTC in standalone codec calls); captured tools and location never leak into later requests. No tools are enabled when omitted or empty.
+生成设置包括：采样参数、停止序列、token 上限、响应 MIME/schema、惩罚项、logprobs 请求标志、文字/图片模态、思考配置、媒体分辨率以及图片宽高比与尺寸。
 
-RikkaHub's `toolConfig.includeServerSideToolInvocations` boolean is accepted so combining custom functions with built-in tools does not fail locally. The private gateway has no verified mapping for its extra invocation records: it is reported through `generation_parameters_ignored` and does not promise those records. Legacy `googleSearchRetrieval.dynamicRetrievalConfig` accepts MODE_DYNAMIC / MODE_UNSPECIFIED and a threshold in [0,1], then maps to modern Google Search; dynamic retrieval controls are likewise reported as ignored. These conversions enable the tool, leaving actual execution to the model. Grounding citations/search entry metadata are not currently decoded from private responses. Use the Google provider / Google AI Studio route in RikkaHub and SillyTavern; Google Interactions remain unsupported. Chat Completions `web_search_options` and Responses `web_search` / `web_search_preview` enable Google Search as described below.
+- `model_defaults` 中与模型 id 精确匹配的条目逐项填充缺失的生成与思考字段，请求中显式提供的字段优先。
+- 省略 `safetySettings` 时，Gemini/Gemma 文本模型的四个安全类别默认为 `OFF`。
+- 图片模型默认只输出 `IMAGE`，并按参考项目的传输规则省略安全设置、响应 MIME/schema 和媒体分辨率。
+- 请求 logprobs 不保证返回 logprob 详情，该上游响应字段没有文档。
 
-## Search models
+### 响应解析
 
-Model ids ending in `-search` (case-insensitive, after `model_aliases`) select the base model with Google Search enabled by default, matching the reference project's `default_tools`. The suffix is removed before model defaults, account scheduling, quota accounting and the upstream request, and responses report the base model id, as with aliases. A real upstream model whose own id ends in `-search` therefore cannot be addressed directly.
+响应部件采用宽松解析（与参考客户端一致）：
 
-- No `tools`: text models receive `{"googleSearch":{}}`; models whose id contains `image` receive web plus image search.
-- Tools without function declarations: Google Search is appended unless a googleSearch / googleSearchRetrieval entry is already present.
-- Tools with function declarations: upstream rejects combining Google Search with custom functions. With `search_model_drop_functions` true (the default) the declarations are dropped, search is added, and `tools.functionDeclarations` plus any non-NONE `toolConfig.functionCallingConfig` are reported as ignored. With false, the caller's tools are kept unchanged and search is not added.
-- `functionCallingConfig.mode: NONE` still disables every tool, search included.
+- 未知槽位，以及格式异常的非函数载荷（文本、内联数据、代码、执行结果、签名）会被跳过，而不是让整个生成失败。
+- 格式异常的函数调用或函数结果仍以 `invalid_upstream` 失败。
+- 被跳过的位置（如 `part[9]`、`candidate[9]`，不含内容）每个请求记录一次 `upstream_fields_ignored` 日志。
+- 代码部件按 `[languageCode, source]`、执行结果按 `[outcomeCode, output]` 解析，枚举值原样保留。
 
-Ids without the suffix keep search off unless the request declares it. Model lists (`/v1/models`, `/v1beta/models` and their detail routes) follow every discovered or configured Gemini, Gemma or image model that supports generateContent (embedding and TTS models excluded) with a `<id>-search` entry whose `source` is `search_variant`; the Gemini list appends ` (Search)` to its displayName. Real ids are never shadowed. The management console's model page shows only the discovery cache.
+## JSON Schema
 
-Chat Completions `web_search_options` applies the same behavior to the requested model. `search_context_size` (low/medium/high), `user_location` (`{"type":"approximate","approximate":{city,country,region,timezone}}`) and `filters.allowed_domains` are validated and reported as ignored; no verified private wire mapping exists for them. Responses `web_search` / `web_search_preview` tools (one per request) are translated to these options, with the flat Responses location converted to the nested Chat shape; `tool_choice` naming web search is still unsupported. Search sources are not returned, so Responses emits no `web_search_call` output items.
+三种 API 的工具参数与响应格式共用同一个 schema 适配器。
+
+**直接支持**：具体的 string/number/integer/boolean/array/object 类型、可空类型数组、嵌套 properties/items、enum/required、长度与数值范围、pattern、example、oneOf/anyOf/allOf/not 以及 propertyOrdering。Gemini 还接受 `responseJsonSchema` / `response_json_schema` 作为 `responseSchema` 的替代，两者同时出现时报错。
+
+**本地引用**：本地 JSON Pointer 形式的 `$ref`、`$defs` 与 `definitions` 会被展开（支持 `~0` / `~1` 转义）。远程、递归、无法解析或与同级字段冲突的引用明确报错。展开上限为深度 64、4096 个节点、累计 8 MiB。
+
+**降级为描述提示**（仅限非 strict schema）：`additionalProperties`（布尔或 schema）、`title`、`default` 与非字符串的标量 enum 会被接受。私有上游没有对应字段，因此这些约束会转为描述中的提示文字；`$schema`、`$id`、`$comment` 直接省略。被降级的关键字去重后记录在 `generation_parameters_ignored` 中（不记录属性名或值）。这只是对模型的提示，不是强制约束，客户端必须自行校验模型输出和工具参数。
+
+**其他规则**：字符串 `const` 转为单元素 enum；同类标量 enum/const 可推断类型。任意未知关键字、布尔 schema、元组 schema，以及无法推断具体类型的无约束 schema 仍不支持；联合类型仍需要具体或可推断的类型。OpenAI 的 strict JSON schema / strict 函数模式默认被拒绝，因为上游无法保证其语义；可通过下文的开关舍弃该要求。
+
+## 工具
+
+- 支持函数声明、代码执行、Google 搜索、Google 地图与 URL context。`parametersJsonSchema` 可替代 `parameters`，两者同时出现时报错。
+- `NONE` 移除所有工具；`allowedFunctionNames` 过滤自定义函数。
+- `ANY`、OpenAI 的 `required` 或指定工具、`VALIDATED` 在本地拒绝：私有上游没有经过验证的强制调用或验证解码字段。参考实现在这些模式下只是过滤工具，本项目不把过滤伪装成强制执行。
+- Chat Completions 与 Responses 默认拒绝 `parallel_tool_calls: false`，因为上游无法保证只调用一次。
+- 内置工具的模型限制与参考项目一致：图片模型只允许搜索；其他 Gemini 模型允许搜索、代码执行、地图与 URL context；其他模型系列允许搜索与代码执行。不兼容的内置工具在本地报错，而不是被静默移除。这些限制描述的是请求兼容性，不保证 Google 向某个账号开放对应能力。
+
+### Google 搜索
+
+- 同时接受 `googleSearch` 与 `google_search`；`searchTypes` 及其嵌套的 `webSearch` / `imageSearch` 也接受 snake_case。
+- 重复的内置工具会去重；函数声明合并为一组，排在内置工具之后（与参考客户端一致）。
+- 公开的 `timeRangeFilter`（`startTime` / `endTime` 字符串）与 `excludeDomains`（字符串列表）会校验格式，然后舍弃并记为忽略参数，搜索保持开启。其他未知的 googleSearch 字段仍报错。
+- id 含 `image` 的模型把请求的网页/图片搜索合并为一个搜索工具；其他模型使用普通网页搜索。
+- 带有工具的文本请求会附带浏览器当前的时区信息（独立调用编解码器时为 UTC）。捕获模板中的工具和位置信息不会泄漏到后续请求。
+- RikkaHub 的 `toolConfig.includeServerSideToolInvocations` 布尔值会被接受，使自定义函数与内置工具混用时不在本地报错；但它要求的额外调用记录没有可验证的映射，因此记为忽略参数，不保证返回这些记录。
+- 旧版 `googleSearchRetrieval.dynamicRetrievalConfig` 接受 `MODE_DYNAMIC` / `MODE_UNSPECIFIED` 与 [0,1] 范围内的阈值，然后映射为新版 Google 搜索；动态检索控制同样记为忽略参数。
+- 这些转换只负责开启工具，是否执行由模型决定。私有响应中的引用与搜索来源元数据目前不解码。
+- 请在 RikkaHub 与 SillyTavern 中使用 Google 提供商 / Google AI Studio 路线；Google Interactions 不支持。
+
+<a id="search-models"></a>
+
+## 搜索模型
+
+以 `-search` 结尾的模型 id（不区分大小写，在解析 `model_aliases` 之后判断）表示“基础模型 + 默认开启 Google 搜索”，对应参考项目的 `default_tools`。后缀会在应用模型默认值、账号调度、配额统计和上游请求之前去掉，响应中的 `model` 也是基础模型 id（与别名的处理方式相同）。因此，本身 id 就以 `-search` 结尾的真实上游模型无法直接调用。
+
+- **没有 tools**：文本模型加入 `{"googleSearch":{}}`；id 含 `image` 的模型加入网页加图片搜索。
+- **有 tools 但没有函数声明**：追加 Google 搜索，已存在 googleSearch / googleSearchRetrieval 时不重复添加。
+- **有函数声明**：上游不允许 Google 搜索与自定义函数同时使用。`search_model_drop_functions` 为 `true`（默认）时，舍弃函数声明、加入搜索，并把 `tools.functionDeclarations` 与非 NONE 的 `toolConfig.functionCallingConfig` 记为忽略参数；为 `false` 时保留调用方的工具不变，不加入搜索。
+- `functionCallingConfig.mode: NONE` 仍会禁用包括搜索在内的所有工具。
+
+不带后缀的 id 不会默认搜索，除非请求自己声明。模型列表（`/v1/models`、`/v1beta/models` 及其详情路由）会在每个支持 generateContent 的 Gemini、Gemma 和图片模型（不含 embedding 与 TTS 模型）之后追加 `<id>-search` 条目，`source` 为 `search_variant`；Gemini 列表的 displayName 追加 ` (Search)`。真实模型 id 不会被覆盖。管理控制台的模型页只显示发现缓存。
+
+Chat Completions 的 `web_search_options` 对所请求的模型应用同样的规则。`search_context_size`（low/medium/high）、`user_location`（`{"type":"approximate","approximate":{city,country,region,timezone}}`）与 `filters.allowed_domains` 会校验格式并记为忽略参数，没有经过验证的私有字段可映射。Responses 的 `web_search` / `web_search_preview` 工具（每个请求一个）会转换为这些选项，扁平的位置字段转换为 Chat 的嵌套格式；用 `tool_choice` 指定网页搜索仍不支持。由于不返回搜索来源，Responses 不输出 `web_search_call` 项。
+
+<a id="optional-unsupported-parameter-dropping"></a>
+
+## 可选：舍弃不支持的参数
+
+`ignore_unsupported_parameters` 默认为 `false`。可通过以下任一方式开启：管理控制台「配置 → API 兼容性」、配置 PATCH、在 `config.json` 设置 `"ignore_unsupported_parameters": true` 后执行 `ais2api config reload`，或设置环境变量 `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS=true`。它支持热更新，对之后三种 API 的生成请求生效。关闭后恢复默认的拒绝策略；它不影响上文所述的非 strict schema 降级转换。
+
+开启后，已知不支持的可选参数会在编码前移除，字段名（不含值）记录在 `generation_parameters_ignored` 中：
+
+- **Chat**：strict 函数/JSON 标志、强制或指定的 `tool_choice`、`parallel_tool_calls: false`、`n > 1`、`store: true`、`seed`、`logit_bias`、`service_tier`，以及无法映射的 `none` / `xhigh` 推理强度。其余工具与受支持的 schema 约束保留。
+- **Gemini**：`candidateCount > 1`、`ANY` / `VALIDATED` 函数调用模式、`cachedContent`、不支持的音频输出/语音/路由/模型选择选项、不支持的内置工具选项、与模型不兼容的代码/地图/URL 工具，以及启用的已废弃 civic-integrity 过滤。受支持的工具、内容与历史保留。不支持的选项对象整体舍弃；会检查对象形状，但不会校验其内部字段。
+- **Responses**：存储/后台/续接控制、额外的 include 数据、自动截断、service tier、摘要请求、并行限制、强制工具选择、strict 标志，以及已识别的不支持内置工具。请求仍只使用本次提交的完整历史同步执行，不保存响应。响应中的选项字段反映被移除的顶层控制和 strict 标志。
+- **Schema**：在结构校验之后，逐个移除已知不支持的 JSON Schema 约束（如 `multipleOf`、exclusive 边界、`patternProperties`、元组前缀/contains/uniqueItems、条件/依赖/unevaluated 约束、content 注解、读写标志）。如果一个合法的可选 schema 完全无法表示（远程/递归引用、布尔/元组/无约束/多类型形式），则移除整个根 schema：被移除的输出 schema 保留 application/json MIME 模式，被移除的函数 schema 保留函数名与描述。
+
+被舍弃的能力不会被强制执行或模拟。未知的请求/schema 关键字、保留字段格式错误、缺少必填输入、定义冲突、无效引用、不支持的内容或文件附件、鉴权失败与资源超限仍会明确报错。这不是对任意上游 400 的捕获重试策略，不会新增不支持的接口，也不会静默丢弃对话内容。
 
 ## OpenAI Chat Completions
 
-Standard user/assistant/system/developer/tool messages map to Gemini contents and system instruction. Standard text, image_url data URLs and input_audio wav/mp3 are supported. Remote image URLs must be fetched by the server's media loader before normalization; the protocol adapter never fetches URLs. Audio and image support ultimately depends on the selected model. Function tools, tool_choice, JSON response formats, token/sampling controls and reasoning_effort are translated. Only n=1 is supported. Unsupported fields fail with invalid_argument; they are not accepted as implied functionality.
+### 消息映射
 
-Remote images require public HTTPS destinations on port 443. The loader validates all locally resolved addresses on every redirect and pins each connection, including proxy tunnels, to a validated numerical address while retaining the original TLS hostname verification. It uses the gateway's `proxy` setting (including `AIS2API_PROXY`); generic curl proxy environment variables such as `HTTPS_PROXY` and `NO_PROXY` do not change this media route. Public IPv6 addresses are supported; scoped, private and special-purpose destinations are rejected.
+- 标准的 user / assistant / system / developer / tool 消息映射为 Gemini contents 与系统提示。
+- 支持文本、`image_url`（data URL 或公开 HTTPS 地址）以及 `input_audio`（wav/mp3）。音频与图片最终是否可用取决于所选模型。
+- 开头连续的 system / developer 消息成为 `systemInstruction`；对话开始后出现的 system / developer 消息保留在原位置，转为不带标签的 user 消息。
+- 连续的普通 user / assistant 消息不会合并；连续的 tool 结果合并为一条 user 消息，内含按顺序排列的 functionResponse 部件。
+- 函数工具、`tool_choice`、JSON 响应格式、token/采样控制与 `reasoning_effort` 均会转换。只支持 `n = 1`。不支持的字段以 `invalid_argument` 失败，不会被当作隐含支持。
+- 函数参数 JSON 必须是对象；非对象或字符串形式的工具结果包装为 `{"result": ...}`。
 
-Leading system/developer messages become systemInstruction. After the conversation starts, system/developer messages stay in place as unlabelled user messages. Consecutive ordinary user/assistant messages are never merged; consecutive tool results form a single user message containing ordered functionResponse parts.
+### 远程图片
 
-Signed tool calls use a client-carried `call_gemini_` ID containing base64url-encoded JSON `[original_id_or_null, signature, nonce]`. Unsigned calls without an upstream ID use the same envelope with a null signature. Normalization restores the original ID (including its absence) and signature on the original functionCall; functionResponse receives only the original ID. Clients should preserve the entire ID as opaque text. Signatures are never reconstructed from server storage. During streaming, the authenticated principal's response registry assigns increasing ordinals and indices across chunks; identical idless calls in different chunks are separate invocations. Repeated explicit upstream IDs retain their existing index. The registry stores indices and function metadata, not new thought signatures or encoded signature IDs. A response may register at most 4096 calls. Stateless codec helpers cannot maintain call ordinals across independent stream conversions. Function argument JSON must be an object; tool-result nonobject/string content is wrapped as `{ "result": ... }`.
+远程图片只允许端口 443 上的公开 HTTPS 地址。加载器在每次重定向时校验所有解析出的地址，并把每个连接（包括代理隧道）固定到已校验的 IP，同时保留原主机名的 TLS 校验。它使用网关的 `proxy` 设置（包括 `AIS2API_PROXY`）；`HTTPS_PROXY`、`NO_PROXY` 等通用 curl 环境变量不影响这条路径。支持公网 IPv6；带作用域的、私有的和特殊用途的地址会被拒绝。协议适配器本身从不抓取 URL。
 
-OpenAI output contains content, tool_calls, finish_reason and token usage. For compatible clients it additionally exposes reasoning_content and thought_signature on messages and deltas. Input assistant messages accept reasoning_content, thought_signature or its signature alias. A text signature becomes an independent empty-text part; function signatures stay on their functionCall. These flattened compatibility fields cannot represent interleaved native parts. Rich assistant outputs also include their native Gemini content for exact round trips; stream deltas include the normalized native chunk. When native content and compatibility fields are supplied together they must agree. Thinking text is never mixed into visible content. Images and code parts remain in the native extension. Complete tool calls are emitted as complete argument strings; the transport does not fabricate partial argument fragments.
+### 工具调用 ID 与签名
+
+带签名的工具调用使用由客户端携带的 `call_gemini_` ID，内容为 base64url 编码的 JSON `[原始ID或null, 签名, nonce]`。没有上游 ID 的无签名调用使用同样的格式，签名为 null。归一化时会在原始 functionCall 上恢复原 ID（包括“没有 ID”）和签名；functionResponse 只获得原 ID。
+
+- 客户端应把整个 ID 当作不透明文本保存；签名从不依赖服务端存储重建。
+- 流式输出时，每个鉴权主体的响应注册表跨数据块分配递增的序号与索引；不同数据块中相同的无 ID 调用视为不同调用；重复的显式上游 ID 保持原索引。注册表只保存索引与函数元数据，不保存签名。单个响应最多登记 4096 个调用。
+
+### 输出
+
+- 输出包含 content、tool_calls、finish_reason 与 token usage。
+- 为兼容客户端，消息和 delta 额外提供 `reasoning_content` 与 `thought_signature`。输入的 assistant 消息接受 `reasoning_content`、`thought_signature` 或其别名 `signature`。文本签名成为独立的空文本部件；函数签名保留在对应的 functionCall 上。这些扁平字段无法表示交错的原生部件。
+- 富内容的 assistant 输出同时附带原生 Gemini 内容，以便精确往返；流式 delta 附带归一化后的原生数据块。原生内容与兼容字段同时提供时必须一致。
+- 思考文本不会混入可见 content；图片和代码部件保留在原生扩展中。
+- 完整的工具调用以完整的参数字符串输出，不会伪造部分参数片段。
+- 请求 `stream_options.include_usage` 时，普通数据块的标准 usage 为 null，`[DONE]` 之前另有一个 choices 为空、带实际 usage 的数据块；未请求时省略标准 usage。流 ID 与 created 时间戳保持不变；中途失败会输出错误且不发送 `[DONE]`。以上遵循 [OpenAI 流式合同](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events)。
 
 ## OpenAI Responses
 
-`POST /v1/responses` uses the same authenticated generation scheduler, upstream codec, media loader and cancellation path as Chat Completions. The adapter in `src/responses.cpp` translates Responses input into Chat messages before normalizing to Gemini. See [Responses usage and limits](responses.md) for client examples and the supported subset.
+`POST /v1/responses` 与 Chat Completions 共用鉴权、生成调度、上游编解码、媒体加载和取消路径。适配器先把 Responses 输入转换为 Chat 消息，再归一化为 Gemini 请求。使用示例与支持子集见 [Responses 说明](responses.md)。
 
-The interface is stateless: clients send complete input history and preserve function `call_id` values. String input, instructions, message content, function calls/results, flattened function declarations, compatible sampling/token/reasoning controls and non-strict text formats map to the existing codec. Data-URL images are normalized directly; HTTPS images pass through the same bounded public-media loader as Chat Completions. Unsupported storage, background tasks, references and built-in tools fail explicitly.
+- 接口是无状态的：客户端提交完整输入历史并保留函数 `call_id`。字符串输入、instructions、消息内容、函数调用与结果、扁平函数声明、兼容的采样/token/推理控制以及非 strict 文本格式都映射到现有编解码器。data URL 图片直接归一化；HTTPS 图片使用与 Chat 相同的受限公网媒体加载器。存储、后台任务、引用和其他内置工具明确报错。
+- reasoning 与 message 输出项可以携带 `ais2api.gemini_content` 和兼容的文本签名。保留这些字段即可重放原生部件；由于 Responses 把推理、可见/原生内容和函数调用分到不同输出项，这种表示不保证原始的跨项部件交错顺序。函数调用 ID 与 Chat 使用同样的签名格式。参数完全相同的重复显式 ID 视为一次调用，参数冲突时报错；无 ID 的调用保留各自的序号。
+- JSON 结果为带类型输出项和 Responses usage 的 Response 对象。命名 SSE 记录的 `event` 与 JSON 的 `type` 一致，带递增的 `sequence_number`；依次输出响应创建/进行中、输出项与内容部件生命周期、文本/推理/函数参数增量事件，最后是 completed 或 incomplete。token 用尽映射为 `incomplete_details.reason=max_output_tokens`，过滤映射为 `content_filter`。中途失败输出 `response.failed`，已发送的内容不会重试。不追加 Chat 的 `[DONE]`。流状态受对象限额约束，超出则响应失败。以上遵循 [OpenAI Responses 事件参考](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
 
-Reasoning and message items may carry `ais2api.gemini_content` plus compatible text signatures. Preserve these fields to replay native parts; Responses groups reasoning, visible/native content and function calls into separate output items, so this representation does not promise the original cross-item native part interleaving. Function call IDs preserve the same signed opaque payload as Chat Completions. Repeated explicit IDs with identical complete arguments represent one invocation; conflicting arguments fail explicitly. Idless calls retain independent ordinals.
+## ais2api 扩展（版本 1）
 
-JSON results contain a Response object with typed output items and Responses token usage. Named SSE records carry matching `event` and JSON `type` fields and increasing `sequence_number` values. They emit response creation/in-progress, output item/content part lifecycles, incremental text/reasoning/function argument events, then a completed or incomplete Response. Token exhaustion maps to `incomplete_details.reason=max_output_tokens`; filtering maps to `content_filter`. Midstream failures emit `response.failed` and do not retry delivered content. Responses streams do not append the Chat Completions `[DONE]` marker. Stream state is bounded by the configured object budget; exceeding it fails the response. These contracts follow the [official Responses event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events).
+扩展的 schema 为 [protocol-extensions.schema.json](../schemas/protocol-extensions.schema.json)。合同以外的任何扩展名都会被拒绝。
 
-## ais2api extensions, version 1
+### 请求扩展
 
-The schema is [protocol-extensions.schema.json](../schemas/protocol-extensions.schema.json). Every extension name outside this contract is rejected.
-
-Request capabilities absent from standard OpenAI fields are supplied at the root:
+OpenAI 标准字段无法表达的能力在请求根部提供：
 
 ```json
 {
@@ -99,9 +193,11 @@ Request capabilities absent from standard OpenAI fields are supplied at the root
 }
 ```
 
-The allowed gemini keys are generationConfig, tools, toolConfig, safetySettings and systemInstruction. Fields already supplied through standard request fields cause an error, even if their values are equal. generationConfig may be merged only when individual subkeys do not overlap.
+允许的 gemini 键为 `generationConfig`、`tools`、`toolConfig`、`safetySettings` 与 `systemInstruction`。已经通过标准字段提供的字段再次出现会报错，即使值相同；`generationConfig` 只有在子键互不重叠时才允许合并。
 
-An assistant message can round-trip native content with `message.ais2api.gemini_content`:
+### 原生内容往返
+
+assistant 消息可以通过 `message.ais2api.gemini_content` 往返原生内容：
 
 ```json
 {
@@ -113,20 +209,27 @@ An assistant message can round-trip native content with `message.ais2api.gemini_
 }
 ```
 
-Standard visible text and tool_calls, when supplied beside this envelope, must agree. The envelope is authoritative for native images/thoughts/signatures. For encoded calls, the output envelope carries the same client `functionCall.id` as the standard `tool_calls` entry; normalization restores the original ID or its absence. This is done on an extension copy; all other native fields, part order and each part's original signature remain unchanged. Returning the generated standard fields and native envelope together therefore passes the same strict ID/name/argument agreement checks. It is supported only on assistant messages. Native extension data should be retained as opaque data by clients; signatures must not be synthesized or edited.
+- 与该信封同时提供的标准可见文本和 tool_calls 必须与之一致；原生图片、思考和签名以信封为准。
+- 对于编码过的调用，输出信封携带与标准 `tool_calls` 相同的客户端 `functionCall.id`；归一化时恢复原 ID 或“没有 ID”。该替换只作用于扩展的副本，其他原生字段、部件顺序和各部件的原始签名保持不变。因此把生成的标准字段与原生信封一起回传，可以通过严格的 ID/名称/参数一致性检查。
+- 仅支持 assistant 消息。客户端应把原生扩展数据当作不透明数据保存，不要伪造或编辑签名。
 
-OpenAI stream chunks carry `choices[].delta.ais2api.gemini_delta`, containing the entire normalized Gemini chunk. Encoded function calls carry the same client ID in this extension copy as in their standard delta; their original IDs and signatures are recovered during request normalization. Metadata-only chunks without a choice carry `ais2api.gemini_delta` at the root. The compatibility reasoning_content/thought_signature fields are on individual deltas; exact native part order remains in this extension.
+### 流式扩展
 
-## Streaming and aggregation
+OpenAI 流式数据块在 `choices[].delta.ais2api.gemini_delta` 中携带完整的归一化 Gemini 数据块。编码过的函数调用在该扩展副本中使用与标准 delta 相同的客户端 ID，原 ID 与签名在请求归一化时恢复。没有 choice 的纯元数据块把 `ais2api.gemini_delta` 放在根部。兼容的 `reasoning_content` / `thought_signature` 位于各个 delta 上，精确的原生部件顺序保留在扩展中。
 
-The upstream framing is an optional `)]}'` XSSI prefix followed by an outer array of batches of response chunk arrays. The bounded parser emits each depth-three chunk and discards its bytes before consuming the next. Network split points, UTF-8 code units, JSON escapes and strings containing brackets can occur anywhere. Invalid preambles, invalid chunk JSON/UTF-8, excess nesting, oversized chunks, malformed outer separators and truncated final data fail explicitly. The parser buffers only the current chunk plus a two-byte outer framing state, not the full response. Successful `finish()` requires the complete outer arrays to close.
+## 流式解析与聚合
 
-Aggregation is bounded by serialized response bytes. Ordinary adjacent text parts with matching thought flags may be concatenated; signed parts and other native payloads remain separate. Usage and finish metadata replace previous snapshots rather than being summed. A failing size check leaves the prior aggregate unchanged. Content gating ignores response ID, usage and finish-only metadata, allowing the orchestrator to distinguish metadata from the first visible/model-action payload.
+- 上游帧格式为可选的 `)]}'` XSSI 前缀，后接外层数组，内含若干批响应数据块数组。有界解析器每解析出一个深度为 3 的数据块就输出并丢弃其字节，然后才读取下一个。
+- 网络分块位置、UTF-8 码元、JSON 转义以及包含括号的字符串可以出现在任何位置。无效前缀、无效的数据块 JSON/UTF-8、嵌套过深、数据块过大、外层分隔符错误以及末尾截断都会明确失败。解析器只缓存当前数据块和两个字节的外层状态，不缓存完整响应；只有外层数组完整闭合，`finish()` 才算成功。
+- 聚合按序列化后的字节数设限。思考标志相同的相邻普通文本部件可以拼接；带签名的部件和其他原生载荷保持独立。usage 与 finish 元数据以最新快照替换，而不是累加。大小检查失败时保留之前的聚合结果不变。内容判定忽略响应 ID、usage 和仅含 finish 的元数据，从而区分元数据与第一个可见内容或模型动作。
+- 结束原因覆盖全部已知上游代码。OpenAI 把 token 用尽映射为 `length`，安全/复述拦截映射为 `content_filter`，函数调用完成映射为 `tool_calls`，其他完成映射为 `stop`。`candidatesTokenCount` 包含可见输出与思考 token，`thoughtsTokenCount` 单独提供；OpenAI 输出 `reasoning_tokens` 与 `cached_tokens` 明细。HTTP/gRPC 错误分类与重试由运行时和传输层负责，不在编解码器内。
 
-Finish reasons map through all documented upstream codes. OpenAI maps token exhaustion to length, safety/recitation failures to content_filter and function completion to tool_calls; other completions map to stop. candidatesTokenCount includes visible completion plus thinking tokens, while thoughtsTokenCount remains separately available; OpenAI exposes reasoning_tokens and cached_tokens details. HTTP/gRPC error classification and retry decisions belong to the runtime/transport, outside this codec.
+## HTTP 细节
 
-## Validation scope
+鉴权方案与 JSON 媒体类型不区分大小写，并按精确的词边界比较；支持带 charset 参数的 `application/json`，拒绝 `application/jsonp`。
 
-The HTTP adapter follows the [official OpenAI streaming contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events): when include_usage is requested, ordinary chunks have null standard usage and a separate final chunk has empty choices with the actual available usage before DONE. Without that option, standard usage is omitted. The native extension may still preserve upstream usage metadata. Stream IDs and created timestamps remain stable, and a midstream failure emits an error without DONE.
+## 验证范围
 
-Catch2 protocol tests use independent synthetic samples. They cover arbitrary byte boundaries, malformed/truncated streams, bounds, typed function values, per-part signatures, schema recursion, request-template replacement, extension conflicts, multi-message tools and native OpenAI round trips. Regression cases additionally cover repeated identical idless calls across stream chunks, stable explicit-ID indices, signed and unsigned calls without signature rebinding, and generated standard/native tool messages returned together with strict conflict rejection. These are protocol/adapter tests, not proof that an authenticated live upstream model supports each capability. Live browser and platform qualification must be reported separately.
+Catch2 协议测试使用独立编写的合成样例，覆盖任意字节边界、格式错误或截断的流、各类上限、带类型的函数值、逐部件签名、schema 递归、请求模板替换、扩展冲突、多消息工具以及 OpenAI 原生往返。回归用例还覆盖跨数据块的相同无 ID 调用、显式 ID 的索引稳定、有/无签名调用不会错绑签名，以及生成的标准/原生工具消息一起回传时的严格冲突检查。
+
+这些是协议与适配器测试，不能证明某个已登录的真实上游模型支持每项能力。真实浏览器与平台的验收结果另见 [验证记录](validation.md)。

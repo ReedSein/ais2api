@@ -34,4 +34,4 @@
 
 主 Agent 随后重建了明确命名的新包 `ais2api-0.1.0-dev-MPL2-Windows-AMD64.zip`，新验包规则通过：80 个文件，含 MPL、NOTICE 和第三方说明；包内 MPL 正文与当前仓库 LICENSE 字节一致，SHA-256 旁文件匹配。包 SHA-256 为 `e9d0e2d408aed381cb307c37644494d86a6d7ae6f2af0a982f8036a53eafc6f5`。当前附件仍是开发包，不代表真实账号或三端完整验收。
 
-本次重建和检查了 MPL 开发包，没有执行远端 CI、真实 Termux 或真实账号调用。源码上传准备与正式版本发布是不同阶段；后续发布流程及对应源码说明见 [github-publishing.md](github-publishing.md)。
+本次重建和检查了 MPL 开发包，没有执行远端 CI、真实 Termux 或真实账号调用。源码上传准备与正式版本发布是不同阶段；后续发布流程及对应源码说明见 [github-publishing.md](../github-publishing.md)。

@@ -1,40 +1,43 @@
-# Offline replay performance tool
+# 离线回放性能工具
 
-`ais2api_replay` is an optional developer executable. It connects a synthetic `GenerationBackend` to `serve_with_backend`, then drives the real listener, authentication, scheduler, event relay, JSON encoding and loopback HTTP stack. The production `ais2api` executable has no synthetic-generation switch. The replay executable is not installed or included in the production package.
+`ais2api_replay` 是可选的开发工具。它把合成的 `GenerationBackend` 接到 `serve_with_backend`，驱动真实的监听器、鉴权、调度器、事件转发、JSON 编码和回环 HTTP 栈。生产程序 `ais2api` 没有合成生成开关；回放工具也不会被安装或打入运行包。
 
-Build with `-DAIS2API_BUILD_REPLAY=ON`, then build the `ais2api_replay` target. The option defaults to OFF. On Windows the resulting executable is normally `build/windows/ais2api_replay.exe`; the executable name has no `.exe` suffix on Linux/Termux.
+## 构建与运行
+
+配置时加 `-DAIS2API_BUILD_REPLAY=ON`（默认 OFF），然后构建 `ais2api_replay` 目标。Windows 上通常为 `build/windows/ais2api_replay.exe`，Linux/Termux 上没有 `.exe` 后缀。
 
 ```text
 ais2api_replay --seconds 120
 ais2api_replay --seconds 7200
 ```
 
-The default duration is 120 seconds; 7200 selects a two-hour stability run. A run stops admitting new benchmark requests at its deadline and drains the outstanding requests. Reported duration includes that drain, so it can exceed the requested duration. A short successful run does not establish a two-hour stability result.
+- 默认时长 120 秒；7200 表示两小时稳定性运行。
+- 到期后停止接收新的测试请求，并等待未完成的请求结束。报告的时长包含这段收尾时间，因此可能超过请求的时长。短时运行成功不能代表两小时稳定性结果。
+- Ctrl+C 请求内嵌服务有序关闭。客户端在服务退出后停止，未完成的连接收尾或超时，报告标记 `server_stopped_early: true` 并以非零退出码结束。这是被中断的运行，不是完成的稳定性验证。
 
-Ctrl+C requests the embedded server's orderly shutdown. Clients stop when that server exits, outstanding sockets drain or time out, and the report marks `server_stopped_early: true` with a nonzero exit code. This is an interrupted run, not a completed stability qualification.
+## 固定负载
 
-## Fixed workload
+- 4 个客户端，每个请求新建一条回环 TCP 连接，完成后等待 100 ms。这把建连速率限制在每秒 40 次，与后端速度无关；观察到的吞吐量是该负载下的吞吐量，而不是服务器的最大容量。
+- 客户端发送带鉴权的 Gemini SSE 请求，目标为合成模型。后端输出 8 个内容事件（每个 1024 字节 ASCII 文本），再输出 1 个结束/usage 事件，没有人为的上游延迟。每个成功响应必须恰好解码出这 9 个事件、8192 字节内容和 STOP 结束原因。
+- 服务端配置：队列容量 8、转发窗口 4096 字节、对象上限 65536 字节、队列/生成/空闲时限均为 10 秒；客户端接收超时 10 秒。
+- 测试用的配置、SQLite 状态和生成的 API Key 只存在于唯一命名的临时目录中，不导入真实 Google Cookie，运行结束后停止并删除。整个负载不涉及 Chromium 进程、浏览器准备、外部媒体抓取或 Google 请求。
 
-Every run uses four clients, each opening a new loopback TCP connection for each request and waiting 100 ms after completion. This caps connection creation at forty per second independent of backend speed; observed throughput is workload throughput, not maximum server capacity. Clients submit authenticated Gemini SSE requests to a synthetic model. The backend emits eight content events with 1024 ASCII text bytes each, followed by one finish/usage event, without artificial upstream delay. Every successful response must decode to exactly those nine events and 8192 content bytes with a STOP finish reason.
+当前版本只有固定的 Gemini SSE 请求，没有混合非流式响应、OpenAI 格式、取消请求、大图片、多账号轮换或浏览器故障恢复，这些需要单独的负载。报告中明确标记浏览器与上游状态未验证。
 
-The server uses a queue capacity of eight, a 4096-byte relay window, a 65536-byte object limit and ten-second queue/generation/idle limits. The client receive timeout is ten seconds. Fixture config, SQLite state and generated API keys exist only in a uniquely named temporary directory; keys remain private and no real Google cookies are imported. The fixture is stopped and removed after the run. No Chromium process, browser preparation, external media fetch or Google request is part of this workload.
+每个请求新建连接也会触及操作系统的 TCP 端口与 TIME_WAIT 策略；高速或长时间运行时的错误可能反映主机套接字资源限制，而不是生成代码的容量。比较时请保持相同的连接策略。
 
-This version uses only fixed Gemini SSE requests. It does not mix unary responses, OpenAI formatting, cancelled requests, large images, multi-account rotation or browser failure recovery. Those need separate workloads. Browser and upstream status are explicitly unverified in the report.
+## JSON 报告
 
-New connections also exercise the OS TCP port/TIME_WAIT policy; high-rate or long-run errors can reflect host socket-resource limits rather than generation-code capacity. Keep connection policy identical in comparisons.
+stdout 输出一个 JSON 对象，`scope: "offline_backend_replay"`；服务生命周期诊断可能出现在 stderr。字段包括请求与实际时长、完成的尝试/成功/错误数、每秒成功请求数、端到端延迟 p50/p95/p99、后端与进程 CPU 秒数、常驻内存的首次/末次/采样峰值，以及生成队列的采样峰值。`error_classes` 按系统错误类别/代码或应用错误代码给出有上限的计数，不含请求正文或异常消息。
 
-## JSON report
+- **延迟**使用固定的 512 桶对数直方图，百分位取桶上界，比例 1.05（约 5% 量化），只统计成功请求。没有无界的逐请求延迟数组，避免长时间运行时制造内存增长。百分位为 null 表示没有成功样本。
+- **`backend_cpu_seconds`** 统计生成工作线程构造和推送合成事件消耗的 CPU（Windows 为 GetThreadTimes，Linux/Termux 为 CLOCK_THREAD_CPUTIME_ID），包含后端侧的事件转发工作，不含休眠/阻塞时间和 HTTP/客户端线程的工作。**`process_cpu_seconds`** 覆盖整个共址测试进程，包括 HTTP 客户端和采样（Windows 为 GetProcessTimes，Linux/Termux 为 std::clock）。两者都不是浏览器 CPU。
+- **RSS** 在 Windows 上为 GetProcessMemoryInfo 的工作集，在 Linux/Termux 上为 `/proc/self/statm` 的常驻页数乘以页大小。首末两次采样时测试服务仍在运行。100 ms 采样器记录 RSS，并通过真实的本地控制通道查询队列深度。这些是**采样**峰值，不保证是瞬时最大值。`sample_errors` 统计失败的采样，合格的运行应为 0。采样器和 HTTP 客户端本身也消耗 CPU 与内存，因此这些数字不是独立的服务器资源占用。
+- **退出码** 0 表示运行完成，且没有计入的请求/采样错误或服务线程失败；它不是通用的性能合格阈值。非零表示中断、准备/运行失败、请求错误或采样失败，请保留 JSON 报告并调查。
+- 报告标记 `browser: null`、`browser_verified: false`、`google_verified: false` 与 `original_project_comparison: null`，避免把合成管线与 BrowserGateway 性能或与原项目的对比混为一谈。
 
-The report is one JSON object on stdout with `scope: "offline_backend_replay"`. Server lifecycle diagnostics may appear on stderr. Fields include requested/observed duration, completed attempts/successes/errors, successful requests per second, p50/p95/p99 end-to-end request latency, backend/process CPU seconds, resident-memory first/last/sampled peak, and sampled generation-queue peak. `error_classes` reports bounded counters by system error category/code or application error code, without request bodies or exception messages.
+## 解读结果
 
-Latency uses a fixed 512-bin logarithmic histogram. Percentiles are upper bucket boundaries with a 1.05 ratio (approximately five-percent quantization), calculated over successful requests. There is no unbounded per-request latency vector that could manufacture a memory slope during a long run. Null percentiles mean no successful samples.
+每份报告都应记录提交、编译器/构建类型、操作系统/架构、CPU、内存和工具命令。在同一台机器上比较相同的负载，考虑预热和分配器缓存，并在比较吞吐量之前同时检查错误数和延迟。仅凭首末 RSS 增长不能证明泄漏；长时间运行中有界的平台期和多次受控运行更有说服力。该工具没有内置的数值发布阈值，也不涉及浏览器内存、Google 生成延迟、真实 Cookie 健康状况或原 Python 实现。
 
-`backend_cpu_seconds` measures CPU consumed by the generation worker thread while it constructs and pushes the synthetic events: GetThreadTimes on Windows, CLOCK_THREAD_CPUTIME_ID on Linux/Termux. It includes backend-side event-relay work but excludes time sleeping or blocked and excludes work on HTTP/client threads. `process_cpu_seconds` covers the entire colocated benchmark process, including HTTP clients and sampling, using GetProcessTimes on Windows and std::clock on Linux/Termux. Neither is a measure of browser CPU.
-
-RSS is the current process working set from GetProcessMemoryInfo on Windows and resident pages from `/proc/self/statm` times the system page size on Linux/Termux. First and last samples are taken with the fixture still alive. A 100-ms sampler captures RSS and queries the real local control channel for queue depth. These are **sampled** peaks, not guaranteed instantaneous maxima. `sample_errors` counts failed samples and should be zero for a qualified run. Sampling and HTTP clients themselves consume CPU and memory, so the numbers are not isolated server resource use.
-
-Exit code 0 means the run completed without counted request/sample errors or a failed server thread. It is not a universal performance pass threshold. Nonzero exit means an interruption, setup/runtime failure, request errors or failed sampling; keep the JSON report and investigate. Reports label `browser: null`, `browser_verified: false`, `google_verified: false`, and `original_project_comparison: null` to prevent conflating this synthetic pipeline with BrowserGateway performance or a comparison against the original project.
-
-## Interpreting results
-
-Record the commit, compiler/build type, OS/architecture, CPU, memory and tool command alongside each report. Compare identical workloads on the same machine, account for warmup and allocator caching, and inspect both error counts and latency before comparing throughput. A first-to-last RSS increase alone does not prove a leak; a bounded long-run plateau and repeated controlled runs are more informative. This tool has no built-in numerical release threshold and makes no claim about browser memory, Google generation latency, real cookie health or the original Python implementation.
+已有的 Windows 短测报告见 [本机验证与回放记录](reports/README.md)。

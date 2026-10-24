@@ -103,7 +103,10 @@ endif()
 install(FILES LICENSE docs/platforms.md DESTINATION share/doc/ais2api)
 install(FILES NOTICE THIRD_PARTY_NOTICES.md docs/github-publishing.md DESTINATION share/doc/ais2api)
 install(FILES licenses/CloakBrowser-BINARY-LICENSE.md DESTINATION share/doc/ais2api/browser)
-install(FILES docs/cli.md docs/protocol.md docs/true-role.md docs/validation.md docs/performance.md docs/roadmap.md docs/userscript.md docs/management-api.md docs/webui.md DESTINATION share/doc/ais2api)
+install(FILES docs/README.md docs/getting-started.md docs/clients.md docs/configuration.md docs/troubleshooting.md
+              docs/cli.md docs/protocol.md docs/responses.md docs/true-role.md docs/browser.md
+              docs/validation.md docs/performance.md docs/roadmap.md docs/security-review.md
+              docs/userscript.md docs/management-api.md docs/webui.md DESTINATION share/doc/ais2api)
 install(DIRECTORY docs/reports DESTINATION share/doc/ais2api)
 if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
   install(DIRECTORY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/"
