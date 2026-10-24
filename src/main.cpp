@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "ais2api/management.hpp"
+#include "ais2api/console.hpp"
 #include <array>
 #include <charconv>
 #include <iostream>
@@ -407,16 +408,15 @@ int cli_main(int argc, char **argv) {
             ais2api::help();
             return 0;
         }
-        std::cout << ais2api::json::serialize(ais2api::execute(std::move(args))) << '\n';
+        ais2api::console::emit_result(ais2api::execute(std::move(args)));
         return 0;
     } catch (const ais2api::Error &error) {
-        std::cerr << ais2api::json::serialize(ais2api::error_json(error)) << '\n';
+        ais2api::console::emit_error(ais2api::error_json(error));
         return 1;
     } catch (const std::exception &) {
         // Third-party exceptions may contain request or credential text.
-        std::cerr << ais2api::json::serialize(ais2api::error_json(
-                         ais2api::Error(500, "internal", "Command failed unexpectedly")))
-                  << '\n';
+        ais2api::console::emit_error(ais2api::error_json(
+            ais2api::Error(500, "internal", "Command failed unexpectedly")));
         return 1;
     }
 }
@@ -443,12 +443,11 @@ int wmain(int argc, wchar_t **argv) {
             pointers.push_back(value.data());
         return cli_main(argc, pointers.data());
     } catch (const ais2api::Error &error) {
-        std::cerr << ais2api::json::serialize(ais2api::error_json(error)) << '\n';
+        ais2api::console::emit_error(ais2api::error_json(error));
         return 1;
     } catch (const std::exception &) {
-        std::cerr << ais2api::json::serialize(ais2api::error_json(
-                         ais2api::Error(500, "internal", "Cannot initialize command arguments")))
-                  << '\n';
+        ais2api::console::emit_error(ais2api::error_json(
+            ais2api::Error(500, "internal", "Cannot initialize command arguments")));
         return 1;
     }
 }

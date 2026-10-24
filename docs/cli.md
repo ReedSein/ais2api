@@ -4,6 +4,8 @@ The executable is `ais2api` (`ais2api.exe` on Windows). Configuration and servic
 
 `--help` prints human-readable usage. Other successful commands print one JSON object to stdout and exit with code 0. Failures print a structured JSON error to stderr and exit with code 1. The configured API key is in `config.json`; the management API can create additional persisted generation keys. CLI output redacts secrets. Keep the configuration file private. `keys list` returns metadata, never the secret or its hash.
 
+Output written to an interactive console is formatted for people instead: command results are indented JSON, errors are one line (`错误：message（reason，HTTP status）`), and service logs from `serve` or `setup` are single Chinese lines with local time, level (信息/提示/警告/错误), event and key fields, colored unless `NO_COLOR` is set. Successful HTTP requests are left out of the console; failed ones are shown. Files and pipes, including `service.log` under `start`, keep the single-line JSON contract, and the management journal and live log stream are unchanged. `AIS2API_CONSOLE_FORMAT=json` or `text` overrides the automatic choice (`auto`). Generation records also carry the resolved `model` and the `stream` flag.
+
 ## Initialization and service lifecycle
 
 ```text

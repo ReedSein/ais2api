@@ -570,8 +570,14 @@ class Service {
             Clock::time_point start = Clock::now(), normalized = start;
             std::string error;
             unsigned attempts = 0;
+            // Upstream wire locations skipped while decoding, across attempts.
+            json::array upstream_ignored;
             ~Trace() {
                 try {
+                    // Only wire locations are logged, never their content.
+                    if (!upstream_ignored.empty())
+                        service.log({{"event", "upstream_fields_ignored"}, {"request_id", work.id},
+                                     {"locations", upstream_ignored}});
                     auto elapsed = [](auto begin, auto end) {
                         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin)
                             .count();
@@ -579,6 +585,8 @@ class Service {
                     service.log(json::object{
                                      {"event", "generation"},
                                      {"request_id", work.id},
+                                     {"model", work.model},
+                                     {"stream", work.stream},
                                      {"queue_ms", elapsed(work.queued, start)},
                                      {"normalize_ms", elapsed(start, normalized)},
                                      {"generation_ms", elapsed(normalized, Clock::now())},
@@ -635,7 +643,6 @@ class Service {
             std::optional<Error> previous;
             std::optional<Account> retry_account;
             bool delivered = false;
-            json::array upstream_ignored;
             // One in-place session rebuild or browser restart per request.
             bool recovered = false;
             for (unsigned attempt = 0; attempt < cfg.limits.max_attempts; ++attempt) {
@@ -660,17 +667,10 @@ class Service {
                         request, *account,
                         [&](json::object event) {
                             check_cancel(token);
-                            json::array fresh;
                             for (auto &location : take_upstream_ignored(event))
-                                if (std::find(upstream_ignored.begin(), upstream_ignored.end(), location) ==
-                                    upstream_ignored.end()) {
-                                    upstream_ignored.push_back(location);
-                                    fresh.push_back(location);
-                                }
-                            // Only wire locations are logged, never their content.
-                            if (!fresh.empty())
-                                log({{"event", "upstream_fields_ignored"}, {"request_id", work->id},
-                                     {"locations", std::move(fresh)}});
+                                if (std::find(trace.upstream_ignored.begin(), trace.upstream_ignored.end(), location) ==
+                                    trace.upstream_ignored.end())
+                                    trace.upstream_ignored.push_back(location);
                             if (event.empty())
                                 return;
                             received = true;

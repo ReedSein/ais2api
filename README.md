@@ -47,7 +47,7 @@ ais2api models list
 ais2api status
 ```
 
-`init` 只创建配置和数据库，不生成或输出 API Key。请在 `config.json` 的 `api_key` 字段填写自己的密钥，再启动服务。重复 `init` 不覆盖密钥；结果中的 `api_key_configured` 和 `next_step` 提示配置状态与下一步。所有 CLI 输出采用 JSON，日志写到 stderr。`start` 的日志保存到数据目录的 `service.log`。`serve` 在当前终端运行。`stop` 使用当前用户专属的本地控制通道停止服务。
+`init` 只创建配置和数据库，不生成或输出 API Key。请在 `config.json` 的 `api_key` 字段填写自己的密钥，再启动服务。重复 `init` 不覆盖密钥；结果中的 `api_key_configured` 和 `next_step` 提示配置状态与下一步。在控制台窗口中运行时，命令结果显示为缩进的 JSON，`serve` 的日志显示为带时间和级别的中文单行文字（例如 `10-24 22:35:43 信息 生成完成  chatcmpl-1cdf…  gemini-3.1-flash-lite  耗时 2.4s`），日常成功的 HTTP 请求不显示，失败的才显示。输出被重定向到文件或管道时，命令结果仍为单行 JSON，日志仍为每行一条 JSON 记录，便于脚本读取；设置 `AIS2API_CONSOLE_FORMAT=json` 或 `text` 可强制指定格式，设置 `NO_COLOR=1` 可关闭颜色。日志写到 stderr，`start` 的日志保存到数据目录的 `service.log`（JSON）。WebUI 的实时日志不受影响。`serve` 在当前终端运行。`stop` 使用当前用户专属的本地控制通道停止服务。
 
 也可使用 userscript 直接抓取并推送 Cookie：在配置里填写独立的 `cookie_import_key`，执行 `config reload`，安装 [ais2api 专用脚本](userscript/ais2api-cookie.user.js)，在 AI Studio 页面点击导入。原项目脚本的“抓取并推送”同样兼容，地址改为 `http://127.0.0.1:18451`，“管理密码”填写 `cookie_import_key`。后端验证唯一账号身份后才保存，重复推送更新原账号；详见 [脚本安装与兼容范围](docs/userscript.md)。导入仅验证浏览器登录身份，不代表生成能力已验收。
 
