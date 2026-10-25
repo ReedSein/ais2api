@@ -14,6 +14,10 @@ set -eu
 project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project"
 export DEBIAN_FRONTEND=noninteractive
+# The Termux app preloads termux-exec so shebangs such as #!/usr/bin/env node
+# (npm package binaries) resolve inside the prefix; the container does not.
+export LD_PRELOAD="$PREFIX/lib/libtermux-exec-ld-preload.so"
+test -f "$LD_PRELOAD"
 # A fresh container must have a coherent package set from the rolling repository.
 apt-get update
 apt-get upgrade -y -o Dpkg::Options::=--force-confnew
