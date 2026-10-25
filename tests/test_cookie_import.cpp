@@ -6,13 +6,17 @@
 
 #include "ais2api/cookie_import.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <set>
+#include <thread>
 using namespace ais2api;
+using namespace std::chrono_literals;
 namespace {
 struct ImportBackend : GenerationBackend {
     std::vector<json::object> replies;
     std::vector<Account> candidates;
     std::set<std::size_t> unauthorized;
+    std::chrono::milliseconds delay{};
     int fail_at = -1;
     bool closed = false;
     bool expand_state = false;
@@ -22,6 +26,7 @@ struct ImportBackend : GenerationBackend {
     json::object probe(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe_import(Account &a, std::stop_token token = {}) override {
         check_cancel(token);
+        std::this_thread::sleep_for(delay);
         candidates.push_back(a);
         if (expand_state) a.storage_state.at("cookies").as_array()[0].as_object()["value"] = std::string(1024 * 1024, 'x');
         if (static_cast<int>(candidates.size()) == fail_at)
@@ -86,6 +91,37 @@ TEST_CASE("cookie push stops after three consecutive unauthorized probes") {
     CHECK(result.accounts[0].auth_user == "0");
     CHECK(result.details.at("attempted") == 4);
 }
+TEST_CASE("cookie push keeps verified accounts instead of starting a probe past the deadline") {
+    ImportBackend backend;
+    backend.replies = {verified("zero@example.com"), verified("one@example.com")};
+    // The first probe takes longer than the time left after it, so the scan
+    // cannot fit a second one. Slow machines only make the margin larger.
+    backend.delay = 600ms;
+    auto result = probe_cookie_import(request(), 8, backend, {}, Clock::now() + 1s);
+    REQUIRE(result.accounts.size() == 1);
+    CHECK(result.accounts[0].auth_user == "0");
+    CHECK(result.details.at("attempted") == 1);
+    CHECK(result.details.at("deadline_reached") == true);
+    CHECK(result.details.at("truncated") == true);
+}
+TEST_CASE("cookie push deadline never skips the search for a first account") {
+    ImportBackend backend;
+    backend.replies = {sign_in(), verified("one@example.com"), verified("two@example.com")};
+    auto result = probe_cookie_import(request(), 8, backend, {}, Clock::now() - 1s);
+    REQUIRE(result.accounts.size() == 1);
+    CHECK(result.accounts[0].auth_user == "1");
+    CHECK(result.details.at("attempted") == 2);
+    CHECK(result.details.at("deadline_reached") == true);
+}
+TEST_CASE("cookie push with a distant deadline scans as without one") {
+    ImportBackend backend;
+    backend.replies = {verified("zero@example.com"), sign_in(), verified("two@example.com")};
+    auto result = probe_cookie_import(request(), 3, backend, {}, Clock::now() + 1h);
+    REQUIRE(result.accounts.size() == 2);
+    CHECK(result.details.at("attempted") == 3);
+    CHECK(result.details.at("deadline_reached") == false);
+    CHECK(result.details.at("discarded_origins") == 0);
+}
 TEST_CASE("cookie push accepts storage files with local state and imports cookies only") {
     ImportBackend backend;
     backend.replies = {verified("one@example.com")};
@@ -104,6 +140,7 @@ TEST_CASE("cookie push accepts storage files with local state and imports cookie
     CHECK_FALSE(result.accounts[0].storage_state.if_contains("origins"));
     CHECK_FALSE(result.accounts[0].storage_state.if_contains("accountName"));
     CHECK(backend.candidates[0].storage_state == result.accounts[0].storage_state);
+    CHECK(result.details.at("discarded_origins") == 1);
 }
 TEST_CASE("structured cookie push preserves exact metadata and explicit identity") {
     ImportBackend backend;

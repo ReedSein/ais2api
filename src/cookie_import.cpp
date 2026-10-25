@@ -61,7 +61,8 @@ json::object checked_state(const json::object &v) {
 }
 }
 CookieImportResult probe_cookie_import(const json::object &request, unsigned max_accounts,
-                                      GenerationBackend &backend, std::stop_token token) {
+                                      GenerationBackend &backend, std::stop_token token,
+                                      std::optional<Clock::time_point> deadline) {
     check_cancel(token);
     if (max_accounts < 1 || max_accounts > 32) invalid();
     if (json::serialize(request).size() > 1024 * 1024)
@@ -82,6 +83,10 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     json::object storage;
     bool raw_header = false;
     auto parsed = Store::normalize_storage_state(*input, &raw_header, 512);
+    // checked_state() keeps cookies only; report the local storage it drops.
+    std::uint64_t discarded_origins = 0;
+    if (auto origins = parsed.if_contains("origins"); origins && origins->is_array())
+        discarded_origins = origins->as_array().size();
     if (raw_header) {
         // Header cookies have no host provenance. Host-prefixed cookies cannot be reconstructed.
         if (parsed.at("cookies").as_array().size() > 512)
@@ -107,12 +112,19 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     CookieImportResult result;
     unsigned attempted = 0;
     std::uint64_t skipped_partition = 0;
-    bool stopped = false;
+    bool stopped = false, deadline_reached = false;
     unsigned consecutive_failures = 0;
+    Clock::duration longest_probe{};
     std::set<std::string> seen;
     unsigned limit = explicit_auth ? 1 : max_accounts;
     for (unsigned i = 0; i < limit; ++i) {
         check_cancel(token);
+        // The request timeout discards every verified account, so keep them
+        // rather than start a probe that may not finish before the deadline.
+        if (deadline && !result.accounts.empty() && *deadline - Clock::now() < longest_probe) {
+            deadline_reached = true;
+            break;
+        }
         Account a;
         a.id = "acc_" + random_hex(16);
         a.auth_user = explicit_auth ? auth : std::to_string(i);
@@ -120,10 +132,14 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
         a.storage_state = storage;
         json::object identity;
         ++attempted;
+        const auto probe_started = Clock::now();
+        const auto record_duration = [&] { longest_probe = std::max(longest_probe, Clock::now() - probe_started); };
         try {
             identity = backend.probe_import(a, token);
+            record_duration();
             check_cancel(token);
         } catch (const Error &e) {
+            record_duration();
             check_cancel(token);
             if (e.status == 499 || e.code == "cancelled") throw Error(499, "cancelled", "Request cancelled");
             if (e.code == "identity_unverified" || e.code == "identity_mismatch")
@@ -176,8 +192,11 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     }
     check_cancel(token);
     if (result.accounts.empty()) throw Error(400, "cookie_not_authenticated", "Cookies are not authenticated");
-    result.details = {{"attempted", attempted}, {"truncated", !explicit_auth && !stopped && attempted == limit},
+    result.details = {{"attempted", attempted},
+                      {"truncated", !explicit_auth && (deadline_reached || (!stopped && attempted == limit))},
+                      {"deadline_reached", deadline_reached},
                       {"skipped_host_cookies", skipped}, {"skipped_partition_cookies", skipped_partition},
+                      {"discarded_origins", discarded_origins},
                       {"verified", result.accounts.size()}};
     return result;
 }
