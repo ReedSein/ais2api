@@ -11,6 +11,9 @@ struct CookieImportResult {
     std::vector<Account> accounts;
     json::object details;
 };
+// Once at least one account is verified, no probe starts that is unlikely to
+// finish before `deadline`; the scan returns what it has verified instead.
 CookieImportResult probe_cookie_import(const json::object &request, unsigned max_accounts,
-                                      GenerationBackend &backend, std::stop_token token = {});
+                                      GenerationBackend &backend, std::stop_token token = {},
+                                      std::optional<Clock::time_point> deadline = std::nullopt);
 }

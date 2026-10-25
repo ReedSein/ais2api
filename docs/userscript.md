@@ -28,10 +28,10 @@ ais2api 提供 Tampermonkey 脚本，在已登录的 AI Studio 页面读取 Cook
 ## 导入范围
 
 - **当前账号**：默认选项。点击导入时重新读取当前 URL，从 `authuser` 或 `/u/N` 推断账号索引，否则使用 0。高级设置中的索引留空表示自动；手动填写时以该值为准。
-- **批量识别账号**：从索引 0 开始依次识别登录身份，不发送单账号索引或预期邮箱。默认最多探测 8 个，受服务端 `cookie_import_max_accounts`（1–32）和总超时限制。遇到未登录或重复身份等条件会停止，不能保证发现所有登录账号。
+- **批量识别账号**：从索引 0 开始依次识别登录身份，不发送单账号索引或预期邮箱。默认最多探测 8 个，受服务端 `cookie_import_max_accounts`（1–32）和总超时限制。单个索引未登录或返回 401 时继续探测，连续三次失败或遇到重复身份时停止，不能保证发现所有登录账号。
 - **预期邮箱**：仅用于当前账号模式，可防止导错身份。批量模式禁用此项。
 
-成功数量包括已有账号的凭据更新，不能当作新增账号数量。达到扫描上限时面板会单独提示，实际结果以返回的账号列表为准。
+成功数量包括已有账号的凭据更新，不能当作新增账号数量。达到扫描数量或时间上限时面板会单独提示，实际结果以返回的账号列表为准。
 
 ## 读取方式
 
@@ -60,7 +60,8 @@ ais2api 提供 Tampermonkey 脚本，在已登录的 AI Studio 页面读取 Cook
 - 只等待 AI Studio 出现已登录的唯一身份，不要求出现输入框；编辑器和生成能力另行检查。身份识别使用可见 Google 账号控件，多个可见身份会被拒绝。
 - 验证与生成共用有界队列，每个账号使用独立 BrowserContext；请求断开、超时或关闭服务会取消验证。总身份验证时间受 `cookie_import_timeout_seconds` 限制，默认 180、最大 240 秒。
 - 保存使用一个事务；按已验证邮箱更新现有账号，保留 ID、名称与统计。保存前再次检查导入密钥，已撤销的密钥不能写入。
-- 成功回执包含账号元数据、`verification: browser_identity_only`、`generation_verified: false`；`details.truncated` 表示达到扫描上限。
+- 成功回执包含账号元数据、`verification: browser_identity_only`、`generation_verified: false`。`details.truncated` 表示探测在达到账号数量上限或导入时间上限时仍未遇到连续三次失败，可能还有未检查的索引。距离 `cookie_import_timeout_seconds` 不足以完成下一次探测时，服务端停止探测并保存已验证的账号，此时 `details.deadline_reached` 为 `true`；尚未验证到任何账号时仍会继续探测直至超时。
+- 验证导入只保存 cookies；storage state 中的 origins/localStorage 和其他元数据会被丢弃，丢弃的来源数量见 `details.discarded_origins`。
 - HTTP 输入最大 1 MiB，Cookie 最多 512 个。不支持分区 Cookie，不会去掉分区属性后按普通 Cookie 保存。
 - 错误正文和未知错误原因不进入面板或诊断摘要。
 

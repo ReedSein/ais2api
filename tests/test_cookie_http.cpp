@@ -22,6 +22,7 @@ struct PushState {
     std::atomic<unsigned> probes{0};
     std::atomic<bool> slow{false}, cancelled{false};
     std::atomic<int> failure{0};
+    std::atomic<int> delay_ms{0};
 };
 class PushBackend final : public GenerationBackend {
     std::shared_ptr<PushState> state;
@@ -36,6 +37,9 @@ public:
             if (token.stop_requested()) { state->cancelled = true; check_cancel(token); }
             std::this_thread::sleep_for(5ms);
         }
+        for (const auto until = Clock::now() + std::chrono::milliseconds(state->delay_ms.load());
+             Clock::now() < until && !token.stop_requested();)
+            std::this_thread::sleep_for(5ms);
         check_cancel(token);
         if (state->failure == 1) throw Error(503, "transport", "secret-cookie-http");
         if (state->failure == 2) throw Error(409, "identity_unverified", "secret-cookie-http");
@@ -126,12 +130,14 @@ TEST_CASE("cookie HTTP accepts legacy and structured input only after verificati
     CHECK(body.at("verification") == "browser_identity_only");
     CHECK(body.at("generation_verified") == false);
     CHECK(first.body().find("secret-cookie-http") == std::string::npos);
-    CHECK(s.state->probes == 2);
+    // Index 0 verifies; indices 1-3 are unauthenticated, so the scan stops after
+    // three consecutive failures.
+    CHECK(s.state->probes == 4);
     auto id = body.at("accounts").as_array()[0].as_object().at("id");
     auto second = s.push(R"({"cookies":[{"name":"SID","value":"secret-cookie-http","domain":".google.com","path":"/","secure":true,"httpOnly":true}],"auth_user":"4"})");
     REQUIRE(second.result_int() == 200);
     CHECK(json::parse(second.body()).as_object().at("accounts").as_array()[0].as_object().at("id") == id);
-    CHECK(s.state->probes == 3);
+    CHECK(s.state->probes == 5);
     CHECK(s.accounts().size() == 1);
 }
 TEST_CASE("cookie HTTP rejects invalid input and preserves store on probe failure", "[http][cookie-import]") {
@@ -169,6 +175,19 @@ TEST_CASE("cookie HTTP probe deadline returns gateway timeout without importing"
     CHECK(s.accounts().empty());
     for (unsigned i = 0; i < 200 && !s.state->cancelled; ++i) std::this_thread::sleep_for(5ms);
     CHECK(s.state->cancelled);
+}
+TEST_CASE("cookie HTTP scan deadline saves verified accounts before the request timeout", "[http][cookie-import]") {
+    // An 8 s timeout leaves a 3 s scan budget; after a 2 s probe another one
+    // cannot fit, so the verified account is saved instead of timing out.
+    PushServer s(true, 8); s.state->delay_ms = 2000;
+    auto response = s.push();
+    REQUIRE(response.result_int() == 200);
+    auto details = json::parse(response.body()).as_object().at("details").as_object();
+    CHECK(details.at("deadline_reached") == true);
+    CHECK(details.at("truncated") == true);
+    CHECK(details.at("attempted") == 1);
+    CHECK(s.state->probes == 1);
+    CHECK(s.accounts().size() == 1);
 }
 TEST_CASE("cookie HTTP import jobs share bounded worker capacity", "[http][cookie-import]") {
     PushServer s(true, 15, 1); s.state->slow = true;

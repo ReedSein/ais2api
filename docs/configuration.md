@@ -33,7 +33,7 @@
 | `admin_key` | 字符串，新配置为 `"admin"` | 热更新 | 管理 API 与 WebUI 的密码，与 `api_key` 相互独立。为空表示关闭 HTTP 管理。默认值 `admin` 有使用限制，见 [管理 API](management-api.md#鉴权)。 |
 | `admin_origins` | 字符串数组，`[]` | 热更新 | 允许跨域访问管理 API 的完整来源，例如 `http://localhost:5173`。为空时只允许同源。不能包含路径、凭据或通配符。 |
 | `cookie_import_key` | 字符串，`""` | 热更新 | userscript Cookie 导入使用的独立密钥；为空表示关闭导入。它不能用于生成接口。 |
-| `cookie_import_max_accounts` | 1–32，`8` | 热更新 | 原版脚本未指定账号索引时，最多依次探测多少个账号。 |
+| `cookie_import_max_accounts` | 1–32，`8` | 热更新 | 原版脚本未指定账号索引时，最多依次探测多少个账号。单个索引未登录或返回 401 时继续探测，连续三次失败后停止。 |
 | `cookie_import_timeout_seconds` | 1–240，`180` | 热更新 | 单次 Cookie 导入验证的超时时间（秒）。 |
 
 ### 存储、浏览器与代理

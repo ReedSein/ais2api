@@ -16,6 +16,9 @@ std::string folded(std::string s) {
     return s;
 }
 void invalid() { throw Error(400, "invalid_credentials", "Invalid cookie import request"); }
+// One unauthenticated auth_user index must not hide later accounts. Stop only
+// after repeated failures so sparse account layouts can still be imported.
+constexpr unsigned max_consecutive_probe_failures = 3;
 std::string text(const json::object &o, std::string_view key, std::size_t limit) {
     auto p = o.if_contains(key);
     if (!p) return {};
@@ -34,17 +37,19 @@ json::object checked_state(const json::value &v) {
                       (container->is_object() && container->as_object().size() > 512)))
         throw Error(413, "cookie_import_limit", "Cookie import exceeds the credential count limit");
     auto result = Store::normalize_storage_state(v);
-    if (result.at("cookies").as_array().size() > 512 || json::serialize(result).size() > 1024 * 1024)
+    // Verified imports only keep cookies. Local storage can execute application
+    // state, and the extra metadata is not needed to restore the session.
+    json::object cookies_only{{"cookies", result.at("cookies")}};
+    if (cookies_only.at("cookies").as_array().size() > 512 ||
+        json::serialize(cookies_only).size() > 1024 * 1024)
         throw Error(413, "cookie_import_limit", "Cookie import exceeds the credential size limit");
-    for (const auto &entry : result.at("cookies").as_array()) {
+    for (const auto &entry : cookies_only.at("cookies").as_array()) {
         const auto &cookie = entry.as_object();
         if (!google(string_or(cookie, "domain")) || cookie.if_contains("partitionKey") ||
             bool_or(cookie, "partitionKeyOpaque") || bool_or(cookie, "partitioned") ||
             !string_or(cookie, "firstPartyDomain").empty()) invalid();
     }
-    // Imported local storage can execute application state; this endpoint only accepts cookies.
-    if (auto origins = result.if_contains("origins"); origins && !origins->as_array().empty()) invalid();
-    return result;
+    return cookies_only;
 }
 json::object checked_state(const json::object &v) {
     // Check refreshed browser state before converting/copying the JSON object.
@@ -56,7 +61,8 @@ json::object checked_state(const json::object &v) {
 }
 }
 CookieImportResult probe_cookie_import(const json::object &request, unsigned max_accounts,
-                                      GenerationBackend &backend, std::stop_token token) {
+                                      GenerationBackend &backend, std::stop_token token,
+                                      std::optional<Clock::time_point> deadline) {
     check_cancel(token);
     if (max_accounts < 1 || max_accounts > 32) invalid();
     if (json::serialize(request).size() > 1024 * 1024)
@@ -77,6 +83,10 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     json::object storage;
     bool raw_header = false;
     auto parsed = Store::normalize_storage_state(*input, &raw_header, 512);
+    // checked_state() keeps cookies only; report the local storage it drops.
+    std::uint64_t discarded_origins = 0;
+    if (auto origins = parsed.if_contains("origins"); origins && origins->is_array())
+        discarded_origins = origins->as_array().size();
     if (raw_header) {
         // Header cookies have no host provenance. Host-prefixed cookies cannot be reconstructed.
         if (parsed.at("cookies").as_array().size() > 512)
@@ -102,11 +112,19 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
     CookieImportResult result;
     unsigned attempted = 0;
     std::uint64_t skipped_partition = 0;
-    bool stopped = false;
+    bool stopped = false, deadline_reached = false;
+    unsigned consecutive_failures = 0;
+    Clock::duration longest_probe{};
     std::set<std::string> seen;
     unsigned limit = explicit_auth ? 1 : max_accounts;
     for (unsigned i = 0; i < limit; ++i) {
         check_cancel(token);
+        // The request timeout discards every verified account, so keep them
+        // rather than start a probe that may not finish before the deadline.
+        if (deadline && !result.accounts.empty() && *deadline - Clock::now() < longest_probe) {
+            deadline_reached = true;
+            break;
+        }
         Account a;
         a.id = "acc_" + random_hex(16);
         a.auth_user = explicit_auth ? auth : std::to_string(i);
@@ -114,17 +132,25 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
         a.storage_state = storage;
         json::object identity;
         ++attempted;
+        const auto probe_started = Clock::now();
+        const auto record_duration = [&] { longest_probe = std::max(longest_probe, Clock::now() - probe_started); };
         try {
             identity = backend.probe_import(a, token);
+            record_duration();
             check_cancel(token);
         } catch (const Error &e) {
+            record_duration();
             check_cancel(token);
             if (e.status == 499 || e.code == "cancelled") throw Error(499, "cancelled", "Request cancelled");
             if (e.code == "identity_unverified" || e.code == "identity_mismatch")
                 throw Error(409, "identity_unverified", "Cookie account identity could not be verified");
             if (e.code == "region_blocked" || e.code == "cookie_region_blocked")
                 throw Error(403, "cookie_region_blocked", "AI Studio is unavailable in this region");
-            if (e.status == 401) { stopped = true; break; }
+            if (e.status == 401) {
+                if (++consecutive_failures < max_consecutive_probe_failures) continue;
+                stopped = true;
+                break;
+            }
             if (e.code == "browser_not_configured")
                 throw Error(503, "cookie_browser_not_configured", "Cookie import requires a configured browser; run ais2api doctor");
             if (e.code == "browser_launch")
@@ -146,7 +172,11 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
             else if (count->is_int64() && count->as_int64() >= 0) n = static_cast<std::uint64_t>(count->as_int64());
             skipped_partition += std::min(n, std::numeric_limits<std::uint64_t>::max() - skipped_partition);
         }
-        if (bool_or(identity, "login")) { stopped = true; break; }
+        if (bool_or(identity, "login")) {
+            if (++consecutive_failures < max_consecutive_probe_failures) continue;
+            stopped = true;
+            break;
+        }
         a.email = string_or(identity, "email");
         if (!identity.if_contains("login") || !identity.at("login").is_bool() ||
             !identity.if_contains("identityAmbiguous") || !identity.at("identityAmbiguous").is_bool() ||
@@ -156,13 +186,17 @@ CookieImportResult probe_cookie_import(const json::object &request, unsigned max
         if (!expected.empty() && folded(expected) != folded(a.email))
             throw Error(409, "identity_unverified", "Cookie account identity did not match");
         if (!seen.insert(folded(a.email)).second) { stopped = true; break; }
+        consecutive_failures = 0;
         a.storage_state = checked_state(a.storage_state);
         result.accounts.push_back(std::move(a));
     }
     check_cancel(token);
     if (result.accounts.empty()) throw Error(400, "cookie_not_authenticated", "Cookies are not authenticated");
-    result.details = {{"attempted", attempted}, {"truncated", !explicit_auth && !stopped && attempted == limit},
+    result.details = {{"attempted", attempted},
+                      {"truncated", !explicit_auth && (deadline_reached || (!stopped && attempted == limit))},
+                      {"deadline_reached", deadline_reached},
                       {"skipped_host_cookies", skipped}, {"skipped_partition_cookies", skipped_partition},
+                      {"discarded_origins", discarded_origins},
                       {"verified", result.accounts.size()}};
     return result;
 }

@@ -78,15 +78,22 @@ async function submit() {
       if (authUser.value !== '') body.auth_user = authUser.value
       if (email.value.trim()) body.email = email.value.trim()
       if (name.value.trim()) body.name_prefix = name.value.trim()
-      const result = await api.post<{ imported_count?: number; details?: { truncated?: boolean } }>('/accounts/probe-import', body, {
+      const result = await api.post<{
+        imported_count?: number
+        details?: { truncated?: boolean; deadline_reached?: boolean; discarded_origins?: number }
+      }>('/accounts/probe-import', body, {
         signal: controller.signal,
       })
-      notify(
-        'success',
-        `已验证并导入 ${result.imported_count ?? 0} 个账号`,
-        result.details?.truncated ? '已达到单次探测上限，可能还有更多账号索引未检查。' : '仅验证了浏览器登录身份，生成能力需另行确认。',
-        7000,
-      )
+      const details = result.details ?? {}
+      const notes = [
+        details.deadline_reached
+          ? '已接近导入超时，剩余账号索引未检查，可指定账号索引单独导入。'
+          : details.truncated
+            ? '已达到单次探测上限，可能还有更多账号索引未检查。'
+            : '仅验证了浏览器登录身份，生成能力需另行确认。',
+      ]
+      if (details.discarded_origins) notes.push(`已丢弃 ${details.discarded_origins} 个来源的 localStorage，仅导入 Cookie。`)
+      notify('success', `已验证并导入 ${result.imported_count ?? 0} 个账号`, notes.join(''), 7000)
     }
     emit('imported')
     open.value = false
@@ -115,7 +122,7 @@ async function submit() {
         支持 Cookie 请求头、Netscape Cookie 文本、Cookie JSON、storage state 和凭据包。凭据保存在后端数据库，不会出现在列表中。
       </template>
       <template v-else>
-        后端会启动浏览器确认 Google 账号身份后再保存；重复导入会更新同一账号。未指定账号索引时依次探测 0–7，最长可能需要数分钟。
+        后端会启动浏览器确认 Google 账号身份后再保存；重复导入会更新同一账号。未指定账号索引时依次探测 0–7，单个索引未登录会继续，连续三次失败后停止，最长可能需要数分钟。storage state 中的 localStorage 会被丢弃，仅保留 Cookie。
       </template>
     </p>
 

@@ -51,6 +51,8 @@ struct Task {
     std::function<void()> execute;
     std::function<void()> cancel;
 };
+// Time reserved after the account scan for persisting accounts and replying.
+constexpr auto cookie_import_commit_margin = 5s;
 struct CookieImportJob {
     Config config;
     json::object input;
@@ -317,8 +319,12 @@ class Service {
                 if (job->started_at - job->queued > std::chrono::seconds(job->config.limits.queue_seconds))
                     throw Error(504, "queue_timeout", "Cookie import queue wait exceeded limit");
                 gateway_->reconfigure(job->config);
+                // Stop scanning early enough to save verified accounts and
+                // answer before the HTTP handler's timeout discards them.
+                const auto scan_deadline = job->started_at +
+                    std::chrono::seconds(job->config.cookie_import_timeout_seconds) - cookie_import_commit_margin;
                 auto verified = probe_cookie_import(job->input, job->config.cookie_import_max_accounts,
-                                                    *gateway_, job->cancellation.get_token());
+                                                    *gateway_, job->cancellation.get_token(), scan_deadline);
                 check_cancel(job->cancellation.get_token());
                 json::array accounts;
                 {
