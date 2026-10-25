@@ -4,6 +4,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+# Build natively on the target architecture. Buildx selects the matching
+# Debian base image for linux/amd64 or linux/arm64.
+#
 # Install the pinned vcpkg dependencies in their own layer. A source change
 # then rebuilds only the gateway, not Boost, OpenSSL, curl or libarchive.
 FROM debian:13-slim AS build
@@ -40,33 +43,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 
-RUN test "$(uname -m)" = x86_64 || { \
-      echo "ais2api container images require linux/amd64" >&2; exit 1; \
-    }
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64|amd64) triplet=x64-linux ;; \
+      aarch64|arm64) triplet=arm64-linux ;; \
+      *) echo "Unsupported container architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    printf '%s\n' "$triplet" > /tmp/vcpkg-triplet
 
 COPY vcpkg.json scripts/read-baseline.cmake /opt/vcpkg-manifest/
 # hadolint ignore=DL3003
 RUN baseline=$(cmake \
       -DAIS2API_MANIFEST=/opt/vcpkg-manifest/vcpkg.json \
       -P /opt/vcpkg-manifest/read-baseline.cmake) \
+    && triplet=$(cat /tmp/vcpkg-triplet) \
     && git clone --filter=blob:none --no-checkout \
       https://github.com/microsoft/vcpkg.git /opt/vcpkg \
     && git -C /opt/vcpkg checkout --detach "$baseline" \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics \
     && cd /opt/vcpkg-manifest \
-    && /opt/vcpkg/vcpkg install --triplet x64-linux \
+    && /opt/vcpkg/vcpkg install --triplet "$triplet" \
       --x-install-root=/opt/vcpkg-installed \
       --clean-after-build \
     && rm -rf /root/.cache/vcpkg /opt/vcpkg/downloads /opt/vcpkg/buildtrees /opt/vcpkg/packages
 
 COPY . .
 
-RUN cmake -S . -B build/linux -G Ninja \
+RUN triplet=$(cat /tmp/vcpkg-triplet) \
+    && cmake -S . -B build/linux -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTING=OFF \
       -DAIS2API_BUILD_WEBUI=ON \
       -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
-      -DVCPKG_TARGET_TRIPLET=x64-linux \
+      -DVCPKG_TARGET_TRIPLET="$triplet" \
       -DVCPKG_MANIFEST_INSTALL=OFF \
       -DVCPKG_INSTALLED_DIR=/opt/vcpkg-installed \
       -DCMAKE_INSTALL_PREFIX=/src/build/linux/install \

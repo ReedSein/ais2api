@@ -18,14 +18,12 @@ concurrency:
   group: container-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  image:
+  metadata:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Compute image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -37,36 +35,56 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+  image:
+    name: Image ${{ matrix.arch }}
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
-          tags: |
-            ${{ steps.meta.outputs.tags }}
-            ais2api:ci
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+          tags: ais2api:ci-${{ matrix.arch }}
+          labels: ${{ needs.metadata.outputs.labels }}
+          cache-from: type=gha,scope=ais2api-${{ matrix.arch }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=ais2api-{0}', matrix.arch) || '' }}
       - name: Smoke test image
         run: |
           set -eu
+          image="ais2api:ci-${{ matrix.arch }}"
           data="$RUNNER_TEMP/ais2api-data"
           mkdir -p "$data"
           docker run --rm --entrypoint /app/bin/ais2api \
-            -v "$data:/data" ais2api:ci \
+            -v "$data:/data" "$image" \
             init --config /data/config.json --data-dir /data \
             --bind 0.0.0.0 --browser /usr/bin/chromium
           docker run --rm --entrypoint /app/bin/ais2api \
-            -v "$data:/data" ais2api:ci \
+            -v "$data:/data" "$image" \
             doctor --config /data/config.json > "$RUNNER_TEMP/doctor.json"
           cat "$RUNNER_TEMP/doctor.json"
           grep -q '"browser_exists":true' "$RUNNER_TEMP/doctor.json"
-          docker run --rm --entrypoint /usr/bin/chromium ais2api:ci \
+          docker run --rm --entrypoint /usr/bin/chromium "$image" \
             --no-sandbox --headless=new --disable-gpu --disable-dev-shm-usage \
             --dump-dom about:blank | grep -q '<html'
-          docker run --rm --entrypoint /bin/sh ais2api:ci -c '
+          docker run --rm --entrypoint /bin/sh "$image" -c '
             set -eu
             profile=$(mktemp -d)
             /usr/bin/chromium --no-sandbox --headless=new --disable-gpu \
@@ -84,7 +102,7 @@ jobs:
             curl -fsS "http://127.0.0.1:$port/json/version"
           '
           docker run -d --name ais2api-smoke \
-            -p 18452:18451 -v "$data:/data" ais2api:ci
+            -p 18452:18451 -v "$data:/data" "$image"
           trap 'docker logs ais2api-smoke; docker rm -f ais2api-smoke' EXIT
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18452/health >/dev/null 2>&1; then break; fi
@@ -101,10 +119,32 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish image
+      - name: Publish architecture image
         if: github.event_name != 'pull_request'
         run: |
           set -eu
-          printf '%s\n' "${{ steps.meta.outputs.tags }}" | while IFS= read -r tag; do
-            [ -z "$tag" ] || docker push "$tag"
+          printf '%s\n' "${{ needs.metadata.outputs.tags }}" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            arch_tag="${tag}-${{ matrix.arch }}"
+            docker tag "ais2api:ci-${{ matrix.arch }}" "$arch_tag"
+            docker push "$arch_tag"
+          done
+  manifest:
+    name: Publish multi-arch manifest
+    if: github.event_name != 'pull_request'
+    needs: [metadata, image]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch manifests
+        run: |
+          set -eu
+          printf '%s\n' "${{ needs.metadata.outputs.tags }}" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create -t "$tag" "${tag}-amd64" "${tag}-arm64"
           done

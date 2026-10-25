@@ -1,6 +1,6 @@
 # Docker 部署
 
-本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，内置 Debian Chromium，不包含 CloakBrowser。
+本文说明如何构建、运行和升级 ais2api 容器镜像。镜像以 Debian 13 为运行时，内置 Debian Chromium，不包含 CloakBrowser，提供 `linux/amd64` 与 `linux/arm64` 两种架构。
 
 ## 构建
 
@@ -10,15 +10,23 @@
 docker build -t ais2api:local .
 ```
 
-构建分为依赖层和源码层。依赖层按 `vcpkg.json` 的固定 baseline 安装；源码层编译程序并嵌入 Web 控制台。修改源码不会重新编译 vcpkg 依赖。CMake 参数与 `scripts/build.sh linux` 的 Linux 分支一致，只把 vcpkg 依赖安装拆到独立层；镜像构建不重复运行 CTest，测试由现有 CI 覆盖。
+构建分为依赖层和源码层。依赖层按 `vcpkg.json` 的固定 baseline 安装；源码层编译程序并嵌入 Web 控制台。修改源码不会重新编译 vcpkg 依赖。构建脚本按目标架构选择 vcpkg triplet；镜像构建不重复运行 CTest，测试由现有 CI 覆盖。
 
-镜像只构建 `linux/amd64`。`scripts/build.sh linux` 目前只支持 x86_64，仓库没有 Linux ARM64 的构建路径。
+默认按当前主机架构构建。发布流程使用 GitHub 的 amd64 与 arm64 原生 runner；在 x86_64 主机上交叉构建 arm64 需要 QEMU binfmt，编译在模拟下运行，耗时明显更长。
 
 内存较小的主机可以限制并行编译：
 
 ```sh
 docker build --build-arg BUILD_JOBS=2 -t ais2api:local .
 ```
+
+已有 Buildx 时，可以显式选择目标架构：
+
+```sh
+docker buildx build --platform linux/arm64 -t ais2api:arm64 --load .
+```
+
+在 x86_64 主机上执行上面的命令前，需要先用 `docker run --privileged --rm tonistiigi/binfmt --install arm64` 注册 QEMU。原生 arm64 主机构建不需要这一步。
 
 ## 运行
 
@@ -100,7 +108,7 @@ docker exec ais2api /app/bin/ais2api config reload --config /data/config.json
 
 ## 浏览器
 
-镜像内的浏览器是 Debian Chromium，路径 `/usr/bin/chromium`。程序支持其他 Chromium 构建，但 CloakBrowser 的指纹参数会被其他构建忽略；需要固定账号指纹时使用 CloakBrowser。
+镜像内的浏览器是 Debian Chromium，路径 `/usr/bin/chromium`。程序支持其他 Chromium 构建，但 CloakBrowser 的指纹参数会被其他构建忽略；需要固定账号指纹时使用 CloakBrowser。挂载的 CloakBrowser 必须与容器架构一致。
 
 CloakBrowser 的二进制许可不允许再分发，公开镜像不能包含它。已有 CloakBrowser 时，把目录只读挂载进容器并指定可执行文件：
 
@@ -117,7 +125,7 @@ docker run -d --name ais2api \
 
 ## 发布镜像
 
-`.github/workflows/docker.yml` 在 PR、推送到 `main` 和标签时构建镜像，PR 只做冒烟测试，推送到 `main`、标签或手动触发时推送到 `ghcr.io/mananekoha114/ais2api`。
+`.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上分别构建并运行冒烟测试，PR 只构建不推送。推送到 `main`、标签或手动触发时，先把各架构镜像推送到 `ghcr.io/mananekoha114/ais2api`，再合并为 multi-arch manifest。
 
 首次推送后，在 GitHub 的 Packages 设置中把镜像可见性改为 public，否则匿名用户需要先 `docker login ghcr.io`。
 
@@ -145,7 +153,7 @@ docker run -d --name ais2api \
 
 ## 限制
 
-- 只提供 `linux/amd64` 镜像。
+- 提供 `linux/amd64` 与 `linux/arm64` 镜像；原生 `scripts/build.sh linux` 仍只支持 x86_64。
 - 容器内以 root 运行，浏览器以 `--no-sandbox` 启动；容器内无法提供 Chromium 沙箱。
 - 容器没有系统 D-Bus，浏览器日志会出现 `Failed to connect to the bus`；它不影响 CDP 和生成。
 - 生成请求串行处理，超过队列上限返回 `429 queue_full`。

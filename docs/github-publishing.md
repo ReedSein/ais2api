@@ -20,7 +20,7 @@
 
 ## 容器镜像
 
-`.github/workflows/docker.yml` 在 PR、推送到 `main` 和标签时构建镜像，推送到 `main`、标签或手动触发时发布到 `ghcr.io/mananekoha114/ais2api`。镜像只包含 Debian Chromium，不包含 CloakBrowser，见 [Docker 部署](docker.md)。
+`.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上构建镜像并运行冒烟测试，推送到 `main`、标签或手动触发时发布 `linux/amd64` 与 `linux/arm64` 的 multi-arch manifest 到 `ghcr.io/mananekoha114/ais2api`。镜像只包含 Debian Chromium，不包含 CloakBrowser，见 [Docker 部署](docker.md)。
 
 ## 发布二进制
 
