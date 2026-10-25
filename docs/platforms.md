@@ -135,6 +135,7 @@ CXXFLAGS=-fexperimental-library sh scripts/build.sh termux --install-deps --buil
 ```
 
 - 不加 `--install-deps` 时使用已安装的依赖。官方包名为 `clang`、`cmake`、`ninja`、`git`、`curl`、`pkg-config`、`boost`、`boost-headers`、`libcurl`、`openssl`、`libarchive` 与 `libsqlite`，其中已包含原生 CMake 构建所需的头文件；不要替换为桌面的 `*-dev` 包名。`boost-headers` 是拆分包，脚本的依赖列表不包含它，需要单独安装。参考官方配方：[Clang](https://github.com/termux/termux-packages/blob/master/packages/libllvm/clang.subpackage.sh)、[Boost](https://github.com/termux/termux-packages/blob/master/packages/boost/build.sh)、[libcurl](https://github.com/termux/termux-packages/blob/master/packages/libcurl/build.sh)、[libarchive](https://github.com/termux/termux-packages/blob/master/packages/libarchive/build.sh)、[libsqlite](https://github.com/termux/termux-packages/blob/master/packages/libsqlite/build.sh)。
+- 构建网页管理界面时，另行安装 `nodejs` 和 `npm`，并在构建命令中加入 `--webui`。它们仅用于构建，运行包不需要 Node.js 或单独的前端目录；不带该选项时仍可构建纯后端程序。
 - 测试会从官方源码归档准备 [Catch2 3.16.0](https://github.com/catchorg/Catch2/releases/tag/v3.16.0)，并校验与固定 vcpkg port 相同的 SHA-512；准备目录为 `build/deps`。只构建生产程序时可以用 `--skip-tests`。不会把 vcpkg 的 Android 交叉编译当作原生 Termux 测试。
 - 使用 Termux Clang 21 时，`std::osyncstream` 需要 `-fexperimental-library`（包括 `ndk-sysroot` 提供的实验性静态库）。上面的命令新建构建目录，使 CMake 读取 `CXXFLAGS`；对于已配置的目录，请通过 CMake 设置 `-DCMAKE_CXX_FLAGS=-fexperimental-library`，只改环境变量不会替换缓存的参数。
 
@@ -154,11 +155,11 @@ proot-distro login example-browser --bind /absolute/host/path:/absolute/guest/pa
 
 ### GitHub Actions 的 Termux 运行包
 
-`.github/workflows/termux.yml` 在 `ubuntu-24.04-arm` 上、官方 Termux ARM64 容器内构建当前提交（包括 PR 的合并预览）。镜像按摘要固定；滚动更新的 apt 依赖会一起升级，并记录实际版本——这是有记录的构建环境，而不是完整的依赖快照。它复用 `scripts/build.sh termux` 和 CMake 安装清单，运行 CTest 以及隔离的 CLI / 便携目录冒烟测试（不访问 Google）。参见 [Termux 官方容器](https://github.com/termux/termux-docker/blob/master/README.md)。
+`.github/workflows/termux.yml` 在 `ubuntu-24.04-arm` 上、官方 Termux ARM64 容器内构建当前提交（包括 PR 的合并预览）。镜像按摘要固定；滚动更新的 apt 依赖会一起升级，并记录实际版本——这是有记录的构建环境，而不是完整的依赖快照。它复用 `scripts/build.sh termux --webui` 和 CMake 安装清单，运行 CTest 以及隔离的 CLI / 便携目录冒烟测试（不访问 Google）。便携目录检查显式启用 `--require-webui`，在原位置和移动到含空格目录后验证首页、登录路由及页面引用的 JS/CSS，缺失网页或资源时失败。参见 [Termux 官方容器](https://github.com/termux/termux-docker/blob/master/README.md)。
 
 该工作流与桌面工作流一样在 push 与 PR 时运行，也可以在 Actions 中选择 **Termux ARM64** 手动运行（GitHub 要求工作流文件已存在于默认分支，见 [手动运行工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)）。
 
-产物 `termux-aarch64-COMMIT` 包含 `.tar.gz` 后端运行包及其 `.sha256`，保留 28 天。请解压到 Termux 私有存储中的新目录（Android 共享存储不能作为可执行安装目录），使用前先校验：
+产物 `termux-aarch64-COMMIT` 包含 `.tar.gz` 运行包（内嵌网页管理界面）及其 `.sha256`，保留 28 天。请解压到 Termux 私有存储中的新目录（Android 共享存储不能作为可执行安装目录），使用前先校验：
 
 ```sh
 sha256sum --check ais2api-termux-aarch64-COMMIT.tar.gz.sha256

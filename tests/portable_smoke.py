@@ -10,10 +10,12 @@
 Use an installed bin/ais2api executable. Optional --browser-bundle accepts a
 clean bundle root, its browser-runtime directory, or its platform directory.
 No browser or Google request is performed. Child output and secrets stay in memory.
+--require-webui also checks embedded pages and their entry assets before and after relocation.
 """
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -37,13 +40,39 @@ def free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class WebAssets(HTMLParser):
+    """Entry scripts and stylesheets referenced by the installed console."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resources: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "script" and attributes.get("src"):
+            self.resources[attributes["src"]] = "text/javascript"
+        elif tag == "link" and attributes.get("href"):
+            relations = (attributes.get("rel") or "").split()
+            if "stylesheet" in relations:
+                self.resources[attributes["href"]] = "text/css"
+            elif "modulepreload" in relations:
+                self.resources[attributes["href"]] = "text/javascript"
+
+
 class PortableSmoke:
-    def __init__(self, executable: Path, workspace: Path, bundle: Path | None) -> None:
+    def __init__(self, executable: Path, workspace: Path, bundle: Path | None,
+                 require_webui: bool = False) -> None:
         self.current = "initialize"
         self.checks: list[str] = []
         self.secrets: list[str] = []
         self.started = False
         self.port = 0
+        self.require_webui = require_webui
         workspace = workspace.resolve()
         tools = workspace / ".tools"
         if tools.is_symlink() or tools.resolve().parent != workspace:
@@ -85,7 +114,7 @@ class PortableSmoke:
             # Only a clean explicit bundle is copied, never the source program's data.
             shutil.copytree(source, self.program / "browser-runtime" / self.platform,
                             symlinks=True)
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def check(self, label: str, condition: bool) -> None:
         self.current = label
@@ -123,15 +152,47 @@ class PortableSmoke:
             raise Failure("machine_readable_cli")
         return value
 
-    def http(self, path: str) -> tuple[int, dict]:
+    def fetch(self, path: str, limit: int = 65536) -> tuple[int, str, bytes]:
         try:
-            with self.opener.open(f"http://127.0.0.1:{self.port}{path}", timeout=10) as response:
-                status, body = response.status, response.read(65536)
+            response = self.opener.open(f"http://127.0.0.1:{self.port}{path}", timeout=10)
         except urllib.error.HTTPError as error:
-            status, body = error.code, error.read(65536)
-        text = body.decode("utf-8")
-        self.no_secret(text)
-        return status, json.loads(text)
+            response = error
+        with response:
+            status = response.status
+            content_type = response.headers.get_content_type()
+            body = response.read(limit + 1)
+        if len(body) > limit:
+            raise Failure("http_response_too_large")
+        self.no_secret(body.decode("utf-8"))
+        return status, content_type, body
+
+    def http(self, path: str) -> tuple[int, dict]:
+        status, _, body = self.fetch(path)
+        return status, json.loads(body)
+
+    def webui(self, prefix: str) -> None:
+        resources: dict[str, str] = {}
+        for name, route in (("home", "/"), ("login", "/login")):
+            label = prefix + "_webui_" + name
+            self.current = label
+            status, content_type, body = self.fetch(route)
+            self.check(label, status == 200 and content_type == "text/html" and bool(body.strip()))
+            page = WebAssets()
+            page.feed(body.decode("utf-8"))
+            page.close()
+            self.check(label + "_entry_assets",
+                       {"text/javascript", "text/css"}.issubset(page.resources.values()))
+            resources.update(page.resources)
+        origin = f"http://127.0.0.1:{self.port}"
+        for index, (reference, expected_type) in enumerate(resources.items()):
+            label = prefix + f"_webui_asset_{index}"
+            url = urllib.parse.urlsplit(urllib.parse.urljoin(origin + "/", reference))
+            # Only request the installed service, never a remote asset from HTML.
+            self.check(label + "_local", (url.scheme, url.netloc) == ("http", f"127.0.0.1:{self.port}"))
+            path = urllib.parse.urlunsplit(("", "", url.path, url.query, ""))
+            self.current = label
+            status, content_type, body = self.fetch(path, 4 * 1024 * 1024)
+            self.check(label, status == 200 and content_type == expected_type and bool(body.strip()))
 
     def homes_empty(self, prefix: str) -> None:
         self.check(prefix + "_fake_homes_empty", all(not any(root.iterdir()) for root in self.user_roots))
@@ -182,6 +243,8 @@ class PortableSmoke:
         code, body = self.http("/ready")
         self.check(prefix + "_not_ready_without_accounts", code == 503 and body.get("ready") is False)
         self.check(prefix + "_no_accounts", self.cli("accounts", "list").get("accounts") == [])
+        if self.require_webui:
+            self.webui(prefix)
         self.current = prefix + "_stop"
         self.stop_and_verify()
         self.check(prefix + "_lock_released", self.cli("init").get("initialized") is True)
@@ -244,13 +307,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, required=True)
     parser.add_argument("--browser-bundle", type=Path)
+    parser.add_argument("--require-webui", action="store_true",
+                        help="fail unless embedded pages and entry scripts/styles survive relocation")
     args = parser.parse_args()
     smoke = None
     failure = None
     try:
         # Assign before __init__ so even failed setup retains cleanup ownership.
         smoke = PortableSmoke.__new__(PortableSmoke)
-        smoke.__init__(args.exe, workspace, args.browser_bundle)
+        smoke.__init__(args.exe, workspace, args.browser_bundle, args.require_webui)
         smoke.run()
     except Exception:
         failure = getattr(smoke, "current", "initialize")
