@@ -20,13 +20,15 @@ docker build -t ais2api:local .
 docker build --build-arg BUILD_JOBS=2 -t ais2api:local .
 ```
 
-已有 Buildx 时，可以显式选择目标架构：
+在 x86_64 主机上构建 arm64 镜像时，先注册 QEMU，并使用 `docker-container` 驱动：
 
 ```sh
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+docker buildx create --name ais2api-builder --driver docker-container --use
 docker buildx build --platform linux/arm64 -t ais2api:arm64 --load .
 ```
 
-在 x86_64 主机上执行上面的命令前，需要先用 `docker run --privileged --rm tonistiigi/binfmt --install arm64` 注册 QEMU。原生 arm64 主机构建不需要这一步。
+原生 arm64 主机不需要 QEMU 或单独的 builder，直接执行 `docker build` 即可。
 
 ## 运行
 
