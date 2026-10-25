@@ -38,7 +38,14 @@ function setup(options = {}) {
     }
   }
   const body = new Node('body');
-  const document = { body, createElement: tag => new Node(tag), get cookie() { cookieReads++; return options.cookie ?? 'fallback=synthetic; empty='; } };
+  const document = {
+    body, createElement: tag => new Node(tag),
+    get cookie() {
+      cookieReads++;
+      if (options.cookieThrow) throw new Error('PRIVATE COOKIE ERROR');
+      return options.cookie ?? 'fallback=synthetic; empty=';
+    }
+  };
   const context = {
     URL, document, location: new URL(options.url || 'https://aistudio.google.com/u/2/prompts/new'),
     innerWidth: options.width || 400, innerHeight: options.height || 800,
@@ -72,6 +79,9 @@ function setup(options = {}) {
   };
   context.window = context; context.self = context; context.top = options.frame ? {} : context;
   if (options.noGM) delete context.GM_cookie;
+  for (const [name, value] of Object.entries(options.globals || {})) {
+    if (value === undefined) delete context[name]; else context[name] = value;
+  }
   vm.runInNewContext(source, context);
   const get = id => nodes.find(node => node.id === 'ais2-' + id);
   const fire = async (node, event = 'click', args = {}) => {
@@ -329,6 +339,74 @@ async function scenario(name, fn) {
     const restored=setup({storage,width:300,height:450});
     const restoredHost=restored.nodes.find(node=>node.tag==='div');
     assert.equal(parseFloat(restoredHost.style.left),8);
+  });
+  await scenario('missing and non-callable storage APIs retain visible fallback', async () => {
+    for (const GM_getValue of [undefined, null]) {
+      const env = setup({globals:{GM_getValue}});
+      assert.match(env.get('storage-notice').textContent,/无法读取/);
+    }
+    for (const GM_setValue of [undefined, 42]) {
+      const env = setup({globals:{GM_setValue}});
+      env.get('key').value = 'synthetic-key'; env.get('remember').checked = true;
+      await env.fire(env.get('remember'),'change');
+      assert.equal(env.get('remember').checked,false);
+      assert.match(env.get('storage-notice').textContent,/保存或清除失败/);
+    }
+    for (const GM_deleteValue of [undefined, 42]) {
+      const storage = new Map([['importKey:http://127.0.0.1:18451','synthetic-key']]);
+      const env = setup({storage, globals:{GM_deleteValue}});
+      await env.click('forget');
+      assert(storage.has('importKey:http://127.0.0.1:18451'));
+      assert.match(env.get('storage-notice').textContent,/清除失败/);
+    }
+  });
+  await scenario('clipboard and cookie capability absence keep existing fallbacks', async () => {
+    for (const navigator of [{}, {clipboard:null}, {clipboard:{writeText:42}}]) {
+      const env = setup({globals:{navigator}, noGM:true, cookie:''});
+      env.get('key').value = 'synthetic-key';
+      await env.click('import'); await env.click('copy');
+      assert.equal(env.get('copy-text').hidden,false);
+      assert.equal(env.get('copy-text').selected,true);
+      assert.equal(JSON.parse(env.get('copy-text').value).code,'no_cookies');
+    }
+    for (const GM_cookie of [undefined, null, {}, {list:42}, {list(){throw new Error('PRIVATE');}}]) {
+      const env = setup({globals:{GM_cookie}});
+      const {done} = await pendingImport(env);
+      assert.equal(env.reads().document,1);
+      assert.equal(JSON.parse(env.requests[0].data).cookies,'fallback=synthetic; empty=');
+      respond(env,success()); await done;
+      assert.equal(env.timers.size,0);
+    }
+    const env = setup({noGM:true, cookieThrow:true});
+    const {done} = await pendingImport(env); await done;
+    assert.equal(env.requests.length,0);
+    assert.match(env.get('status').textContent,/尚未发送请求/);
+    assert.equal(env.get('key').value,'synthetic-import-key');
+    assert.equal(env.timers.size,0);
+    await env.click('copy');
+    assert.equal(JSON.parse(env.copied[0]).phase,'not_sent');
+    assert(!env.copied[0].includes('PRIVATE'));
+  });
+  await scenario('all controls lock and restore on both operations and outcomes', async () => {
+    for (const action of ['check','import']) {
+      for (const all of [false,true]) {
+        for (const fail of [false,true]) {
+          const env = setup({records});
+          if (all) await env.set('mode','all');
+          env.get('key').value = 'synthetic-key';
+          const done = env.click(action); await flush();
+          for (const id of ['service','key','remember','forget','mode','import','check','auth','email'])
+            assert.equal(env.get(id).disabled,true,id);
+          if (fail) env.requests[0].onerror();
+          else respond(env,action === 'check' ? {status:'alive'} : success());
+          await done;
+          for (const id of ['service','key','remember','forget','mode','import','check'])
+            assert.equal(env.get(id).disabled,false,id);
+          for (const id of ['auth','email']) assert.equal(env.get(id).disabled,all,id);
+          assert.equal(env.timers.size,0);
+        }
+      }
+    }
   });
   assert(!source.includes('innerHTML')); assert(!source.includes('console.')); assert(!source.includes('eval('));
   console.log('Cookie helper VM tests passed (' + scenarios + ' scenarios)');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ais2api Cookie Import
 // @namespace    https://github.com/mananekoha114/ais2api
-// @version      1.1.0
+// @version      1.1.1
 // @description  Import AI Studio accounts with explicit consent and clear results.
 // @author       Mana Nekoha
 // @license      MPL-2.0
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
   if (location.protocol !== 'https:' || location.hostname !== 'aistudio.google.com' || window.top !== window.self) return;
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const DEFAULT_SERVER = 'http://127.0.0.1:18451';
   let busy = false, activeOrigin = null, storageFailed = false;
   let operation = null, ticker = null;
@@ -53,17 +53,14 @@
   }
   function readSetting(name, fallback) {
     try {
-      if (typeof GM_getValue !== 'function') throw new Error('storage unavailable');
       return GM_getValue(name, fallback);
     } catch (_) { storageFailed = true; return fallback; }
   }
   function writeSetting(name, value) {
     try {
       if (value === null) {
-        if (typeof GM_deleteValue !== 'function') throw new Error('storage unavailable');
         GM_deleteValue(name);
       } else {
-        if (typeof GM_setValue !== 'function') throw new Error('storage unavailable');
         GM_setValue(name, value);
       }
       return true;
@@ -76,28 +73,26 @@
   const host = document.createElement('div');
   const root = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
-  style.textContent = [
-    ':host{all:initial;position:fixed;z-index:2147483647;color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e9eef8}',
-    '*{box-sizing:border-box}[hidden]{display:none!important}',
-    'section{width:min(360px,calc(100vw - 16px));display:flex;flex-direction:column;overflow:hidden;background:#151c29;border:1px solid #41506a;border-radius:16px;box-shadow:0 12px 40px #0007}',
-    'header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:#202b3d;cursor:grab;touch-action:none;user-select:none}',
-    'header strong{font-size:15px}.body{padding:14px 16px;overflow:auto;overscroll-behavior:contain;min-height:0}',
-    'label{display:block;margin:10px 0 4px}input,select,textarea,button{font:inherit}',
-    'input:not([type=checkbox]),select,textarea{display:block;width:100%;min-width:0;margin-top:5px;padding:10px;border:1px solid #56647b;border-radius:8px;background:#0e1521;color:#f4f7fc}',
-    'input:focus,select:focus,textarea:focus,button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid #9fbfff;outline-offset:2px}',
-    'input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:#aac5ff}.check{display:flex;align-items:center;gap:8px}',
-    'button{cursor:pointer;border:1px solid #56647b;border-radius:8px;background:#29364b;color:#f4f7fc;padding:9px 12px;min-height:40px}',
-    'button:disabled,input:disabled,select:disabled{opacity:.55;cursor:default}.primary{width:100%;margin-top:12px;background:#b6ceff;color:#101c35;border-color:#b6ceff;font-weight:650}',
-    '.row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px}.row>*{flex:1}header button{padding:4px 10px}',
-    'a{color:#bbd1ff;text-decoration:underline;text-underline-offset:3px}.row a{padding:8px 0;text-align:center}',
-    'p{margin:8px 0;overflow-wrap:anywhere}.muted{color:#b3bfd3;font-size:12px}.notice{color:#ffd694;font-size:12px}',
-    '.status{border-left:3px solid #89abeb;padding:8px 10px;background:#202b3d;border-radius:4px;white-space:pre-wrap}',
-    '.status[data-kind=success]{border-color:#90d6aa}.status[data-kind=error],.status[data-kind=unconfirmed]{border-color:#ffbf83}',
-    'details{margin-top:10px}summary{cursor:pointer;padding:5px 0}ul{padding:0;list-style:none;margin:8px 0}',
-    'li{padding:9px 0;border-bottom:1px solid #344158;overflow-wrap:anywhere}li strong,li span{display:block}',
-    '.bubble{width:52px;height:52px;border-radius:50%;background:#b6ceff;color:#101c35;box-shadow:0 6px 24px #0006;touch-action:none;font-weight:700}',
-    'textarea{resize:vertical;font-size:12px;min-height:100px}'
-  ].join('\n');
+  style.textContent = `:host{all:initial;position:fixed;z-index:2147483647;color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e9eef8}
+*{box-sizing:border-box}[hidden]{display:none!important}
+section{display:flex;flex-direction:column;overflow:hidden;background:#151c29;border:1px solid #41506a;border-radius:16px;box-shadow:0 12px 40px #0007}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;background:#202b3d;cursor:grab;touch-action:none;user-select:none}
+header strong{font-size:15px}.body{padding:14px 16px;overflow:auto;overscroll-behavior:contain;min-height:0}
+label{display:block;margin:10px 0 4px}input,select,textarea,button{font:inherit}
+input:not([type=checkbox]),select,textarea{display:block;width:100%;min-width:0;margin-top:5px;padding:10px;border:1px solid #56647b;border-radius:8px;background:#0e1521;color:#f4f7fc}
+input:focus,select:focus,textarea:focus,button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid #9fbfff;outline-offset:2px}
+input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:#aac5ff}.check{display:flex;align-items:center;gap:8px}
+button{cursor:pointer;border:1px solid #56647b;border-radius:8px;background:#29364b;color:#f4f7fc;padding:9px 12px;min-height:40px}
+button:disabled,input:disabled,select:disabled{opacity:.55;cursor:default}.primary{width:100%;margin-top:12px;background:#b6ceff;color:#101c35;border-color:#b6ceff;font-weight:650}
+.row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px}.row>*{flex:1}header button{padding:4px 10px}
+a{color:#bbd1ff;text-decoration:underline;text-underline-offset:3px}
+p{margin:8px 0;overflow-wrap:anywhere}.muted{color:#b3bfd3;font-size:12px}.notice{color:#ffd694;font-size:12px}
+.status{border-left:3px solid #89abeb;padding:8px 10px;background:#202b3d;border-radius:4px;white-space:pre-wrap}
+.status[data-kind=success]{border-color:#90d6aa}.status[data-kind=error],.status[data-kind=unconfirmed]{border-color:#ffbf83}
+details{margin-top:10px}summary{cursor:pointer;padding:5px 0}ul{padding:0;list-style:none;margin:8px 0}
+li{padding:9px 0;border-bottom:1px solid #344158;overflow-wrap:anywhere}li strong,li span{display:block}
+.bubble{width:52px;height:52px;border-radius:50%;background:#b6ceff;color:#101c35;box-shadow:0 6px 24px #0006;touch-action:none;font-weight:700}
+textarea{resize:vertical;font-size:12px;min-height:100px}`;
   root.appendChild(style);
   function element(tag, text, parent, id) {
     const node = document.createElement(tag);
@@ -217,30 +212,28 @@
     const origin = syncService(); key.value = ''; remember.checked = false;
     if (origin && writeSetting(keyName(origin), null)) storageNotice.textContent = '此服务的导入密钥已清除。';
   });
-  function updateMode() {
+  function updateControls() {
+    for (const node of [service, key, remember, forget, mode, push, check]) node.disabled = busy;
     const all = mode.value === 'all';
     auth.disabled = busy || all; email.disabled = busy || all;
     modeHint.textContent = all ? '从第一个登录账号依次识别，受服务端扫描数量和时间上限限制。' : '自动跟随点击导入时的页面账号；必要时可在高级设置中指定。';
     push.textContent = busy ? '请稍候…' : all ? '读取并批量导入' : '读取并导入当前账号';
   }
-  mode.addEventListener('change', updateMode);
-  syncService(); updateMode();
+  mode.addEventListener('change', updateControls);
+  syncService(); updateControls();
 
-  function viewport() {
-    const view = window.visualViewport;
-    return { x: view ? view.offsetLeft : 0, y: view ? view.offsetTop : 0,
-      width: view ? view.width : window.innerWidth, height: view ? view.height : window.innerHeight };
-  }
   function place(position) {
-    const view = viewport();
-    panel.style.maxHeight = Math.max(80, view.height - 16) + 'px';
-    panel.style.width = Math.max(80, Math.min(360, view.width - 16)) + 'px';
+    const view = window.visualViewport;
+    const xOffset = view ? view.offsetLeft : 0, yOffset = view ? view.offsetTop : 0;
+    const width = view ? view.width : window.innerWidth, height = view ? view.height : window.innerHeight;
+    panel.style.maxHeight = Math.max(80, height - 16) + 'px';
+    panel.style.width = Math.max(80, Math.min(360, width - 16)) + 'px';
     const rect = host.getBoundingClientRect();
     const valid = position && Number.isFinite(position.x) && Number.isFinite(position.y);
-    const x = valid ? position.x : view.x + view.width - rect.width - 16;
-    const y = valid ? position.y : view.y + view.height - rect.height - 16;
-    host.style.left = Math.max(view.x + 8, Math.min(x, view.x + view.width - rect.width - 8)) + 'px';
-    host.style.top = Math.max(view.y + 8, Math.min(y, view.y + view.height - rect.height - 8)) + 'px';
+    const x = valid ? position.x : xOffset + width - rect.width - 16;
+    const y = valid ? position.y : yOffset + height - rect.height - 16;
+    host.style.left = Math.max(xOffset + 8, Math.min(x, xOffset + width - rect.width - 8)) + 'px';
+    host.style.top = Math.max(yOffset + 8, Math.min(y, yOffset + height - rect.height - 8)) + 'px';
   }
   function position() { return { x: parseFloat(host.style.left), y: parseFloat(host.style.top) }; }
   function setOpen(open, persist = true) {
@@ -307,43 +300,39 @@
   function collect(currentURL) {
     return new Promise((resolve, reject) => {
       let complete = false;
-      const finish = (records, source) => {
-        if (complete) return;
-        const cookies = []; let partitioned = 0; let expired = 0;
-        for (const record of records) {
-          if (!record || typeof record !== 'object') continue;
-          if (record.partitionKey != null || record.partitionKeyOpaque === true || record.partitioned === true || record.firstPartyDomain) { partitioned++; continue; }
-          const expiry = record.expirationDate ?? record.expiry ?? record.expires;
-          if (typeof expiry === 'number' && expiry > 0 && expiry <= Date.now() / 1000) { expired++; continue; }
-          if (typeof record.name !== 'string' || typeof record.value !== 'string') continue;
-          // Explicit fields avoid transferring manager-internal metadata.
-          const out = { name: record.name, value: record.value, domain: record.domain || location.hostname, path: record.path || '/' };
-          if (record.hostOnly === true) out.domain = out.domain.replace(/^\.+/, '');
-          for (const property of ['secure', 'httpOnly'])
-            if (record[property] !== undefined) out[property] = record[property];
-          const sameSites = { strict: 'Strict', lax: 'Lax', none: 'None', no_restriction: 'None' };
-          const sameSite = String(record.sameSite).toLowerCase();
-          if (Object.prototype.hasOwnProperty.call(sameSites, sameSite)) out.sameSite = sameSites[sameSite];
-          if (record.session !== true && typeof expiry === 'number' && Number.isFinite(expiry)) out.expires = expiry;
-          cookies.push(out);
-        }
-        complete = true; clearTimeout(timer);
-        resolve({ cookies, partitioned, expired, source });
-      };
       const fallback = () => {
         if (complete) return;
         complete = true; clearTimeout(timer);
         // Header compatibility mode cannot recover cookie scope or attributes.
-        try { resolve({ cookies: document.cookie, source: 'document.cookie', metadataUnknown: true }); }
+        try { resolve({ cookies: document.cookie }); }
         catch (_) { reject(new Error('cookie read failed')); }
       };
       const timer = setTimeout(fallback, 4000);
       try {
-        if (typeof GM_cookie === 'undefined' || typeof GM_cookie.list !== 'function') { fallback(); return; }
         GM_cookie.list({ url: currentURL }, (records, error) => {
           if (complete) return;
           try {
-            if (error || !Array.isArray(records)) fallback(); else finish(records, 'GM_cookie');
+            if (error || !Array.isArray(records)) { fallback(); return; }
+            const cookies = []; let partitioned = 0; let expired = 0;
+            for (const record of records) {
+              if (!record || typeof record !== 'object') continue;
+              if (record.partitionKey != null || record.partitionKeyOpaque === true || record.partitioned === true || record.firstPartyDomain) { partitioned++; continue; }
+              const expiry = record.expirationDate ?? record.expiry ?? record.expires;
+              if (typeof expiry === 'number' && expiry > 0 && expiry <= Date.now() / 1000) { expired++; continue; }
+              if (typeof record.name !== 'string' || typeof record.value !== 'string') continue;
+              // Explicit fields avoid transferring manager-internal metadata.
+              const out = { name: record.name, value: record.value, domain: record.domain || location.hostname, path: record.path || '/' };
+              if (record.hostOnly === true) out.domain = out.domain.replace(/^\.+/, '');
+              for (const property of ['secure', 'httpOnly'])
+                if (record[property] !== undefined) out[property] = record[property];
+              const sameSites = { strict: 'Strict', lax: 'Lax', none: 'None', no_restriction: 'None' };
+              const sameSite = String(record.sameSite).toLowerCase();
+              if (Object.prototype.hasOwnProperty.call(sameSites, sameSite)) out.sameSite = sameSites[sameSite];
+              if (record.session !== true && typeof expiry === 'number' && Number.isFinite(expiry)) out.expires = expiry;
+              cookies.push(out);
+            }
+            complete = true; clearTimeout(timer);
+            resolve({ cookies, partitioned, expired });
           } catch (_) { fallback(); }
         });
       } catch (_) { fallback(); }
@@ -351,8 +340,8 @@
   }
   function requestJSON(url, token, payload, timeout) {
     return new Promise(resolve => {
-      let settled = false, request;
-      const done = result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+      let request;
+      const done = result => { clearTimeout(timer); resolve(result); };
       // Tampermonkey's fetch mode may ignore its own timeout option.
       const timer = setTimeout(() => {
         done({ kind: 'unconfirmed', code: 'timeout' });
@@ -406,15 +395,13 @@
     operation = { action, phase: 'started', code: '', started: Date.now(), duration_ms: 0, http: 0 };
     busy = true; accounts.replaceChildren(); copyText.hidden = true; copyNotice.textContent = ''; copy.disabled = true;
     cookieInfo.textContent = action === 'health' ? '此检查不读取 Cookie。' : '尚未读取 Cookie。';
-    for (const node of [service, key, remember, forget, mode, push, check]) node.disabled = true;
-    updateMode(); updateElapsed(); ticker = setInterval(updateElapsed, 1000);
+    updateControls(); updateElapsed(); ticker = setInterval(updateElapsed, 1000);
   }
   function finish() {
     clearInterval(ticker); ticker = null;
     operation.duration_ms = Math.max(0, Date.now() - operation.started);
     busy = false;
-    for (const node of [service, key, remember, forget, mode, push, check]) node.disabled = false;
-    copy.disabled = false; updateMode(); updateElapsed(); resize();
+    copy.disabled = false; updateControls(); updateElapsed(); resize();
   }
   function notSent(action, code, message) {
     operation = { action, phase: 'not_sent', code, started: Date.now(), duration_ms: 0, http: 0 };
@@ -464,8 +451,9 @@
     let dispatched = false;
     try {
       const gathered = await collect(currentURL);
-      const count = Array.isArray(gathered.cookies) ? gathered.cookies.length : gathered.cookies.trim() ? gathered.cookies.split(';').filter(pair => pair.trim()).length : 0;
-      cookieInfo.textContent = gathered.metadataUnknown
+      const structured = Array.isArray(gathered.cookies);
+      const count = structured ? gathered.cookies.length : gathered.cookies.trim() ? gathered.cookies.split(';').filter(pair => pair.trim()).length : 0;
+      cookieInfo.textContent = !structured
         ? '来源：document.cookie。域、路径、有效期和安全属性未知，无法判断分区，不包含 HttpOnly Cookie；不能保证认证完整。'
         : '来源：GM_cookie；读取 ' + count + ' 项；排除分区 ' + gathered.partitioned + ' 项、过期 ' + gathered.expired + ' 项。管理器仍可能限制 HttpOnly 读取。';
       if (!count) {
@@ -474,7 +462,7 @@
       }
       payload.cookies = gathered.cookies;
       operation.phase = 'waiting_for_service';
-      setStatus('已读取 ' + count + ' 项，等待服务校验账号…' + (gathered.metadataUnknown ? '\n当前读取能力受限，详情中可查看原因。' : ''));
+      setStatus('已读取 ' + count + ' 项，等待服务校验账号…' + (!structured ? '\n当前读取能力受限，详情中可查看原因。' : ''));
       dispatched = true;
       const result = await requestJSON(origin + '/api/accounts/probe-import', token, payload, 300000);
       operation.http = result.http || 0;
@@ -509,7 +497,6 @@
       code: operation.code, http_status: operation.http, duration_ms: operation.duration_ms }, null, 2);
     copyText.value = report;
     try {
-      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(report);
       copyText.hidden = true; copyNotice.textContent = '已复制。摘要不含 Cookie、密钥、邮箱或服务端原文。';
     } catch (_) {
