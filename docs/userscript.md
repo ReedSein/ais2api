@@ -1,62 +1,83 @@
 # Cookie 导入（userscript）
 
-ais2api 提供专用的 Tampermonkey 脚本，可以在已登录的 AI Studio 页面一键读取 Cookie 并推送到服务；原项目（aistudio-api-termux）的脚本也可以继续使用。导入只验证浏览器中的登录身份，**不代表生成能力已经可用**。
+ais2api 提供 Tampermonkey 脚本，在已登录的 AI Studio 页面读取 Cookie 并导入账号。导入验证登录身份，**不代表生成能力已经可用**。
 
 ## 快速使用
 
-1. 在 `config.json` 设置 `cookie_import_key`（独立于 `api_key` 的密钥），执行 `ais2api config reload` 或重启服务。为空时不能推送。
-2. 在 Tampermonkey 中打开 `http://127.0.0.1:18451/userscript/ais2api-cookie.user.js` 安装脚本（服务地址不同时使用对应地址）。也可以从程序目录 `bin/userscript/` 手动安装。
-3. 打开 AI Studio，通过面板或管理器菜单启动导入，填写服务地址和导入密钥。
-4. 点击“读取并导入当前账号”。
+1. 启动 ais2api，打开管理页，在“服务配置”中设置 **Cookie 导入密钥**。它独立于管理密码和客户端 API 密钥；为空时不能推送。也可在配置文件中设置 `cookie_import_key`，再执行 `ais2api config reload`。
+2. 在装有 Tampermonkey 的浏览器中打开 http://127.0.0.1:18451/userscript/ais2api-cookie.user.js 安装脚本；服务地址不同时使用对应地址。更新时重新打开同一链接，确认安装新版，再刷新 AI Studio 页面。
+3. 打开已登录的 AI Studio 页面，在面板填写服务地址和导入密钥。可先点“检查服务”，确认服务能连接。
+4. 选择“当前账号”或“批量识别账号”，点击导入。
+5. 查看成功导入/更新的账号名称与邮箱，或点击“打开账号列表”进入管理页核对。
 
-旧配置缺少导入相关字段时，离线执行 `ais2api init` 会补上空的导入密钥和默认限额，不会生成或覆盖密钥。
+“检查服务”不读取 Cookie、不发送密钥，只检查服务是否存活；密钥和 Google 身份在实际导入时校验。脚本不自动导入，也不自动重试。
 
-## 面板设置
+面板兼容电脑和手机布局，可以拖动，点击“收起”后保留页面上的小气泡；点气泡或管理器菜单可重新打开。开合状态和位置会保存，窗口变化时位置限制在可见范围，面板内容可以滚动。
 
-- **服务地址**：默认 `http://127.0.0.1:18451`。接受 HTTPS 来源；HTTP 只接受 `localhost`、`127.0.0.1`、`[::1]`。不允许路径、查询、片段或 URL 用户信息。远程服务请使用 HTTPS。脚本声明了 `@connect *` 以便用户选择服务器，管理器仍可能要求授权连接。
-- **账号索引**：默认从 URL 中的 `authuser` 或 `/u/N` 推断，否则为 0，可以修改。
-- **期望邮箱**：可选，填写后可防止导错账号。
+旧配置缺少导入字段时，离线执行 `ais2api init` 会补上空的导入密钥和默认限额，不生成或覆盖密钥。
 
-脚本只保存服务地址和非敏感的账号索引，不保存 Cookie、密钥或期望邮箱，也不输出敏感日志。
+## 连接与密钥
+
+- **服务地址**：默认 http://127.0.0.1:18451。本机地址可以省略协议，例如 127.0.0.1:18451；远程服务必须使用完整 HTTPS 地址。HTTP 仅接受 localhost、127.0.0.1 和 [::1]，不接受路径、查询、片段或 URL 用户信息。面板规范化地址后显示实际目的地。脚本声明了 `@connect *`，管理器仍可能要求授权连接。
+- **导入密钥**：填写服务中的 `cookie_import_key`。失败后当前页面保留输入，方便修正后重试。默认不跨刷新保存。
+- **在此设备记住**：主动勾选后保存到脚本管理器的本地存储，按规范化的服务地址分别保存；更换地址时不会自动带上上一地址的密钥。取消勾选会删除保存值，但保留当前页面输入。
+- **清除密钥**：删除当前服务保存的密钥，同时清空本页输入。存储失败会明确提示，不能把清除失败当作已经删除。
+
+记住功能不会加密管理器的存储，也不防护设备或扩展被控制。Cookie、预期邮箱和导入结果不持久保存；页面关闭后不保留诊断历史。
+
+## 导入范围
+
+- **当前账号**：默认选项。点击导入时重新读取当前 URL，从 `authuser` 或 `/u/N` 推断账号索引，否则使用 0。高级设置中的索引留空表示自动；手动填写时以该值为准。
+- **批量识别账号**：从索引 0 开始依次识别登录身份，不发送单账号索引或预期邮箱。默认最多探测 8 个，受服务端 `cookie_import_max_accounts`（1–32）和总超时限制。单个索引未登录或返回 401 时继续探测，连续三次失败或遇到重复身份时停止，不能保证发现所有登录账号。
+- **预期邮箱**：仅用于当前账号模式，可防止导错身份。批量模式禁用此项。
+
+成功数量包括已有账号的凭据更新，不能当作新增账号数量。达到扫描数量或时间上限时面板会单独提示，实际结果以返回的账号列表为准。
 
 ## 读取方式
 
-点击按钮后才会读取当前 AI Studio URL 的 Cookie 并发送请求，不会读取页面正文或其他网站的 Cookie。
+点击导入后才读取当前 AI Studio URL 的 Cookie 并发送请求，不读取页面正文或其他网站的 Cookie。
 
-1. 优先使用 `GM_cookie.list`。同名但不同域/路径的 Cookie、空值、Secure、HttpOnly、SameSite 和有效期都会保留；过期 Cookie 和分区 Cookie（包括 `partitionKeyOpaque`）被排除，面板显示数量。管理器元数据转换为标准 storage state 字段：有效期使用 `expires`，SameSite 使用 `Strict` / `Lax` / `None`（未指定或未知时省略）；会话 Cookie 省略有效期，hostOnly Cookie 的域名去掉前导点，不发送管理器私有字段。
-2. `GM_cookie` 4 秒内未完成、失败或不可用时，回退到 `document.cookie`，以原版兼容的原始 Cookie 头字符串发送。此时域、路径、有效期与安全属性未知，无法判断分区，**也不包含 HttpOnly Cookie**，面板会明确提示这些限制，不能保证认证完整。GM 成功时不会混入 `document.cookie`，避免重新加入已排除的分区 Cookie。
+1. 优先使用 `GM_cookie.list`。同名但不同域/路径的 Cookie、空值、Secure、HttpOnly、SameSite 和有效期会保留；过期和分区 Cookie（包括 partitionKeyOpaque）被排除，在“读取详情与错误摘要”中显示数量。元数据转换为标准 storage state 字段；会话 Cookie 省略有效期，hostOnly 域名去掉前导点，不发送管理器私有字段。
+2. `GM_cookie` 在 4 秒内未完成、不可用、报错或元数据转换失败时，回退到 `document.cookie`，以原始 Cookie 头发送。域、路径、有效期和安全属性未知，无法判断分区，**不包含 HttpOnly Cookie**，面板会提示能力受限。GM 成功时不混入 `document.cookie`，避免重新加入已排除的分区 Cookie。
 
-根据 [Tampermonkey GM_cookie 文档](https://www.tampermonkey.net/documentation.php?q=GM_cookie)，HttpOnly 支持目前受 beta 版本和 URL 权限限制。安装脚本不保证能取得全部认证 Cookie，其他管理器的能力可能不同。导入失败时请先检查管理器的权限与支持情况。
+[Tampermonkey GM_cookie 文档](https://www.tampermonkey.net/documentation.php?q=GM_cookie)仍将 HttpOnly 支持限定于 beta 版本，并检查 URL 权限。脚本安装成功不保证能取得全部认证 Cookie，其他管理器的能力可能不同。
+
+## 等待、结果与排错
+
+面板显示读取 Cookie、等待服务校验、完成或失败，以及经过时间。后端不提供逐账号进度，等待时间不是完成百分比。
+
+- **发送前失败**：例如没有 Cookie，先确认 AI Studio 已登录并检查管理器权限。没有发送导入请求，密钥输入保留。
+- **明确拒绝**：服务返回带错误原因的 JSON 时，账号没有保存。已知原因给出对应中文提示，例如导入未启用、密钥不对、账号过期、地区限制、浏览器启动或页面适配问题；其他原因显示通用提示和错误码，可据此查看服务日志。
+- **结果未确认**：发送后的网络异常、超时、重定向、没有错误原因的 HTTP 错误或无法信任的回执，都可能无法确认最终保存结果。先打开账号列表核对，再决定是否重试。
+- **诊断摘要**：点击“复制诊断摘要”，复制最近一次操作的脚本版本、操作类型、阶段、固定错误码、HTTP 状态与耗时。自动复制不可用时，显示可手动复制的文本。摘要不包含 Cookie、密钥、邮箱、服务地址、原始请求/响应或页面正文，不自动上传或持久保存。
+
+管理页的“日志”和“诊断”可用于进一步检查服务端。脚本不请求管理员权限，也不调用原项目的完整诊断包接口。
 
 ## 服务端处理
 
-- 请求发往 `/api/accounts/probe-import`，使用 Bearer 导入密钥、匿名跨域且禁止重定向，最长等待 300 秒。请求包含完整的 Cookie 记录数组和单个 `auth_user`，可附带 `email`。
-- 导入只等待 AI Studio 上出现已登录的唯一身份，不要求出现输入框；编辑器和生成能力在生成流程中另行检查。身份识别优先使用可见的 Google 账号控件，排除隐藏菜单；出现多个可见身份时拒绝导入。
-- 验证与生成共用有界工作队列，每个账号使用独立的 BrowserContext；请求断开、超时或服务关闭都会取消验证。
-- 保存在一个事务中完成，只返回账号元数据。按已验证的邮箱更新现有账号，保留其 ID、名称和统计。保存前会再次检查导入密钥，已撤销密钥的请求不会写入。
-- 成功响应为 `verification: browser_identity_only`、`generation_verified: false`。`details.truncated` 表示探测在达到账号数量上限或导入时间上限时仍未遇到连续三次失败，可能还有未检查的索引。距离 `cookie_import_timeout_seconds` 不足以完成下一次探测时，服务端停止探测并保存已验证的账号，此时 `details.deadline_reached` 为 `true`；尚未验证到任何账号时仍会继续探测直至超时。
-- 限制：HTTP 输入最大 1 MiB，Cookie 最多 512 个。
-- 浏览器未配置、启动失败、断开、超时和页面不兼容分别返回固定的错误原因。服务日志只记录原因、请求 ID 和耗时，不记录 Cookie 或页面内容。
-- 失败时脚本只把已知的服务端错误原因映射为固定的中文提示（例如区分导入密钥错误和 Cookie 未登录或过期），不显示服务端错误正文或未知原因值。
-
-## 使用原版脚本
-
-原项目 v0.1.2 / [v0.1.3](https://github.com/ReedSein/aistudio-api-termux/blob/3e2eff888b21cc403168ceaaa1379a527d8b1a1c/userscript/aistudio-cookie.user.js) 的“抓取并推送”功能兼容：服务地址填 `http://127.0.0.1:18451`，“管理密码”填 `cookie_import_key`。
-
-- 后端兼容 `{cookies: "Cookie header", name_prefix?: "..."}`。没有 `auth_user` 时依次探测索引 0 到 7，单个索引未登录或返回 401 时继续探测，连续三次失败后停止；受 `cookie_import_max_accounts`（1–32）与 `cookie_import_timeout_seconds`（默认 180，最大 240 秒）限制。
+- 导入请求发往 `/api/accounts/probe-import`，使用专用 Bearer 导入密钥，匿名跨域且禁止重定向，最长等待 300 秒。脚本保留独立计时器，因为管理器的 fetch 模式可能忽略自身 timeout 选项。
+- 请求包含完整 Cookie 记录数组，或能力受限时的 Cookie 头。当前账号模式携带 `auth_user`，可附带 `email`；批量模式省略这两个字段。
+- 只等待 AI Studio 出现已登录的唯一身份，不要求出现输入框；编辑器和生成能力另行检查。身份识别使用可见 Google 账号控件，多个可见身份会被拒绝。
+- 验证与生成共用有界队列，每个账号使用独立 BrowserContext；请求断开、超时或关闭服务会取消验证。总身份验证时间受 `cookie_import_timeout_seconds` 限制，默认 180、最大 240 秒。
+- 保存使用一个事务；按已验证邮箱更新现有账号，保留 ID、名称与统计。保存前再次检查导入密钥，已撤销的密钥不能写入。
+- 成功回执包含账号元数据、`verification: browser_identity_only`、`generation_verified: false`。`details.truncated` 表示探测在达到账号数量上限或导入时间上限时仍未遇到连续三次失败，可能还有未检查的索引。距离 `cookie_import_timeout_seconds` 不足以完成下一次探测时，服务端停止探测并保存已验证的账号，此时 `details.deadline_reached` 为 `true`；尚未验证到任何账号时仍会继续探测直至超时。
 - 验证导入只保存 cookies；storage state 中的 origins/localStorage 和其他元数据会被丢弃，丢弃的来源数量见 `details.discarded_origins`。
-- 原版脚本发送合并后的 Cookie 头，不带元数据。后端为该路径恢复 SID、APISID、SAPISID、`__Secure-1PAPISID`、`__Secure-3PAPISID` 的 JavaScript 可读属性，供 Google 页面构造 RPC 鉴权；结构化 Cookie 中显式的 HttpOnly 属性保持原样。
-- Cookie 头不带域与路径，无法还原未知 `__Host-` Cookie 的来源，这些项会被跳过并报告数量；需要精确元数据时请使用专用脚本。
-- 原版的诊断包和其他管理接口未接入。
+- HTTP 输入最大 1 MiB，Cookie 最多 512 个。不支持分区 Cookie，不会去掉分区属性后按普通 Cookie 保存。
+- 错误正文不进入面板或诊断摘要。错误原因只在符合固定格式（小写字母和下划线，最长 64 字符）时作为错误码显示和复制。
 
-当前不支持分区 Cookie，也不会去掉分区属性后当作普通 Cookie 保存。
+## 使用原项目脚本
+
+原项目 v0.1.2 / [v0.1.3](https://github.com/ReedSein/aistudio-api-termux/blob/3e2eff888b21cc403168ceaaa1379a527d8b1a1c/userscript/aistudio-cookie.user.js) 的“抓取并推送”仍兼容：服务地址填 http://127.0.0.1:18451，“管理密码”填 `cookie_import_key`。其诊断包和其他管理接口未接入。
+
+旧脚本发送合并后的 Cookie 头，缺少域与路径等元数据。后端会为 `SID`、`APISID`、`SAPISID`、`__Secure-1PAPISID`、`__Secure-3PAPISID` 恢复 JavaScript 可读属性，供 Google 页面构造 RPC 鉴权；结构化 Cookie 显式提供的 HttpOnly 属性保持原样。无法还原来源的 `__Host-` Cookie 会被跳过并报告数量。
 
 ## 开发测试
 
-```sh
-node userscript/test_cookie_helper.cjs
-```
+运行离线脚本测试：
 
-在隔离的 VM 中运行脚本，模拟 DOM 与 GM API，不使用真实 Cookie。
+    node --check userscript/ais2api-cookie.user.js
+    node userscript/test_cookie_helper.cjs
 
-可选的真实浏览器离线回归：把 `AIS2API_TEST_BROWSER` 设为 CloakBrowser 可执行文件后执行 `node browser/test_cookie_runtime.cjs`。该测试使用临时资料目录、合成 Cookie 和本地拦截页面，阻止外网请求，验证 Cookie 可读属性与无编辑器时的身份识别。C++ 侧的 Cookie 头转换由单元测试覆盖。两者都不能替代真实账号验收。
+测试在隔离 VM 中模拟 DOM 与 GM API，使用合成 Cookie，覆盖设置隔离、导入范围、状态、回执、采集元数据、超时、位置和去敏。
+
+可选的浏览器 Cookie 运行时回归：设置 `AIS2API_TEST_BROWSER` 为 CloakBrowser 可执行文件，执行 `node browser/test_cookie_runtime.cjs`。它使用临时资料目录、合成 Cookie 和本地拦截页面，不能代替真实脚本管理器或真实账号验收。

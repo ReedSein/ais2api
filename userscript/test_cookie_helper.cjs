@@ -5,95 +5,420 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'ais2api-cookie.user.js'), 'utf8');
+
 function setup(options = {}) {
-  const nodes = [], requests = [], stored = [], timers = new Map(); let serial = 0, cookieReads = 0;
+  const nodes = [], requests = [], stored = [], timers = new Map(), events = {}, menus = [], copied = [];
+  const storage = options.storage || new Map();
+  let serial = 0, cookieReads = 0, gmReads = 0, now = Date.now(), aborts = 0;
   class Node {
-    constructor(tag) { this.tag = tag; this.children = []; this.value = ''; this.listeners = {}; nodes.push(this); }
-    appendChild(node) { this.children.push(node); return node; }
+    constructor(tag) {
+      this.tag = tag; this.children = []; this.value = ''; this.listeners = {};
+      this.style = {}; this.attributes = {}; this.hidden = false; this.disabled = false;
+      this.checked = false; this._text = '';
+      nodes.push(this);
+    }
+    appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
     attachShadow() { return new Node('shadow'); }
-    addEventListener(event, fn) { this.listeners[event] = fn; }
+    addEventListener(event, fn) { (this.listeners[event] ||= []).push(fn); }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+    getAttribute(name) { return this.attributes[name]; }
+    removeAttribute(name) { delete this.attributes[name]; if (name === 'href') delete this.href; }
+    replaceChildren(...children) { this._text = ''; this.children = []; children.forEach(child => this.appendChild(child)); }
+    set textContent(value) { this._text = String(value); this.children = []; }
+    get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
+    focus() { this.focused = true; }
+    select() { this.selected = true; }
+    closest(tag) { return this.tag === tag ? this : this.parentNode?.closest(tag); }
+    getBoundingClientRect() {
+      const panel = nodes.find(node => node.id === 'ais2-panel');
+      const width = panel && !panel.hidden ? parseFloat(panel.style.width) || 360 : 52;
+      const height = panel && !panel.hidden ? Math.min(700, parseFloat(panel.style.maxHeight) || 700) : 52;
+      const x = parseFloat(this.style.left) || 0, y = parseFloat(this.style.top) || 0;
+      return { x, y, left: x, top: y, right: x + width, bottom: y + height, width, height };
+    }
   }
   const body = new Node('body');
-  const document = { body, createElement: tag => new Node(tag), get cookie() { cookieReads++; return options.cookie ?? 'fallback=ok; empty='; } };
+  const document = {
+    body, createElement: tag => new Node(tag),
+    get cookie() {
+      cookieReads++;
+      if (options.cookieThrow) throw new Error('PRIVATE COOKIE ERROR');
+      return options.cookie ?? 'fallback=synthetic; empty=';
+    }
+  };
   const context = {
     URL, document, location: new URL(options.url || 'https://aistudio.google.com/u/2/prompts/new'),
-    setTimeout: (fn, ms) => { const id = ++serial; timers.set(id, { fn, ms }); return id; }, clearTimeout: id => timers.delete(id),
-    GM_getValue: (_, fallback) => fallback, GM_setValue: (...args) => stored.push(args), GM_registerMenuCommand: () => {},
-    GM_cookie: { list: (query, cb) => { assert.equal(query.url, context.location.href); if (options.hang) return; cb(options.records || [], options.error); if (options.double) cb(options.records || []); } },
-    GM_xmlhttpRequest: request => { requests.push(request); return { abort() {} }; }
+    innerWidth: options.width || 400, innerHeight: options.height || 800,
+    Date: class extends Date { static now() { return now; } },
+    setTimeout: (fn, ms) => { const id = ++serial; timers.set(id, { fn, ms, repeat: false }); return id; },
+    clearTimeout: id => timers.delete(id),
+    setInterval: (fn, ms) => { const id = ++serial; timers.set(id, { fn, ms, repeat: true }); return id; },
+    clearInterval: id => timers.delete(id),
+    addEventListener: (event, fn) => (events[event] ||= []).push(fn),
+    navigator: { clipboard: { async writeText(value) { if (options.clipboardFail) throw new Error('blocked'); copied.push(value); } } },
+    GM_getValue: (name, fallback) => {
+      if (options.readFail) throw new Error('blocked');
+      return storage.has(name) ? structuredClone(storage.get(name)) : fallback;
+    },
+    GM_setValue: (name, value) => {
+      if (options.writeFail) throw new Error('blocked');
+      storage.set(name, structuredClone(value)); stored.push([name, value]);
+    },
+    GM_deleteValue: name => { if (options.deleteFail) throw new Error('blocked'); storage.delete(name); },
+    GM_registerMenuCommand: (name, fn) => menus.push({ name, fn }),
+    GM_cookie: { list: (query, cb) => {
+      gmReads++; assert.equal(query.url, context.location.href);
+      if (options.hang) return;
+      cb(options.records || [], options.error);
+      if (options.double) cb(options.records || []);
+    } },
+    GM_xmlhttpRequest: request => {
+      if (options.requestThrow) throw new Error('synthetic private error');
+      requests.push(request); return { abort() { aborts++; } };
+    }
   };
+  context.window = context; context.self = context; context.top = options.frame ? {} : context;
+  if (options.noGM) delete context.GM_cookie;
+  for (const [name, value] of Object.entries(options.globals || {})) {
+    if (value === undefined) delete context[name]; else context[name] = value;
+  }
   vm.runInNewContext(source, context);
-  const inputs = nodes.filter(n => n.tag === 'input');
-  const push = nodes.find(n => n.tag === 'button' && n.textContent === '读取并导入当前账号');
-  const status = nodes.find(n => n.tag === 'p' && n.textContent.startsWith('尚未'));
-  return { inputs, push, status, requests, stored, timers, click: () => push.listeners.click(), reads: () => cookieReads };
+  const get = id => nodes.find(node => node.id === 'ais2-' + id);
+  const fire = async (node, event = 'click', args = {}) => {
+    if (event === 'click' && node.disabled) return;
+    for (const fn of node.listeners[event] || []) await fn({ target: node, preventDefault() {}, ...args });
+  };
+  return {
+    nodes, context, requests, stored, storage, timers, menus, copied, get, fire,
+    click: id => fire(get(id)),
+    set: async (id, value) => { get(id).value = value; await fire(get(id), 'input'); await fire(get(id), 'change'); },
+    tick(ms) {
+      const pair = [...timers].find(([, timer]) => timer.ms === ms); assert(pair, 'expected timer ' + ms);
+      const [id, timer] = pair; if (!timer.repeat) timers.delete(id);
+      now += ms; timer.fn();
+    },
+    dispatch(event, args) { for (const fn of events[event] || []) fn({ preventDefault() {}, ...args }); },
+    reads: () => ({ document: cookieReads, gm: gmReads }), aborts: () => aborts
+  };
 }
-const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const records = [
+  {name:'SID',value:'synthetic-secret',domain:'.google.com',path:'/',httpOnly:true,secure:true,sameSite:'lax',expirationDate:Date.now()/1000+10000},
+  {name:'SID',value:'',domain:'.aistudio.google.com',path:'/u',hostOnly:true,session:true,expirationDate:Date.now()/1000+10000,sameSite:'unspecified'},
+  {name:'none',value:'n',domain:'.google.com',path:'/',sameSite:'no_restriction',expiry:9999999999},
+  {name:'strict',value:'s',domain:'.google.com',path:'/',sameSite:'Strict',expires:9999999998},
+  {name:'unknown',value:'u',sameSite:'__proto__'},
+  {name:'partition',value:'hidden',partitionKey:{topLevelSite:'https://google.com'}},
+  {name:'opaque',value:'hidden',partitionKeyOpaque:true},
+  {name:'old',value:'expired',expirationDate:1}
+];
+function success(extra = {}) {
+  return {imported_count:1,accounts:[{id:'synthetic-id',name:'Synthetic Account',email:'synthetic@example.test'}],
+    verification:'browser_identity_only',generation_verified:false,...extra};
+}
+function respond(env, body, status = 200, extra = {}) {
+  env.requests.at(-1).onload({status,responseText:JSON.stringify(body),...extra});
+}
+async function pendingImport(env) {
+  if (!env.get('key').value) env.get('key').value = 'synthetic-import-key';
+  const done = env.click('import'); await flush(); return {done};
+}
+let scenarios = 0;
+const suiteTimeout = setTimeout(() => {
+  console.error('Cookie helper VM tests did not complete'); process.exitCode = 1;
+}, 5000);
+async function scenario(name, fn) {
+  try { await fn(); scenarios++; }
+  catch (error) { error.message = name + ': ' + error.message; throw error; }
+}
 (async () => {
-  const records = [
-    {name:'SID',value:'secret',domain:'.google.com',path:'/',httpOnly:true,secure:true,sameSite:'lax',expirationDate:Date.now()/1000+100},
-    {name:'SID',value:'',domain:'.aistudio.google.com',path:'/u',hostOnly:true,session:true,expirationDate:Date.now()/1000+200,sameSite:'unspecified'},
-    {name:'none',value:'n',domain:'.google.com',path:'/',sameSite:'no_restriction',expiry:9999999999},
-    {name:'strict',value:'s',domain:'.google.com',path:'/',sameSite:'Strict',expires:9999999998},
-    {name:'unknown',value:'u',sameSite:'unexpected'},
-    {name:'partition',value:'hidden',partitionKey:{topLevelSite:'https://google.com'}},
-    {name:'old',value:'expired',expirationDate:1}
-  ];
-  const env = setup({records,double:true});
-  assert.equal(env.requests.length,0); assert.equal(env.reads(),0); assert.equal(env.inputs[2].value,'2');
-  await env.click(); assert.equal(env.requests.length,0); // no key
-  env.inputs[1].value='import-secret';
-  const pending = env.click(); await flush(); await env.click();
-  assert.equal(env.requests.length,1);
-  const req = env.requests[0], payload = JSON.parse(req.data);
-  assert.equal(req.anonymous,true); assert.equal(req.redirect,'error'); assert.equal(req.timeout,300000);
-  assert.deepEqual(payload, { cookies: [
-    {name:'SID',value:'secret',domain:'.google.com',path:'/',secure:true,httpOnly:true,sameSite:'Lax',expires:records[0].expirationDate},
-    {name:'SID',value:'',domain:'aistudio.google.com',path:'/u'},
-    {name:'none',value:'n',domain:'.google.com',path:'/',sameSite:'None',expires:9999999999},
-    {name:'strict',value:'s',domain:'.google.com',path:'/',sameSite:'Strict',expires:9999999998},
-    {name:'unknown',value:'u',domain:'aistudio.google.com',path:'/'}
-  ], auth_user:'2' });
-  assert.equal(payload.auth_user,'2'); assert.equal(env.reads(),0); assert.equal(env.inputs[1].value,'');
-  assert(!JSON.stringify(env.stored).includes('secret'));
-  req.onload({status:200, responseText:JSON.stringify({imported_count:1,accounts:[{id:'account-1',name:'AI Studio',email:'test@example.com'}],verification:'browser_identity_only',generation_verified:false})});
-  req.onerror(); await pending;
-  assert.match(env.status.textContent,/已导入 1/); assert.match(env.status.textContent,/分区 1/); assert.equal(env.timers.size,0);
-  for (const invalid of ['http://example.com','https://user:pass@example.com','https://example.com/a','https://example.com/?x=1','https://example.com/#x','file:///']) {
-    const test = setup(); test.inputs[0].value=invalid; test.inputs[1].value='key'; await test.click(); assert.equal(test.requests.length,0); assert.equal(test.reads(),0);
-  }
-  const fallback = setup({hang:true,url:'https://aistudio.google.com/?authuser=4'});
-  fallback.inputs[1].value='key'; const waiting = fallback.click();
-  assert.equal(fallback.inputs[2].value,'4');
-  [...fallback.timers.values()].find(t=>t.ms===4000).fn(); await flush();
-  assert.equal(fallback.requests.length,1); assert.equal(JSON.parse(fallback.requests[0].data).cookies,'fallback=ok; empty=');
-  assert.match(fallback.status.textContent,/属性未知/); assert.match(fallback.status.textContent,/无法判断分区/);
-  fallback.requests[0].onload({status:500,responseText:'SECRET BACKEND FAILURE'}); await waiting;
-  assert(!fallback.status.textContent.includes('SECRET')); assert.equal(fallback.push.disabled,false);
-  const timed = setup({records}); timed.inputs[1].value='key'; const timeoutPending=timed.click(); await flush();
-  [...timed.timers.values()].find(t=>t.ms===300000).fn(); await timeoutPending;
-  timed.requests[0].onload({status:200,responseText:'secret'});
-  assert.match(timed.status.textContent,/失败或超时/); assert.equal(timed.timers.size,0); assert.equal(timed.push.disabled,false);
-  const redirected = setup({records}); redirected.inputs[0].value='https://example.com'; redirected.inputs[1].value='key';
-  const redirectPending=redirected.click(); await flush();
-  redirected.requests[0].onload({status:200,finalUrl:'https://elsewhere.example/',responseText:'secret'}); await redirectPending;
-  assert.match(redirected.status.textContent,/失败/);
-  for (const reason of ['cookie_import_authentication', 'cookie_not_authenticated', 'cookie_browser_incompatible', 'cookie_browser_timeout', 'unknown-secret-reason']) {
-    const rejected = setup({records}); rejected.inputs[1].value='key';
-    const rejectedPending=rejected.click(); await flush();
-    rejected.requests[0].onload({status:401,responseText:JSON.stringify({error:{reason,message:'SECRET SERVER MESSAGE'}})});
-    await rejectedPending;
-    assert(!rejected.status.textContent.includes('SECRET')); assert(!rejected.status.textContent.includes('unknown-secret'));
-    if (reason==='cookie_import_authentication') assert.match(rejected.status.textContent,/cookie_import_key（不是生成接口的 api_key）/);
-    if (reason==='cookie_not_authenticated') assert.match(rejected.status.textContent,/可能已过期/);
-    if (reason==='cookie_browser_incompatible') assert.match(rejected.status.textContent,/网页适配/);
-    if (reason==='cookie_browser_timeout') assert.match(rejected.status.textContent,/浏览器等待超时/);
-    if (reason==='unknown-secret-reason') assert.match(rejected.status.textContent,/失败或超时/);
-  }
-  const malformed = setup({records}); malformed.inputs[1].value='key';
-  const malformedPending=malformed.click(); await flush();
-  malformed.requests[0].onload({status:200,responseText:JSON.stringify({imported_count:2,accounts:[{}],verification:'browser_identity_only',generation_verified:false})});
-  await malformedPending; assert.match(malformed.status.textContent,/失败或超时/);
+  await scenario('explicit consent and initial UI', async () => {
+    const env = setup({records});
+    assert.deepEqual(env.reads(),{document:0,gm:0}); assert.equal(env.requests.length,0);
+    assert.equal(env.get('mode').value,'current'); assert.equal(env.get('auth').value,'');
+    assert.equal(env.get('remember').checked,false); assert.equal(env.get('key').value,'');
+    assert.equal(env.get('config-link').href,'http://127.0.0.1:18451/config');
+    await env.click('import'); assert.equal(env.reads().gm,0); assert.equal(env.requests.length,0);
+    assert.equal(setup({frame:true}).nodes.length,1);
+  });
+  await scenario('structured metadata, identities and reentrancy', async () => {
+    const env = setup({records,double:true});
+    const {done} = await pendingImport(env); await env.click('import');
+    assert.equal(env.requests.length,1);
+    const req = env.requests[0], payload = JSON.parse(req.data);
+    assert.equal(req.anonymous,true); assert.equal(req.redirect,'error'); assert.equal(req.timeout,300000);
+    assert.equal(payload.auth_user,'2'); assert.equal(env.reads().document,0);
+    assert.deepEqual(payload.cookies,[
+      {name:'SID',value:'synthetic-secret',domain:'.google.com',path:'/',secure:true,httpOnly:true,sameSite:'Lax',expires:records[0].expirationDate},
+      {name:'SID',value:'',domain:'aistudio.google.com',path:'/u'},
+      {name:'none',value:'n',domain:'.google.com',path:'/',sameSite:'None',expires:9999999999},
+      {name:'strict',value:'s',domain:'.google.com',path:'/',sameSite:'Strict',expires:9999999998},
+      {name:'unknown',value:'u',domain:'aistudio.google.com',path:'/'}
+    ]);
+    assert.equal(env.get('key').value,'synthetic-import-key');
+    assert(!JSON.stringify(env.stored).includes('synthetic'));
+    respond(env,success()); req.onerror(); await done;
+    assert.match(env.get('status').textContent,/导入 \/ 更新 1/);
+    assert.match(env.get('accounts').textContent,/synthetic@example\.test/);
+    assert.match(env.get('accounts').textContent,/Synthetic Account/);
+    assert.match(env.get('cookie-info').textContent,/分区 2/);
+    assert.equal(env.timers.size,0); assert.equal(env.get('import').disabled,false);
+  });
+  await scenario('current URL and explicit index', async () => {
+    const env = setup({records});
+    env.context.location = new URL('https://aistudio.google.com/?authuser=4');
+    let {done} = await pendingImport(env);
+    assert.equal(JSON.parse(env.requests[0].data).auth_user,'4'); respond(env,success()); await done;
+    env.get('auth').value='7'; env.get('email').value='expected@example.test';
+    ({done} = await pendingImport(env));
+    assert.equal(JSON.parse(env.requests[1].data).auth_user,'7');
+    assert.equal(JSON.parse(env.requests[1].data).email,'expected@example.test');
+    respond(env,success()); await done;
+  });
+  await scenario('bulk import ignores single-account constraints and shows limit', async () => {
+    const env = setup({records}); await env.set('mode','all');
+    env.get('auth').value='invalid'; env.get('email').value='single@example.test';
+    assert.equal(env.get('auth').disabled,true); assert.equal(env.get('email').disabled,true);
+    const {done} = await pendingImport(env);
+    const payload=JSON.parse(env.requests[0].data);
+    assert.deepEqual(Object.keys(payload),['cookies']);
+    respond(env,success({details:{truncated:true,attempted:1,verified:1,skipped_host_cookies:2}})); await done;
+    assert.match(env.get('status').textContent,/扫描数量或时间上限/);
+    assert.match(env.get('cookie-info').textContent,/来源未知项：2/);
+    assert.equal(env.get('auth').disabled,true);
+  });
+  await scenario('no cookies preserves key for retry', async () => {
+    const env=setup({records:[],cookie:''}); env.get('key').value='synthetic-key';
+    await env.click('import');
+    assert.equal(env.requests.length,0); assert.equal(env.get('key').value,'synthetic-key');
+    assert.match(env.get('status').textContent,/尚未发送请求/);
+    assert.equal(env.get('import').disabled,false); assert.equal(env.timers.size,0);
+  });
+  await scenario('URL and input validation before reading credentials', async () => {
+    for (const invalid of ['http://example.com','https://user:pass@example.com','https://example.com/a','https://example.com/?x=1','https://example.com/#x','file:///','example.com']) {
+      const env=setup({records}); await env.set('service',invalid); env.get('key').value='synthetic-key';
+      await env.click('import'); assert.equal(env.requests.length,0); assert.equal(env.reads().gm,0);
+    }
+    const env=setup({records}); await env.set('service','127.0.0.1:18451/');
+    env.get('key').value='synthetic-key'; env.get('auth').value='12345678901';
+    await env.click('import'); assert.equal(env.requests.length,0);
+    env.get('auth').value=''; env.get('key').value='key\ninjected-header';
+    await env.click('import'); assert.equal(env.requests.length,0);
+  });
+  await scenario('fallback watchdog, progress and cleanup', async () => {
+    const env=setup({hang:true});
+    const {done}=await pendingImport(env);
+    assert.match(env.get('status').textContent,/正在读取/);
+    env.tick(1000); assert.match(env.get('elapsed').textContent,/1 秒/);
+    env.tick(4000); await flush();
+    assert.equal(env.requests.length,1); assert.equal(JSON.parse(env.requests[0].data).cookies,'fallback=synthetic; empty=');
+    assert.match(env.get('cookie-info').textContent,/不包含 HttpOnly/);
+    respond(env,{error:{reason:'cookie_not_authenticated',message:'PRIVATE BODY'}},400); await done;
+    assert.match(env.get('status').textContent,/过期/); assert(!env.get('status').textContent.includes('PRIVATE'));
+    assert.equal(env.timers.size,0);
+    const missing=setup({noGM:true,cookie:''}); missing.get('key').value='key'; await missing.click('import');
+    assert.equal(missing.reads().document,1); assert.equal(missing.requests.length,0);
+  });
+  await scenario('health is a separate check without Cookie or bearer', async () => {
+    const env=setup({records}); env.get('key').value='synthetic-key';
+    const done=env.click('check'); await flush();
+    assert.equal(env.requests[0].url,'http://127.0.0.1:18451/health');
+    assert.equal(env.requests[0].method,'GET'); assert.deepEqual(Object.keys(env.requests[0].headers),[]);
+    assert.deepEqual(env.reads(),{document:0,gm:0});
+    respond(env,{status:'alive'}); await done;
+    assert.match(env.get('status').textContent,/实际导入时校验/);
+    assert.equal(env.get('key').value,'synthetic-key'); assert.equal(env.timers.size,0);
+  });
+  await scenario('malformed manager metadata cannot leave collection pending', async () => {
+    const env=setup({records:[{name:'SID',value:'synthetic',domain:42,hostOnly:true}]});
+    const {done}=await pendingImport(env);
+    assert.equal(env.requests.length,1);
+    assert.equal(env.reads().document,1);
+    assert.match(env.get('cookie-info').textContent,/document.cookie/);
+    respond(env,success()); await done;
+    assert.equal(env.timers.size,0);
+  });
+  await scenario('opt-in memory, per-origin isolation, reload and forgetting', async () => {
+    const storage=new Map(), env=setup({storage});
+    env.get('key').value='synthetic-key-A';
+    assert(!storage.has('importKey:http://127.0.0.1:18451'));
+    env.get('remember').checked=true; await env.fire(env.get('remember'),'change');
+    assert.equal(storage.get('importKey:http://127.0.0.1:18451'),'synthetic-key-A');
+    const reload=setup({storage}); assert.equal(reload.get('key').value,'synthetic-key-A'); assert(reload.get('remember').checked);
+    await env.set('service','https://another.example');
+    assert.equal(env.get('key').value,''); assert.equal(env.get('remember').checked,false);
+    env.get('key').value='synthetic-key-B'; env.get('remember').checked=true; await env.fire(env.get('remember'),'change');
+    await env.set('service','127.0.0.1:18451');
+    assert.equal(env.get('key').value,'synthetic-key-A');
+    await env.click('forget');
+    assert.equal(env.get('key').value,''); assert.equal(storage.has('importKey:http://127.0.0.1:18451'),false);
+    assert.equal(storage.get('importKey:https://another.example'),'synthetic-key-B');
+    assert.equal(setup({storage}).get('key').value,'');
+  });
+  await scenario('uncheck forgets persistence while preserving in-page input', async () => {
+    const storage=new Map([['importKey:http://127.0.0.1:18451','synthetic-key']]), env=setup({storage});
+    env.get('remember').checked=false; await env.fire(env.get('remember'),'change');
+    assert.equal(env.get('key').value,'synthetic-key'); assert.equal(storage.size,0);
+  });
+  await scenario('storage failures are visible', async () => {
+    const env=setup({readFail:true}); assert.match(env.get('storage-notice').textContent,/无法读取/);
+    const blocked=setup({writeFail:true}); blocked.get('key').value='synthetic-key'; blocked.get('remember').checked=true;
+    await blocked.fire(blocked.get('remember'),'change');
+    assert.equal(blocked.get('remember').checked,false); assert.match(blocked.get('storage-notice').textContent,/失败/);
+    const retained=new Map([['importKey:http://127.0.0.1:18451','synthetic-key']]);
+    const deletion=setup({storage:retained,deleteFail:true}); await deletion.click('forget');
+    assert(retained.has('importKey:http://127.0.0.1:18451'));
+    assert.match(deletion.get('storage-notice').textContent,/清除失败/);
+  });
+  await scenario('unconfirmed outcomes do not retry or leak server details', async () => {
+    for (const failure of ['network','timeout','aborted','redirect','json','shape','unknown','throw','watchdog']) {
+      const env=setup({records,requestThrow:failure==='throw'}); const {done}=await pendingImport(env);
+      const req=env.requests[0];
+      if (failure==='network') req.onerror();
+      if (failure==='timeout') req.ontimeout();
+      if (failure==='aborted') req.onabort();
+      if (failure==='redirect') respond(env,success(),200,{finalUrl:'https://elsewhere.example/'});
+      if (failure==='json') req.onload({status:200,responseText:'PRIVATE RESPONSE'});
+      if (failure==='shape') respond(env,success({accounts:[{}]}));
+      if (failure==='unknown') respond(env,{error:{reason:'PRIVATE REASON',message:'PRIVATE MESSAGE'}},500);
+      if (failure==='watchdog') { env.tick(300000); assert.equal(env.aborts(),1); req.onload({status:200,responseText:'PRIVATE'}); }
+      await done;
+      assert.match(env.get('status').textContent,/未能确认|尚未确认/);
+      assert.equal(env.requests.length,failure==='throw'?0:1);
+      assert.equal(env.get('key').value,'synthetic-import-key'); assert.equal(env.timers.size,0);
+      await env.click('copy'); const report=env.copied[0];
+      assert(report); assert(!/PRIVATE|synthetic|example|Cookie|Bearer/.test(report));
+      assert.deepEqual(Object.keys(JSON.parse(report)),['script_version','action','phase','code','http_status','duration_ms']);
+    }
+  });
+  await scenario('known rejection offers concrete action', async () => {
+    const env=setup({records}); const {done}=await pendingImport(env);
+    respond(env,{error:{reason:'cookie_import_authentication',message:'PRIVATE MESSAGE'}},401); await done;
+    assert.match(env.get('status').textContent,/导入密钥错误/);
+    assert.match(env.get('status').textContent,/已保留/); assert.equal(env.get('status').getAttribute('data-kind'),'error');
+    await env.click('copy'); assert.equal(JSON.parse(env.copied[0]).code,'cookie_import_authentication');
+  });
+  await scenario('unlisted reason codes are rejections, not unconfirmed outcomes', async () => {
+    for (const reason of ['cookie_probe_failed','constructor','__proto__']) {
+      const env=setup({records}); const {done}=await pendingImport(env);
+      respond(env,{error:{reason,message:'PRIVATE MESSAGE'}},502); await done;
+      const text=env.get('status').textContent;
+      assert.match(text,/账号未保存/); assert(text.includes(reason)); assert(!/可能已经导入|PRIVATE/.test(text));
+      assert.equal(env.get('status').getAttribute('data-kind'),'error');
+      await env.click('copy'); const report=JSON.parse(env.copied[0]);
+      assert.equal(report.phase,'rejected'); assert.equal(report.code,reason); assert.equal(report.http_status,502);
+    }
+  });
+  await scenario('untrusted identity text and malformed success metadata', async () => {
+    const env=setup({records}); let {done}=await pendingImport(env);
+    respond(env,success({accounts:[{id:'x',email:'<img src=x onerror=alert(1)>',name:'<script>bad</script>'}]})); await done;
+    assert.equal(env.get('accounts').children[0].children[0].textContent,'<img src=x onerror=alert(1)>');
+    ({done}=await pendingImport(env)); respond(env,success({details:{truncated:'yes'}})); await done;
+    assert.match(env.get('status').textContent,/未能确认/);
+  });
+  await scenario('clipboard fallback offers selectable redacted text', async () => {
+    const env=setup({clipboardFail:true}); env.get('key').value='synthetic-key'; await env.click('import'); await env.click('copy');
+    assert.equal(env.get('copy-text').hidden,false); assert.equal(env.get('copy-text').selected,true);
+    assert.equal(JSON.parse(env.get('copy-text').value).code,'no_cookies');
+    assert(!env.get('copy-text').value.includes('synthetic'));
+  });
+  await scenario('diagnostics follow the latest action and reset on destination changes', async () => {
+    const env=setup({records}); const {done}=await pendingImport(env); respond(env,success()); await done;
+    env.get('key').value=''; await env.click('import'); await env.click('copy');
+    assert.equal(JSON.parse(env.copied.at(-1)).code,'invalid_key');
+    assert.equal(env.get('accounts').children.length,0);
+    await env.set('service','https://another.example');
+    assert.equal(env.get('copy').disabled,true); assert.equal(env.get('elapsed').textContent,'');
+    assert.match(env.get('cookie-info').textContent,/尚未读取/);
+  });
+  await scenario('collapse, reopen, position persistence and narrow viewport', async () => {
+    const storage=new Map(), env=setup({storage,width:300,height:450});
+    await env.click('collapse'); assert.equal(env.get('panel').hidden,true); assert.equal(env.get('bubble').hidden,false);
+    assert.equal(storage.get('panelOpen'),false);
+    const collapsed=setup({storage,width:300,height:450}); assert.equal(collapsed.get('panel').hidden,true);
+    collapsed.menus[0].fn(); assert.equal(collapsed.get('panel').hidden,false);
+    await env.fire(env.get('bubble'),'pointerdown',{button:0,pointerId:1,clientX:100,clientY:100});
+    env.dispatch('pointermove',{pointerId:1,clientX:-1000,clientY:-1000});
+    env.dispatch('pointerup',{pointerId:1});
+    assert.equal(typeof storage.get('panelPosition'),'object');
+    await env.click('bubble'); assert.equal(env.get('panel').hidden,true); // drag does not open
+    await env.click('bubble'); assert.equal(env.get('panel').hidden,false);
+    env.context.innerWidth=240; env.context.innerHeight=320; env.dispatch('resize',{});
+    const host=env.nodes.find(node=>node.tag==='div');
+    const rect=host.getBoundingClientRect();
+    assert(rect.left>=8 && rect.top>=8); assert(rect.right<=232 && rect.bottom<=312);
+    const restored=setup({storage,width:300,height:450});
+    const restoredHost=restored.nodes.find(node=>node.tag==='div');
+    assert.equal(parseFloat(restoredHost.style.left),8);
+  });
+  await scenario('missing and non-callable storage APIs retain visible fallback', async () => {
+    for (const GM_getValue of [undefined, null]) {
+      const env = setup({globals:{GM_getValue}});
+      assert.match(env.get('storage-notice').textContent,/无法读取/);
+    }
+    for (const GM_setValue of [undefined, 42]) {
+      const env = setup({globals:{GM_setValue}});
+      env.get('key').value = 'synthetic-key'; env.get('remember').checked = true;
+      await env.fire(env.get('remember'),'change');
+      assert.equal(env.get('remember').checked,false);
+      assert.match(env.get('storage-notice').textContent,/保存或清除失败/);
+    }
+    for (const GM_deleteValue of [undefined, 42]) {
+      const storage = new Map([['importKey:http://127.0.0.1:18451','synthetic-key']]);
+      const env = setup({storage, globals:{GM_deleteValue}});
+      await env.click('forget');
+      assert(storage.has('importKey:http://127.0.0.1:18451'));
+      assert.match(env.get('storage-notice').textContent,/清除失败/);
+    }
+  });
+  await scenario('clipboard and cookie capability absence keep existing fallbacks', async () => {
+    for (const navigator of [{}, {clipboard:null}, {clipboard:{writeText:42}}]) {
+      const env = setup({globals:{navigator}, noGM:true, cookie:''});
+      env.get('key').value = 'synthetic-key';
+      await env.click('import'); await env.click('copy');
+      assert.equal(env.get('copy-text').hidden,false);
+      assert.equal(env.get('copy-text').selected,true);
+      assert.equal(JSON.parse(env.get('copy-text').value).code,'no_cookies');
+    }
+    for (const GM_cookie of [undefined, null, {}, {list:42}, {list(){throw new Error('PRIVATE');}}]) {
+      const env = setup({globals:{GM_cookie}});
+      const {done} = await pendingImport(env);
+      assert.equal(env.reads().document,1);
+      assert.equal(JSON.parse(env.requests[0].data).cookies,'fallback=synthetic; empty=');
+      respond(env,success()); await done;
+      assert.equal(env.timers.size,0);
+    }
+    const env = setup({noGM:true, cookieThrow:true});
+    const {done} = await pendingImport(env); await done;
+    assert.equal(env.requests.length,0);
+    assert.match(env.get('status').textContent,/尚未发送请求/);
+    assert.equal(env.get('key').value,'synthetic-import-key');
+    assert.equal(env.timers.size,0);
+    await env.click('copy');
+    assert.equal(JSON.parse(env.copied[0]).phase,'not_sent');
+    assert(!env.copied[0].includes('PRIVATE'));
+  });
+  await scenario('all controls lock and restore on both operations and outcomes', async () => {
+    for (const action of ['check','import']) {
+      for (const all of [false,true]) {
+        for (const fail of [false,true]) {
+          const env = setup({records});
+          if (all) await env.set('mode','all');
+          env.get('key').value = 'synthetic-key';
+          const done = env.click(action); await flush();
+          for (const id of ['service','key','remember','forget','mode','import','check','auth','email'])
+            assert.equal(env.get(id).disabled,true,id);
+          if (fail) env.requests[0].onerror();
+          else respond(env,action === 'check' ? {status:'alive'} : success());
+          await done;
+          for (const id of ['service','key','remember','forget','mode','import','check'])
+            assert.equal(env.get(id).disabled,false,id);
+          for (const id of ['auth','email']) assert.equal(env.get(id).disabled,all,id);
+          assert.equal(env.timers.size,0);
+        }
+      }
+    }
+  });
   assert(!source.includes('innerHTML')); assert(!source.includes('console.')); assert(!source.includes('eval('));
-  console.log('Cookie helper VM tests passed');
-})().catch(error => { console.error(error); process.exitCode=1; });
+  console.log('Cookie helper VM tests passed (' + scenarios + ' scenarios)');
+})().catch(error => { console.error(error); process.exitCode=1; }).finally(() => clearTimeout(suiteTimeout));
