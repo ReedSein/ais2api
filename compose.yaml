@@ -1,0 +1,17 @@
+# Copyright (c) 2026 ais2api contributors
+# SPDX-License-Identifier: MPL-2.0
+services:
+  ais2api:
+    image: ghcr.io/mananekoha114/ais2api:latest
+    build: .
+    container_name: ais2api
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "18451:18451"
+    volumes:
+      - ./data:/data
+    # Set a strong management password before exposing the port.
+    # environment:
+    #   AIS2API_ADMIN_KEY: "replace-with-a-long-random-value"
+    #   TZ: "Asia/Shanghai"
