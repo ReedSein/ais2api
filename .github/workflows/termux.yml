@@ -57,5 +57,5 @@ jobs:
           name: termux-aarch64-${{ github.sha }}
           path: ${{ runner.temp }}/termux-ci/output/*.tar.gz*
           if-no-files-found: error
-          retention-days: 28
+          retention-days: 1
           compression-level: 0

@@ -120,7 +120,7 @@ jobs:
           name: ubuntu24-${{ matrix.compiler }}-runtime
           path: build/linux/packages/*.tar.gz*
           if-no-files-found: error
-          retention-days: 28
+          retention-days: 1
   debian:
     name: Debian 13 / GCC x64
     runs-on: ubuntu-24.04
@@ -187,7 +187,7 @@ jobs:
           name: debian13-gcc-runtime
           path: build/linux/packages/*.tar.gz*
           if-no-files-found: error
-          retention-days: 28
+          retention-days: 1
   windows:
     name: Windows / MSVC x64
     runs-on: windows-2022
@@ -265,4 +265,4 @@ jobs:
           name: windows-msvc-x64-runtime
           path: build/windows/packages/*.zip*
           if-no-files-found: error
-          retention-days: 28
+          retention-days: 1
