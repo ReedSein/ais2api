@@ -115,7 +115,7 @@ async function submit() {
         支持 Cookie 请求头、Netscape Cookie 文本、Cookie JSON、storage state 和凭据包。凭据保存在后端数据库，不会出现在列表中。
       </template>
       <template v-else>
-        后端会启动浏览器确认 Google 账号身份后再保存；重复导入会更新同一账号。未指定账号索引时依次探测 0–7，最长可能需要数分钟。
+        后端会启动浏览器确认 Google 账号身份后再保存；重复导入会更新同一账号。未指定账号索引时依次探测 0–7，单个索引未登录会继续，连续三次失败后停止，最长可能需要数分钟。storage state 中的 localStorage 会被丢弃，仅保留 Cookie。
       </template>
     </p>
 

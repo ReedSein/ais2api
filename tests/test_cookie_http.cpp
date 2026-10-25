@@ -126,12 +126,14 @@ TEST_CASE("cookie HTTP accepts legacy and structured input only after verificati
     CHECK(body.at("verification") == "browser_identity_only");
     CHECK(body.at("generation_verified") == false);
     CHECK(first.body().find("secret-cookie-http") == std::string::npos);
-    CHECK(s.state->probes == 2);
+    // Index 0 verifies; indices 1-3 are unauthenticated, so the scan stops after
+    // three consecutive failures.
+    CHECK(s.state->probes == 4);
     auto id = body.at("accounts").as_array()[0].as_object().at("id");
     auto second = s.push(R"({"cookies":[{"name":"SID","value":"secret-cookie-http","domain":".google.com","path":"/","secure":true,"httpOnly":true}],"auth_user":"4"})");
     REQUIRE(second.result_int() == 200);
     CHECK(json::parse(second.body()).as_object().at("accounts").as_array()[0].as_object().at("id") == id);
-    CHECK(s.state->probes == 3);
+    CHECK(s.state->probes == 5);
     CHECK(s.accounts().size() == 1);
 }
 TEST_CASE("cookie HTTP rejects invalid input and preserves store on probe failure", "[http][cookie-import]") {
