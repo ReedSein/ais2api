@@ -2,7 +2,7 @@
 # Copyright (c) 2026 ais2api contributors
 # SPDX-License-Identifier: MPL-2.0
 """WebUI packaging checks against local HTTP fixtures; no service or browser needed."""
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import unittest
 import urllib.request
@@ -44,7 +44,7 @@ class WebuiSmokeTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server = HTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
