@@ -360,7 +360,9 @@ textarea{resize:vertical;font-size:12px;min-height:100px}`;
               const data = JSON.parse(response.responseText);
               if (http !== 200) {
                 const reason = data && data.error && data.error.reason;
-                if (typeof reason === 'string' && Object.prototype.hasOwnProperty.call(failureMessages, reason))
+                // ais2api answers with a reason only before saving, so any
+                // reason code is a definite rejection, known or not.
+                if (typeof reason === 'string' && /^[a-z_]{1,64}$/.test(reason))
                   done({ kind: 'rejected', code: reason, http });
                 else done({ kind: 'unconfirmed', code: 'http_error', http });
                 return;
@@ -474,13 +476,16 @@ textarea{resize:vertical;font-size:12px;min-height:100px}`;
           element('strong', account.email, row); element('span', account.name, row).className = 'muted';
         }
         const details = data.details || {};
-        const extra = details.truncated ? '\n已达到服务端扫描上限，可能还有账号未被识别。' : '';
+        const extra = details.truncated ? '\n已达到服务端扫描数量或时间上限，可能还有账号未被识别。' : '';
         setStatus('成功导入 / 更新 ' + data.imported_count + ' 个账号。' + extra, 'success');
         for (const [field, label] of [['skipped_host_cookies', '服务端跳过来源未知项'], ['skipped_partition_cookies', '服务端跳过分区项']])
           if (details[field]) cookieInfo.textContent += ' ' + label + '：' + details[field] + '。';
       } else if (result.kind === 'rejected') {
         operation.phase = 'rejected'; operation.code = result.code;
-        setStatus(failureMessages[result.code] + '\n密钥输入已保留。', 'error');
+        const message = Object.prototype.hasOwnProperty.call(failureMessages, result.code)
+          ? failureMessages[result.code]
+          : '服务端拒绝了导入请求（错误码 ' + result.code + '），账号未保存。请复制诊断摘要并查看服务日志。';
+        setStatus(message + '\n密钥输入已保留。', 'error');
       } else {
         operation.phase = 'unconfirmed'; operation.code = result.code || 'invalid_response';
         setStatus('未能确认导入结果，可能已经导入。请先打开账号列表核对，再决定是否重试；也可复制诊断摘要。', 'unconfirmed');

@@ -183,7 +183,7 @@ async function scenario(name, fn) {
     const payload=JSON.parse(env.requests[0].data);
     assert.deepEqual(Object.keys(payload),['cookies']);
     respond(env,success({details:{truncated:true,attempted:1,verified:1,skipped_host_cookies:2}})); await done;
-    assert.match(env.get('status').textContent,/扫描上限/);
+    assert.match(env.get('status').textContent,/扫描数量或时间上限/);
     assert.match(env.get('cookie-info').textContent,/来源未知项：2/);
     assert.equal(env.get('auth').disabled,true);
   });
@@ -297,6 +297,17 @@ async function scenario(name, fn) {
     assert.match(env.get('status').textContent,/导入密钥错误/);
     assert.match(env.get('status').textContent,/已保留/); assert.equal(env.get('status').getAttribute('data-kind'),'error');
     await env.click('copy'); assert.equal(JSON.parse(env.copied[0]).code,'cookie_import_authentication');
+  });
+  await scenario('unlisted reason codes are rejections, not unconfirmed outcomes', async () => {
+    for (const reason of ['cookie_probe_failed','constructor','__proto__']) {
+      const env=setup({records}); const {done}=await pendingImport(env);
+      respond(env,{error:{reason,message:'PRIVATE MESSAGE'}},502); await done;
+      const text=env.get('status').textContent;
+      assert.match(text,/账号未保存/); assert(text.includes(reason)); assert(!/可能已经导入|PRIVATE/.test(text));
+      assert.equal(env.get('status').getAttribute('data-kind'),'error');
+      await env.click('copy'); const report=JSON.parse(env.copied[0]);
+      assert.equal(report.phase,'rejected'); assert.equal(report.code,reason); assert.equal(report.http_status,502);
+    }
   });
   await scenario('untrusted identity text and malformed success metadata', async () => {
     const env=setup({records}); let {done}=await pendingImport(env);
