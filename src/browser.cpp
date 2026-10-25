@@ -505,6 +505,26 @@ struct BrowserGateway::Impl {
         profile = config.data_dir / "runtime" / ("browser-" + random_hex(12));
         secure_directory(profile);
         std::vector<std::string> args{"--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--user-data-dir=" + path_utf8(fs::absolute(profile)), "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-dev-shm-usage", "--disable-gpu", "--renderer-process-limit=1"};
+        // CloakBrowser on aarch64 containers needs the same low-memory and
+        // zygote-free launch profile as the desktop runtime. Without these
+        // switches its zygote/GPU children can exit while CDP is connected,
+        // which the gateway reports as browser_disconnected.
+        for (const auto* argument : {
+                 "--remote-allow-origins=*", "--no-zygote", "--in-process-gpu",
+                 "--use-gl=angle", "--use-angle=swiftshader", "--disable-setuid-sandbox",
+                 "--disable-gpu-compositing", "--disable-breakpad", "--mute-audio",
+                 "--disable-site-isolation-trials",
+                 "--js-flags=--max-old-space-size=128 --expose-gc --optimize-for-size",
+                 "--media-cache-size=1", "--enable-low-end-device-mode",
+                 "--aggressive-cache-discard", "--disable-smooth-scrolling",
+                 "--disable-threaded-animation", "--disable-threaded-scrolling",
+                 "--disable-backing-store-limit", "--disable-extensions",
+                 "--disable-component-extensions-with-background-pages",
+                 "--disable-backgrounding-occluded-windows", "--disable-ipc-flooding-protection",
+                 "--disable-sync", "--disable-speech-api", "--disable-component-update",
+                 "--disable-default-apps",
+                 "--disable-features=Translate,OptimizationHints,MediaRouter,DialLocalDiscovery,PreloadMediaEngagementData,CertificateTransparencyComponentUpdater,SitePerProcess,AudioServiceOutOfProcess,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,BackForwardCache"})
+            args.emplace_back(argument);
         for (const auto& directory : {profile / "crash-dumps", profile / "disk-cache", profile / "logs"}) secure_directory(directory);
         args.push_back("--crash-dumps-dir=" + path_utf8(fs::absolute(profile / "crash-dumps")));
         args.push_back("--disk-cache-dir=" + path_utf8(fs::absolute(profile / "disk-cache")));
@@ -517,7 +537,11 @@ struct BrowserGateway::Impl {
         args.push_back("--enable-logging");
         args.push_back("--log-file=" + path_utf8(fs::absolute(config.data_dir / "logs" /
             (path_utf8(profile.filename()) + ".log"))));
-        if (config.headless) args.push_back("--headless=new");
+        if (config.headless) {
+            args.push_back("--headless=new");
+            args.push_back("--hide-scrollbars");
+            args.push_back("--window-size=1280,800");
+        }
 #if !defined(_WIN32) && !defined(__APPLE__)
         // proot's root user and Android cannot provide the Chromium sandbox.
         if (std::getenv("TERMUX_VERSION") || geteuid() == 0) args.push_back("--no-sandbox");
