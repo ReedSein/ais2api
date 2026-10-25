@@ -52,7 +52,7 @@ curl http://127.0.0.1:18451/v1/chat/completions \
 | [Cookie 导入](docs/userscript.md) | | |
 | [故障排查](docs/troubleshooting.md) | | |
 
-完整目录见 [docs/README.md](docs/README.md)。
+完整目录见 [docs/README.md](docs/README.md)。容器部署见 [Docker 部署](docs/docker.md)。
 
 ## 从源码构建
 

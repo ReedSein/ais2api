@@ -18,6 +18,10 @@
 
 每次推送和 PR 都会运行 `.github/workflows/build.yml`（Windows、Ubuntu GCC/Clang sanitizer、Debian、bridge）与 `.github/workflows/termux.yml`。发布前确认对应提交的远端任务实际通过；未运行或失败的 CI 不能写成通过。各任务内容见 [构建与打包](platforms.md#持续集成)。
 
+## 容器镜像
+
+`.github/workflows/docker.yml` 在 amd64 与 arm64 原生 runner 上构建镜像并运行冒烟测试，推送到 `main`、标签或手动触发时发布 `linux/amd64` 与 `linux/arm64` 的 multi-arch manifest 到 `ghcr.io/mananekoha114/ais2api`。镜像只包含 Debian Chromium，不包含 CloakBrowser，见 [Docker 部署](docker.md)。
+
 ## 发布二进制
 
 1. 以 development / prerelease 标记当前版本，并在发行说明中列出尚未完成的账号、平台、性能和能力验证（见 [验证记录](validation.md)）。

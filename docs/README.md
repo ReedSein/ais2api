@@ -5,6 +5,7 @@
 | 文档 | 内容 |
 |---|---|
 | [快速开始](getting-started.md) | 获取程序、一键启动、设置密钥、导入账号、发出第一个请求 |
+| [Docker 部署](docker.md) | 构建镜像、数据目录、环境变量、浏览器与升级 |
 | [客户端接入](clients.md) | 接口与鉴权，Cherry Studio / SillyTavern / RikkaHub / OpenAI SDK 的填写方法，搜索模型 |
 | [配置参考](configuration.md) | 全部配置项、环境变量与命令行参数，热更新规则，代理与低内存模式 |
 | [命令行](cli.md) | 所有命令、输出格式、服务生命周期 |
