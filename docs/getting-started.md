@@ -58,7 +58,7 @@ ais2api/
 
 新创建的配置默认管理密码为 `admin`。在浏览器打开 `http://127.0.0.1:18451/`，用 `admin` 登录后，控制台会强制要求设置新密码；修改之前，除改密码以外的管理操作都会被拒绝。默认密码只接受来自本机或局域网的连接。
 
-> 仅在启用了 WebUI 的构建中才有网页控制台。GitHub CI 的 Windows、Ubuntu、Debian 运行包已启用；Termux 运行包未启用，请使用命令行或管理 API。
+> 仅在启用了 WebUI 的构建中才有网页控制台。GitHub CI 的 Windows、Ubuntu、Debian 与 Termux 运行包均已启用。
 
 ## 5. 导入 Google 账号
 

@@ -2,7 +2,7 @@
 
 WebUI 是可选的 Vue 3 管理控制台。启用后，前端资源在构建时生成并嵌入 ais2api 可执行文件，运行时不需要 Node.js，也不需要在程序旁放置 `webui/` 或其他资源目录。未启用 WebUI 的构建仍然可以通过命令行和 [管理 API](management-api.md) 管理服务。
 
-GitHub CI 的 Windows、Ubuntu 与 Debian 运行包已启用 WebUI；Termux 运行包未启用。
+GitHub CI 的 Windows、Ubuntu、Debian 与 Termux 运行包均启用 WebUI。
 
 ## 登录
 
@@ -49,6 +49,7 @@ WebUI 构建需要 Node.js `^20.19.0` 或 `>=22.12.0`（推荐 22.12 或更新�
 # Linux
 sh scripts/build.sh linux --webui
 # Termux
+pkg install nodejs npm
 sh scripts/build.sh termux --webui
 ```
 
