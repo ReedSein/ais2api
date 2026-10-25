@@ -43,7 +43,8 @@ ais2api 提供专用的 Tampermonkey 脚本，可以在已登录的 AI Studio �
 
 原项目 v0.1.2 / [v0.1.3](https://github.com/ReedSein/aistudio-api-termux/blob/3e2eff888b21cc403168ceaaa1379a527d8b1a1c/userscript/aistudio-cookie.user.js) 的“抓取并推送”功能兼容：服务地址填 `http://127.0.0.1:18451`，“管理密码”填 `cookie_import_key`。
 
-- 后端兼容 `{cookies: "Cookie header", name_prefix?: "..."}`。没有 `auth_user` 时依次探测索引 0 到 7，受 `cookie_import_max_accounts`（1–32）与 `cookie_import_timeout_seconds`（默认 180，最大 240 秒）限制。
+- 后端兼容 `{cookies: "Cookie header", name_prefix?: "..."}`。没有 `auth_user` 时依次探测索引 0 到 7，单个索引未登录或返回 401 时继续探测，连续三次失败后停止；受 `cookie_import_max_accounts`（1–32）与 `cookie_import_timeout_seconds`（默认 180，最大 240 秒）限制。
+- 验证导入只保存 cookies；storage state 中的 origins/localStorage 和其他元数据会被丢弃。
 - 原版脚本发送合并后的 Cookie 头，不带元数据。后端为该路径恢复 SID、APISID、SAPISID、`__Secure-1PAPISID`、`__Secure-3PAPISID` 的 JavaScript 可读属性，供 Google 页面构造 RPC 鉴权；结构化 Cookie 中显式的 HttpOnly 属性保持原样。
 - Cookie 头不带域与路径，无法还原未知 `__Host-` Cookie 的来源，这些项会被跳过并报告数量；需要精确元数据时请使用专用脚本。
 - 原版的诊断包和其他管理接口未接入。

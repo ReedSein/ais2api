@@ -6,11 +6,13 @@
 
 #include "ais2api/cookie_import.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <set>
 using namespace ais2api;
 namespace {
 struct ImportBackend : GenerationBackend {
     std::vector<json::object> replies;
     std::vector<Account> candidates;
+    std::set<std::size_t> unauthorized;
     int fail_at = -1;
     bool closed = false;
     bool expand_state = false;
@@ -24,6 +26,8 @@ struct ImportBackend : GenerationBackend {
         if (expand_state) a.storage_state.at("cookies").as_array()[0].as_object()["value"] = std::string(1024 * 1024, 'x');
         if (static_cast<int>(candidates.size()) == fail_at)
             throw Error(503, failure_code, "private-cookie-backend-secret");
+        if (unauthorized.contains(candidates.size()))
+            throw Error(401, "login", "private-cookie");
         if (candidates.size() > replies.size()) throw Error(401, "login", "private-cookie");
         return replies[candidates.size() - 1];
     }
@@ -33,6 +37,7 @@ struct ImportBackend : GenerationBackend {
 json::object verified(std::string email) {
     return {{"ready", true}, {"login", false}, {"identityAmbiguous", false}, {"email", email}};
 }
+json::object sign_in() { return {{"login", true}}; }
 json::object request() { return {{"cookies", "SID=private-cookie; __Host-ONE=skip; OSID=host-cookie"}}; }
 struct Temp {
     fs::path path = fs::temp_directory_path() / ("ais-import-" + random_hex(8));
@@ -51,6 +56,54 @@ TEST_CASE("cookie push enumerates verified identities and safely scopes raw cook
     REQUIRE(cookies.size() == 2);
     CHECK(cookies[1].as_object().at("domain") == "aistudio.google.com");
     CHECK(result.accounts[1].auth_user == "1");
+}
+TEST_CASE("cookie push continues after an unauthenticated auth_user index") {
+    ImportBackend backend;
+    backend.replies = {verified("zero@example.com"), json::object{}, verified("two@example.com")};
+    backend.unauthorized = {2};
+    auto result = probe_cookie_import(request(), 3, backend);
+    REQUIRE(result.accounts.size() == 2);
+    CHECK(result.accounts[0].auth_user == "0");
+    CHECK(result.accounts[1].auth_user == "2");
+    CHECK(result.details.at("attempted") == 3);
+}
+TEST_CASE("cookie push stops after three consecutive sign-in responses") {
+    ImportBackend backend;
+    backend.replies = {verified("zero@example.com"), sign_in(), verified("two@example.com"),
+                       sign_in(), sign_in(), sign_in()};
+    auto result = probe_cookie_import(request(), 8, backend);
+    REQUIRE(result.accounts.size() == 2);
+    CHECK(result.accounts[0].auth_user == "0");
+    CHECK(result.accounts[1].auth_user == "2");
+    CHECK(result.details.at("attempted") == 6);
+}
+TEST_CASE("cookie push stops after three consecutive unauthorized probes") {
+    ImportBackend backend;
+    backend.replies = {verified("zero@example.com"), json::object{}, json::object{}, json::object{}};
+    backend.unauthorized = {2, 3, 4};
+    auto result = probe_cookie_import(request(), 8, backend);
+    REQUIRE(result.accounts.size() == 1);
+    CHECK(result.accounts[0].auth_user == "0");
+    CHECK(result.details.at("attempted") == 4);
+}
+TEST_CASE("cookie push accepts storage files with local state and imports cookies only") {
+    ImportBackend backend;
+    backend.replies = {verified("one@example.com")};
+    json::object cookie{{"name", "SID"}, {"value", "private-cookie"}, {"domain", ".google.com"},
+                        {"path", "/"}, {"expires", -1}, {"httpOnly", true}, {"secure", true},
+                        {"sameSite", "Lax"}};
+    json::object origin{{"origin", "https://aistudio.google.com"},
+                        {"localStorage", json::array{json::object{{"name", "synthetic-key"},
+                                                                  {"value", "synthetic-value"}}}}};
+    json::object auth_file{{"cookies", json::array{cookie}},
+                           {"origins", json::array{origin}},
+                           {"accountName", "one@example.com"}};
+    auto result = probe_cookie_import({{"storage_state", auth_file}, {"auth_user", "0"}}, 8, backend);
+    REQUIRE(result.accounts.size() == 1);
+    CHECK(result.accounts[0].storage_state.at("cookies").as_array().size() == 1);
+    CHECK_FALSE(result.accounts[0].storage_state.if_contains("origins"));
+    CHECK_FALSE(result.accounts[0].storage_state.if_contains("accountName"));
+    CHECK(backend.candidates[0].storage_state == result.accounts[0].storage_state);
 }
 TEST_CASE("structured cookie push preserves exact metadata and explicit identity") {
     ImportBackend backend;
@@ -103,7 +156,7 @@ TEST_CASE("metadata-bearing cookie text preserves Netscape and JSON provenance")
     ImportBackend backend; backend.replies = {verified("one@example.com")};
     CHECK_NOTHROW(probe_cookie_import({{"cookies", json::serialize(state)}, {"auth_user", "0"}}, 8, backend));
 }
-TEST_CASE("wrapped raw cookie headers retain compensation and outer validation") {
+TEST_CASE("wrapped raw cookie headers retain compensation and discard outer local storage") {
     json::object wrapped{{"cookies", "SID=x; OSID=y; __Host-X=z"}};
     for (const auto &input : {json::value(wrapped), json::value(json::serialize(wrapped))}) {
         ImportBackend backend; backend.replies = {verified("one@example.com")};
@@ -116,9 +169,10 @@ TEST_CASE("wrapped raw cookie headers retain compensation and outer validation")
     }
     wrapped["origins"] = json::array{json::object{{"origin", "https://google.com"}}};
     for (const auto &input : {json::value(wrapped), json::value(json::serialize(wrapped))}) {
-        ImportBackend backend;
-        CHECK_THROWS(probe_cookie_import({{"storage_state", input}}, 8, backend));
-        CHECK(backend.candidates.empty());
+        ImportBackend backend; backend.replies = {verified("one@example.com")};
+        auto result = probe_cookie_import({{"storage_state", input}, {"auth_user", "0"}}, 8, backend);
+        REQUIRE(result.accounts.size() == 1);
+        CHECK_FALSE(result.accounts[0].storage_state.if_contains("origins"));
     }
 }
 TEST_CASE("JSON cookie text retains structured import security validation") {
@@ -138,16 +192,20 @@ TEST_CASE("JSON cookie text retains structured import security validation") {
     for (const auto &cookies : {json::value(json::array{base}), json::value("SID=synthetic")}) {
         json::object state{{"cookies", cookies}, {"origins", json::array{json::object{{"origin", "https://google.com"}}}}};
         for (const auto &input : {json::value(state), json::value(json::serialize(state))}) {
-            ImportBackend backend;
-            CHECK_THROWS(probe_cookie_import({{"storage_state", input}}, 8, backend));
-            CHECK(backend.candidates.empty());
+            ImportBackend backend; backend.replies = {verified("one@example.com")};
+            auto result = probe_cookie_import({{"storage_state", input}, {"auth_user", "0"}}, 8, backend);
+            REQUIRE(result.accounts.size() == 1);
+            CHECK_FALSE(result.accounts[0].storage_state.if_contains("origins"));
         }
     }
-    ImportBackend backend;
+    ImportBackend nested_backend; nested_backend.replies = {verified("one@example.com")};
     json::object nested{{"cookies", json::array{base}}, {"origins", json::array{json::object{{"origin", "https://google.com"}}}}};
-    CHECK_THROWS(probe_cookie_import({{"storage_state", json::object{{"cookies", json::serialize(nested)}}}}, 8, backend));
-    CHECK_THROWS(probe_cookie_import({{"cookies", "evilgoogle.com\tFALSE\t/\tTRUE\t0\tOSID\tsynthetic\n"}}, 8, backend));
-    CHECK(backend.candidates.empty());
+    auto result = probe_cookie_import({{"storage_state", json::object{{"cookies", json::serialize(nested)}}}, {"auth_user", "0"}}, 8, nested_backend);
+    REQUIRE(result.accounts.size() == 1);
+    CHECK_FALSE(result.accounts[0].storage_state.if_contains("origins"));
+    ImportBackend invalid_backend;
+    CHECK_THROWS(probe_cookie_import({{"cookies", "evilgoogle.com\tFALSE\t/\tTRUE\t0\tOSID\tsynthetic\n"}}, 8, invalid_backend));
+    CHECK(invalid_backend.candidates.empty());
 }
 TEST_CASE("cookie import distinguishes safe browser failures without leaking exception text") {
     for (const auto &[code, status] : std::vector<std::pair<std::string, int>>{
