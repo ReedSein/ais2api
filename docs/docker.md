@@ -39,12 +39,17 @@ docker run -d --name ais2api \
   ais2api:local
 ```
 
-首次启动会在数据目录生成 `config.json`，并提示填写 API Key。打开 `data/config.json`，设置：
+首次启动会在数据目录生成 `config.json`，并在容器日志中打印随机生成的管理密码：
+
+```sh
+docker logs ais2api 2>&1 | grep 'generated management password'
+```
+
+这个密码同时保存在 `config.json` 的 `admin_key` 中，用它登录 Web 控制台。打开 `data/config.json`，设置 API Key：
 
 ```json
 {
-  "api_key": "换成你自己的长随机字符串",
-  "admin_key": "换成另一个长随机字符串"
+  "api_key": "换成你自己的长随机字符串"
 }
 ```
 
@@ -68,9 +73,16 @@ docker restart ais2api
 docker compose up -d --build
 ```
 
-首次登录后按控制台提示修改管理密码。需要由环境变量预设时，设置 `AIS2API_ADMIN_KEY`。
+### 管理密码
 
-默认管理密码 `admin` 只适合首次本机配置。Docker 的端口映射会让远端请求以网桥地址进入容器，程序会把这类请求当作局域网来源；把端口暴露到公网前必须设置 `AIS2API_ADMIN_KEY` 或修改配置中的 `admin_key`。
+容器不使用原生安装的默认管理密码 `admin`。程序只允许本机和局域网来源使用默认密码，但在 Docker Desktop、rootless Docker 或经 `docker-proxy` 转发（例如 IPv6 客户端访问 IPv4 网桥）时，远端请求会以私有地址进入容器，这项限制无法区分来源。因此入口脚本在首次创建配置时：
+
+- 未设置 `AIS2API_ADMIN_KEY`：生成 48 位十六进制随机密码写入 `admin_key`，并打印到容器日志；
+- 已设置 `AIS2API_ADMIN_KEY`：使用该值。设为空字符串表示关闭 HTTP 管理。
+
+已有的 `config.json` 不受影响。用旧镜像创建、仍是 `admin` 的配置，请在控制台修改密码或直接编辑 `admin_key`。
+
+`-p 18451:18451` 会在宿主机所有网卡上开放端口。只在本机使用时，改为 `-p 127.0.0.1:18451:18451`（`compose.yaml` 中同理）。
 
 ## 数据目录
 
@@ -94,7 +106,7 @@ docker compose up -d --build
 |---|---|
 | `AIS2API_BIND` | 监听地址，镜像默认为 `0.0.0.0` |
 | `AIS2API_PORT` | 监听端口，默认 `18451` |
-| `AIS2API_ADMIN_KEY` | 管理控制台密码 |
+| `AIS2API_ADMIN_KEY` | 管理控制台密码；首次启动未设置时随机生成，见[管理密码](#管理密码) |
 | `AIS2API_BROWSER_EXECUTABLE` | 浏览器可执行文件 |
 | `AIS2API_PROXY` | 上游代理 |
 | `AIS2API_HEADLESS` | 是否无界面运行，默认 `true` |
@@ -159,4 +171,4 @@ docker run -d --name ais2api \
 - 容器内以 root 运行，浏览器以 `--no-sandbox` 启动；容器内无法提供 Chromium 沙箱。
 - 容器没有系统 D-Bus，浏览器日志会出现 `Failed to connect to the bus`；它不影响 CDP 和生成。
 - 生成请求串行处理，超过队列上限返回 `429 queue_full`。
-- 构建和冒烟测试只验证程序启动、配置生成、嵌入式 Web 控制台和 `/health`，不验证 Google 登录、账号探测或真实生成。
+- 构建和冒烟测试只验证程序启动、配置生成、随机管理密码、嵌入式 Web 控制台和 `/health`，不验证 Google 登录、账号探测或真实生成。

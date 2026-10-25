@@ -99,20 +99,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       fonts-noto-cjk \
       fonts-noto-color-emoji \
-      libasound2t64 \
-      libatk-bridge2.0-0t64 \
-      libatk1.0-0t64 \
-      libcups2t64 \
-      libdrm2 \
-      libgbm1 \
-      libgtk-3-0t64 \
-      libnspr4 \
-      libnss3 \
-      libxcomposite1 \
-      libxdamage1 \
-      libxfixes3 \
-      libxkbcommon0 \
-      libxrandr2 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data
 

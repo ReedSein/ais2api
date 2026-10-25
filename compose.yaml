@@ -7,11 +7,14 @@ services:
     container_name: ais2api
     restart: unless-stopped
     stop_grace_period: 30s
+    # Listens on every host interface; use "127.0.0.1:18451:18451" for
+    # local-only access.
     ports:
       - "18451:18451"
     volumes:
       - ./data:/data
-    # Set a strong management password before exposing the port.
+    # The first start generates a random management password and prints it to
+    # the container log, unless AIS2API_ADMIN_KEY is set.
     # environment:
     #   AIS2API_ADMIN_KEY: "replace-with-a-long-random-value"
     #   TZ: "Asia/Shanghai"
