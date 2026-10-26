@@ -72,6 +72,8 @@ TEST_CASE("loading a partial configuration fills defaults, preserves values and 
     CHECK(persisted.at("search_model_drop_functions") == true);
     CHECK(persisted.at("browser_idle_seconds") == 0);
     CHECK(persisted.at("browser_proxy_relay") == false);
+    CHECK(persisted.at("browser_remote_allow_origins") == false);
+    CHECK(persisted.at("browser_site_isolation") == true);
     CHECK(persisted.at("port") == 19000);
     CHECK(persisted.at("data_dir") == "relative-data");
     CHECK(persisted.at("browser_executable") == "");

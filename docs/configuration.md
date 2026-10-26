@@ -45,6 +45,8 @@
 | `headless` | 布尔，`true` | 重启 | 是否以无界面模式运行浏览器。 |
 | `proxy` | 字符串，`""` | 重启 | 上游代理，同时用于浏览器和服务端下载。 |
 | `browser_proxy_relay` | 布尔，`false` | 重启 | 开启本机转发代理，让浏览器能使用带用户名密码的 HTTP 或 SOCKS5 代理，详见下文。 |
+| `browser_remote_allow_origins` | 布尔，`false` | 重启 | 以 `--remote-allow-origins=*` 启动浏览器，允许任意来源的网页连接本机 DevTools WebSocket。ais2api 自身不需要；仅供外部 CDP 工具使用，开启后本机浏览器中打开的网页也能尝试连接该端口。 |
+| `browser_site_isolation` | 布尔，`true` | 重启 | Chromium 站点隔离。设为 `false` 可在小内存主机上节省渲染进程内存，代价是不同站点不再分进程隔离。 |
 | `browser_idle_seconds` | `0` 或 10–86400，`0` | 热更新 | 连续空闲多少秒后关闭浏览器以释放内存；`0` 表示不关闭。 |
 
 ### 生成行为
@@ -84,6 +86,8 @@
 | `headless` | `AIS2API_HEADLESS` | `--headless=true\|false` |
 | `proxy` | `AIS2API_PROXY` | `--proxy URL` |
 | `browser_proxy_relay` | `AIS2API_BROWSER_PROXY_RELAY` | `--browser-proxy-relay=true\|false` |
+| `browser_remote_allow_origins` | `AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS` | — |
+| `browser_site_isolation` | `AIS2API_BROWSER_SITE_ISOLATION` | — |
 | `browser_idle_seconds` | `AIS2API_BROWSER_IDLE_SECONDS` | `--browser-idle-seconds N` |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
@@ -101,7 +105,7 @@
 
 ## 热更新与重启
 
-- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
+- **需要重启**的字段：`bind`、`port`、`data_dir`、`browser_executable`、`proxy`、`browser_proxy_relay`、`browser_remote_allow_origins`、`browser_site_isolation`、`headless`、`limits.generation_seconds`、`limits.stream_idle_seconds`、`limits.object_bytes`、`limits.relay_bytes`。
 - 其余字段都可热更新。热更新前会校验完整配置；校验失败时保留原配置。
 - `ais2api config reload` 重新读取配置文件和环境变量。存在需要重启的差异时返回 `restart_required`，不会只应用其中一部分。
 - 通过管理 API 或 WebUI 保存时，如果修改中包含需要重启的字段，整份配置会作为“待重启配置”保存到磁盘，当前进程继续使用原配置；之后的修改以待重启配置为基础叠加。详见 [管理 API](management-api.md#配置保存与重启)。

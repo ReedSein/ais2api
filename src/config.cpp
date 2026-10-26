@@ -145,6 +145,8 @@ json::object Config::to_json(bool portable_paths) const {
           {"browser_executable", stored_path(browser_executable, config_file, portable_paths)},
           {"proxy", proxy},
           {"browser_proxy_relay", browser_proxy_relay},
+          {"browser_remote_allow_origins", browser_remote_allow_origins},
+          {"browser_site_isolation", browser_site_isolation},
           {"headless", headless},
           {"ignore_unsupported_parameters", ignore_unsupported_parameters},
           {"search_model_drop_functions", search_model_drop_functions},
@@ -216,6 +218,8 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
   for (auto pair :
        {std::pair{"AIS2API_PORT", "port"}, {"AIS2API_HEADLESS", "headless"},
         {"AIS2API_BROWSER_PROXY_RELAY", "browser_proxy_relay"},
+        {"AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS", "browser_remote_allow_origins"},
+        {"AIS2API_BROWSER_SITE_ISOLATION", "browser_site_isolation"},
         {"AIS2API_IGNORE_UNSUPPORTED_PARAMETERS", "ignore_unsupported_parameters"},
         {"AIS2API_SEARCH_MODEL_DROP_FUNCTIONS", "search_model_drop_functions"},
         {"AIS2API_BROWSER_IDLE_SECONDS", "browser_idle_seconds"}}) {
@@ -282,7 +286,7 @@ Config Config::load(const fs::path &file, const json::object &overrides) {
 static Config parse_config(Config c, json::object o, bool explicit_browser) {
   fields(o, {"version", "bind", "port", "api_key", "admin_key", "admin_origins", "cookie_import_key",
              "cookie_import_max_accounts", "cookie_import_timeout_seconds", "data_dir", "browser_executable",
-             "proxy", "browser_proxy_relay", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
+             "proxy", "browser_proxy_relay", "browser_remote_allow_origins", "browser_site_isolation", "headless", "ignore_unsupported_parameters", "search_model_drop_functions", "browser_idle_seconds", "limits", "model_aliases",
              "configured_models", "model_defaults"});
   auto text = [&](const char *k) {
     if (!o.at(k).is_string())
@@ -321,6 +325,12 @@ static Config parse_config(Config c, json::object o, bool explicit_browser) {
   if (!o.at("browser_proxy_relay").is_bool())
     throw Error(400, "invalid_config", "browser_proxy_relay must be boolean");
   c.browser_proxy_relay = o.at("browser_proxy_relay").as_bool();
+  if (!o.at("browser_remote_allow_origins").is_bool())
+    throw Error(400, "invalid_config", "browser_remote_allow_origins must be boolean");
+  c.browser_remote_allow_origins = o.at("browser_remote_allow_origins").as_bool();
+  if (!o.at("browser_site_isolation").is_bool())
+    throw Error(400, "invalid_config", "browser_site_isolation must be boolean");
+  c.browser_site_isolation = o.at("browser_site_isolation").as_bool();
   if (!o.at("headless").is_bool())
     throw Error(400, "invalid_config", "headless must be boolean");
   c.headless = o.at("headless").as_bool();
@@ -383,6 +393,8 @@ bool restart_required(const Config& previous, const Config& next) {
   return next.bind != previous.bind || next.port != previous.port ||
     next.data_dir != previous.data_dir || next.browser_executable != previous.browser_executable ||
     next.proxy != previous.proxy || next.browser_proxy_relay != previous.browser_proxy_relay ||
+    next.browser_remote_allow_origins != previous.browser_remote_allow_origins ||
+    next.browser_site_isolation != previous.browser_site_isolation ||
     next.headless != previous.headless ||
     next.limits.generation_seconds != previous.limits.generation_seconds ||
     next.limits.stream_idle_seconds != previous.limits.stream_idle_seconds ||

@@ -139,6 +139,45 @@ json::array browser_detail::refreshed_cookies(const json::array& stored, const j
     }
     return result;
 }
+std::vector<std::string> browser_detail::launch_switches(const Config& config, bool no_zygote) {
+    // CloakBrowser in aarch64 containers needs the desktop runtime's launch
+    // profile: without it the zygote and GPU children can exit while CDP is
+    // connected, which the gateway reports as browser_disconnected.
+    std::vector<std::string> args{
+        "--in-process-gpu", "--use-gl=angle", "--use-angle=swiftshader", "--disable-setuid-sandbox",
+        "--disable-breakpad", "--mute-audio", "--disable-extensions",
+        "--disable-component-extensions-with-background-pages", "--disable-backgrounding-occluded-windows",
+        "--disable-ipc-flooding-protection", "--disable-sync", "--disable-speech-api",
+        "--disable-component-update", "--disable-default-apps"};
+    if (no_zygote) {
+        // Child processes enter the sandbox through the zygote, so dropping it
+        // also needs the sandbox off.
+        args.emplace_back("--no-zygote");
+        args.emplace_back("--no-sandbox");
+    }
+    if (config.headless) {
+        // Low-memory rendering only where nobody watches the window; a visible
+        // browser is used to troubleshoot sign-in and keeps normal rendering.
+        for (const auto* argument : {
+                 "--headless=new", "--hide-scrollbars", "--window-size=1280,800",
+                 "--disable-gpu-compositing", "--js-flags=--max-old-space-size=128 --optimize-for-size",
+                 "--media-cache-size=1", "--enable-low-end-device-mode", "--aggressive-cache-discard",
+                 "--disable-smooth-scrolling", "--disable-threaded-animation", "--disable-threaded-scrolling",
+                 "--disable-backing-store-limit"})
+            args.emplace_back(argument);
+    }
+    if (config.browser_remote_allow_origins) args.emplace_back("--remote-allow-origins=*");
+    // Chromium honours only the last --disable-features, so keep a single one.
+    std::string features = "Translate,OptimizationHints,MediaRouter,DialLocalDiscovery,PreloadMediaEngagementData,"
+        "CertificateTransparencyComponentUpdater,AudioServiceOutOfProcess,CalculateNativeWinOcclusion,"
+        "InterestFeedContentSuggestions,BackForwardCache";
+    if (!config.browser_site_isolation) {
+        args.emplace_back("--disable-site-isolation-trials");
+        features += ",SitePerProcess";
+    }
+    args.push_back("--disable-features=" + features);
+    return args;
+}
 namespace {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -505,26 +544,6 @@ struct BrowserGateway::Impl {
         profile = config.data_dir / "runtime" / ("browser-" + random_hex(12));
         secure_directory(profile);
         std::vector<std::string> args{"--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "--user-data-dir=" + path_utf8(fs::absolute(profile)), "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-dev-shm-usage", "--disable-gpu", "--renderer-process-limit=1"};
-        // CloakBrowser on aarch64 containers needs the same low-memory and
-        // zygote-free launch profile as the desktop runtime. Without these
-        // switches its zygote/GPU children can exit while CDP is connected,
-        // which the gateway reports as browser_disconnected.
-        for (const auto* argument : {
-                 "--remote-allow-origins=*", "--no-zygote", "--in-process-gpu",
-                 "--use-gl=angle", "--use-angle=swiftshader", "--disable-setuid-sandbox",
-                 "--disable-gpu-compositing", "--disable-breakpad", "--mute-audio",
-                 "--disable-site-isolation-trials",
-                 "--js-flags=--max-old-space-size=128 --expose-gc --optimize-for-size",
-                 "--media-cache-size=1", "--enable-low-end-device-mode",
-                 "--aggressive-cache-discard", "--disable-smooth-scrolling",
-                 "--disable-threaded-animation", "--disable-threaded-scrolling",
-                 "--disable-backing-store-limit", "--disable-extensions",
-                 "--disable-component-extensions-with-background-pages",
-                 "--disable-backgrounding-occluded-windows", "--disable-ipc-flooding-protection",
-                 "--disable-sync", "--disable-speech-api", "--disable-component-update",
-                 "--disable-default-apps",
-                 "--disable-features=Translate,OptimizationHints,MediaRouter,DialLocalDiscovery,PreloadMediaEngagementData,CertificateTransparencyComponentUpdater,SitePerProcess,AudioServiceOutOfProcess,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,BackForwardCache"})
-            args.emplace_back(argument);
         for (const auto& directory : {profile / "crash-dumps", profile / "disk-cache", profile / "logs"}) secure_directory(directory);
         args.push_back("--crash-dumps-dir=" + path_utf8(fs::absolute(profile / "crash-dumps")));
         args.push_back("--disk-cache-dir=" + path_utf8(fs::absolute(profile / "disk-cache")));
@@ -537,15 +556,14 @@ struct BrowserGateway::Impl {
         args.push_back("--enable-logging");
         args.push_back("--log-file=" + path_utf8(fs::absolute(config.data_dir / "logs" /
             (path_utf8(profile.filename()) + ".log"))));
-        if (config.headless) {
-            args.push_back("--headless=new");
-            args.push_back("--hide-scrollbars");
-            args.push_back("--window-size=1280,800");
-        }
+        bool no_zygote = false;
 #if !defined(_WIN32) && !defined(__APPLE__)
-        // proot's root user and Android cannot provide the Chromium sandbox.
-        if (std::getenv("TERMUX_VERSION") || geteuid() == 0) args.push_back("--no-sandbox");
+        // Only Linux has a zygote. CloakBrowser's zygote children can exit
+        // while CDP is connected; proot's root user and Android cannot provide
+        // the sandbox that needs it anyway.
+        no_zygote = true;
 #endif
+        for (auto& argument : browser_detail::launch_switches(config, no_zygote)) args.push_back(std::move(argument));
         if (!config.proxy.empty()) {
             const auto endpoint = parse_proxy(config.proxy);
             if (config.browser_proxy_relay) {

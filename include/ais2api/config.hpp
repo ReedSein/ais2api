@@ -39,6 +39,12 @@ struct Config {
     // (http:// or socks5://, with or without credentials). Without it the
     // browser uses `proxy` directly and cannot use one with credentials.
     bool browser_proxy_relay = false;
+    // Let pages of any origin open the browser's DevTools WebSocket. The
+    // gateway's own CDP client sends no Origin header and does not need it.
+    bool browser_remote_allow_origins = false;
+    // Chromium site isolation. Turning it off saves renderer memory on small
+    // hosts at the cost of cross-site process separation.
+    bool browser_site_isolation = true;
     bool headless = true;
     bool ignore_unsupported_parameters = false;
     // A `*-search` model request carrying function declarations either drops

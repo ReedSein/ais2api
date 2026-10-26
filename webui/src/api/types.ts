@@ -139,6 +139,8 @@ export interface Config {
   browser_executable?: string
   proxy?: string
   browser_proxy_relay?: boolean
+  browser_remote_allow_origins?: boolean
+  browser_site_isolation?: boolean
   headless?: boolean
   ignore_unsupported_parameters?: boolean
   search_model_drop_functions?: boolean

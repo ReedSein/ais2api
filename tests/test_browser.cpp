@@ -9,6 +9,7 @@
 #include "../browser/rpc_error.hpp"
 #include "../browser/google_auth.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <functional>
@@ -595,4 +596,48 @@ TEST_CASE("cookie injection drops volatile conflicting cookies but never the who
     CHECK(injected[0].as_object().at("secure").as_bool());
     // A state made only of these cookies is injected unchanged.
     CHECK(browser_detail::injected_cookies(json::array{stored[1], stored[3]}).size() == 2);
+}
+TEST_CASE("launch switches drop the sandbox with the zygote and keep a visible browser unthrottled", "[browser][launch]") {
+    const auto has = [](const std::vector<std::string>& args, std::string_view value) {
+        return std::find(args.begin(), args.end(), value) != args.end();
+    };
+    const auto features = [](const std::vector<std::string>& args) {
+        std::vector<std::string> found;
+        for (const auto& argument : args)
+            if (argument.starts_with("--disable-features=")) found.push_back(argument);
+        REQUIRE(found.size() == 1);
+        return found.front();
+    };
+    Config config;
+    auto args = browser_detail::launch_switches(config, false);
+    CHECK_FALSE(has(args, "--no-sandbox"));
+    CHECK_FALSE(has(args, "--no-zygote"));
+    CHECK(has(args, "--headless=new"));
+    CHECK(has(args, "--enable-low-end-device-mode"));
+    for (const auto& argument : args) CHECK(argument.find("--expose-gc") == std::string::npos);
+    // Opt-in switches stay off by default.
+    CHECK_FALSE(has(args, "--remote-allow-origins=*"));
+    CHECK_FALSE(has(args, "--disable-site-isolation-trials"));
+    CHECK(features(args).find("SitePerProcess") == std::string::npos);
+
+    args = browser_detail::launch_switches(config, true);
+    CHECK(has(args, "--no-sandbox"));
+    CHECK(has(args, "--no-zygote"));
+
+    config.headless = false;
+    args = browser_detail::launch_switches(config, false);
+    for (auto removed : {"--headless=new", "--hide-scrollbars", "--window-size=1280,800", "--disable-gpu-compositing",
+                         "--media-cache-size=1", "--enable-low-end-device-mode", "--aggressive-cache-discard",
+                         "--disable-smooth-scrolling", "--disable-threaded-animation", "--disable-threaded-scrolling",
+                         "--disable-backing-store-limit"})
+        CHECK_FALSE(has(args, removed));
+    CHECK(std::none_of(args.begin(), args.end(), [](const std::string& a) { return a.starts_with("--js-flags="); }));
+    CHECK(has(args, "--in-process-gpu"));
+
+    config.browser_remote_allow_origins = true;
+    config.browser_site_isolation = false;
+    args = browser_detail::launch_switches(config, false);
+    CHECK(has(args, "--remote-allow-origins=*"));
+    CHECK(has(args, "--disable-site-isolation-trials"));
+    CHECK(features(args).ends_with(",SitePerProcess"));
 }

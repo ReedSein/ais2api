@@ -58,6 +58,25 @@ TEST_CASE("unsupported parameter compatibility config persists and updates witho
     }
     CHECK(json::parse(read_file(cfg.config_file)).as_object().at("ignore_unsupported_parameters") == true);
 }
+TEST_CASE("browser DevTools origins and site isolation keep Chromium defaults and need a restart", "[config][admin][browser]") {
+    AdminDirectory dir;
+    auto cfg = Config::load(dir.path / "config.json");
+    CHECK_FALSE(cfg.browser_remote_allow_origins);
+    CHECK(cfg.browser_site_isolation);
+    CHECK(cfg.to_json().at("browser_remote_allow_origins") == false);
+    CHECK(cfg.to_json().at("browser_site_isolation") == true);
+    auto relaxed = cfg.patched({{"browser_remote_allow_origins", true}});
+    CHECK(relaxed.browser_remote_allow_origins);
+    CHECK(restart_required(cfg, relaxed));
+    auto shared = cfg.patched({{"browser_site_isolation", false}});
+    CHECK_FALSE(shared.browser_site_isolation);
+    CHECK(restart_required(cfg, shared));
+    shared.save();
+    CHECK_FALSE(Config::load(cfg.config_file).browser_site_isolation);
+    for (const auto& invalid : json::array{0, 1, "true", nullptr})
+        for (auto key : {"browser_remote_allow_origins", "browser_site_isolation"})
+            CHECK_THROWS_AS(cfg.patched({{key, invalid}}), Error);
+}
 TEST_CASE("search model function policy defaults to dropping functions and updates without restart", "[config][admin][search-model]") {
     AdminDirectory dir;
     auto cfg = Config::load(dir.path / "config.json");

@@ -7,6 +7,7 @@
 #pragma once
 #include "backend.hpp"
 #include <memory>
+#include <vector>
 namespace ais2api {
 namespace browser_detail {
 std::string_view embedded_bridge_source();
@@ -27,6 +28,10 @@ json::array refreshed_cookies(const json::array &stored, const json::array &brow
 // proxy_failed when the proxy is at fault, 502 network_failed when Google is
 // unreachable. Nothing for other outcomes, such as a superseded navigation.
 std::optional<Error> navigation_failure(std::string_view error_text, bool proxy_configured);
+// Chromium switches that depend on the configuration rather than on the
+// launch's own profile, proxy and fingerprint. `no_zygote` launches without
+// the zygote, and therefore without the sandbox that depends on it.
+std::vector<std::string> launch_switches(const Config &config, bool no_zygote);
 }
 class BrowserGateway final : public GenerationBackend {
   public:

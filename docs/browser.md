@@ -136,6 +136,7 @@ fetch 与 XHR 两种捕获方式都支持。页面内部结构变化时报告 `b
 
 - `browser_idle_seconds` 大于 0 时，工作线程在队列空闲到期后先写回 Cookie 再关闭浏览器，诊断状态为 `idle_closed`，日志事件为 `browser_idle_released`；之后在有新任务前不会再次尝试。
 - `browser_proxy_relay` 开启时，浏览器只连接本机转发代理，由 ais2api 向上游 HTTP 或 SOCKS5 代理认证。隧道建立阶段超时 20 秒，最多 128 条隧道。诊断中的 `proxy.mode`（`none`、`direct` 或 `relay`）与 `proxy.relayError` 显示当前状态。配置方法见 [配置参考](configuration.md#使用带账号密码的代理)。
+- 浏览器启动参数沿用桌面版的配置（单 GPU 进程、SwiftShader 等），以便 CloakBrowser 在容器内稳定运行。仅在无界面模式下额外加入低内存渲染参数（V8 堆上限 128 MiB、低端设备模式等）；显示窗口时保持正常渲染，便于排查登录。Linux 上始终以 `--no-zygote` 启动，并同时加入 `--no-sandbox`（沙箱依赖 zygote），非 root 用户也不例外；Windows 与 macOS 没有 zygote，两者都不加入。`--remote-allow-origins=*` 与关闭站点隔离分别由 `browser_remote_allow_origins`、`browser_site_isolation` 控制，默认不启用。
 - 页面导航失败时会检查 `errorText`：代理类错误报 `502 proxy_failed`，无法连接 Google 报 `502 network_failed`，不会再等满超时后冷却账号。
 
 ## 验证边界
