@@ -31,6 +31,12 @@ struct ModelCatalog {
     json::array models;
     std::int64_t saved_at = 0;
 };
+struct RequestQuery {
+    bool cumulative = false;
+    std::int64_t from = 0, to = 0, before = 0, snapshot = 0;
+    unsigned limit = 50;
+    std::string model, account, status, id;
+};
 class Store {
 public:
     explicit Store(const fs::path& directory);
@@ -74,8 +80,19 @@ public:
     std::optional<Account> choose(std::string_view model, const std::vector<std::string>& excluded = {},
                                   bool auth_probe = false);
     void failure(std::string_view account, std::string_view model, std::string_view kind, unsigned retry_seconds = 0);
-    void success(std::string_view account, std::string_view model, const json::object& usage);
-    json::object stats();
+    void success(std::string_view account, std::string_view model);
+    json::object stats(const std::optional<RequestQuery> &query = std::nullopt);
+    void begin_request(const json::object &record);
+    // Terminal updates and lifetime aggregates commit together, exactly once.
+    void save_request(const json::object &record, bool terminal);
+    json::object requests(const RequestQuery &query);
+    json::object request(std::string_view id);
+    void recover_requests();
+    void prune_requests(std::int64_t before);
+    json::object price_sources();
+    void save_price_source(std::string_view source, const json::object &catalog,
+                           std::int64_t fetched_at, std::string_view error = {});
+    json::object price_quote(std::string_view model);
     json::array account_status();
     json::object create_key(std::string name);
     json::array keys();

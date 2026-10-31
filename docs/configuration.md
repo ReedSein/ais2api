@@ -48,6 +48,7 @@
 | `browser_remote_allow_origins` | 布尔，`false` | 重启 | 以 `--remote-allow-origins=*` 启动浏览器，允许任意来源的网页连接本机 DevTools WebSocket。ais2api 自身不需要；仅供外部 CDP 工具使用，开启后本机浏览器中打开的网页也能尝试连接该端口。 |
 | `browser_site_isolation` | 布尔，`true` | 重启 | Chromium 站点隔离。设为 `false` 可在小内存主机上节省渲染进程内存，代价是不同站点不再分进程隔离。 |
 | `browser_idle_seconds` | `0` 或 10–86400，`0` | 热更新 | 连续空闲多少秒后关闭浏览器以释放内存；`0` 表示不关闭。 |
+| `request_retention_days` | 1–3650，`90` | 热更新 | 已结束请求明细的保存天数；后台分批清理，累计用量和费用继续保留。 |
 
 ### 生成行为
 
@@ -89,6 +90,7 @@
 | `browser_remote_allow_origins` | `AIS2API_BROWSER_REMOTE_ALLOW_ORIGINS` | — |
 | `browser_site_isolation` | `AIS2API_BROWSER_SITE_ISOLATION` | — |
 | `browser_idle_seconds` | `AIS2API_BROWSER_IDLE_SECONDS` | `--browser-idle-seconds N` |
+| `request_retention_days` | `AIS2API_REQUEST_RETENTION_DAYS` | — |
 | `ignore_unsupported_parameters` | `AIS2API_IGNORE_UNSUPPORTED_PARAMETERS` | — |
 | `search_model_drop_functions` | `AIS2API_SEARCH_MODEL_DROP_FUNCTIONS` | — |
 | `model_aliases` | `AIS2API_MODEL_ALIASES`（JSON） | — |

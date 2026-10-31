@@ -13,6 +13,8 @@
 #include "ais2api/log_sources.hpp"
 #include "ais2api/responses.hpp"
 #include "ais2api/webui.hpp"
+#include "ais2api/usage.hpp"
+#include "ais2api/price_service.hpp"
 #include <charconv>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -39,11 +41,12 @@ struct ConnectionSlot {
 };
 struct Work {
     Protocol protocol = Protocol::gemini;
-    std::string model, principal, id = "chatcmpl-" + random_hex(12);
+    std::string model, principal;
     bool stream = false, include_usage = false, responses = false;
     std::size_t input_bytes = 0;
     json::object body, response_options;
     std::shared_ptr<EventPipe> pipe;
+    std::shared_ptr<RequestUsage> usage;
     std::shared_ptr<net::steady_timer> wakeup;
     Clock::time_point queued = Clock::now();
 };
@@ -76,9 +79,10 @@ class Service {
   public:
     explicit Service(Config config, std::unique_ptr<GenerationBackend> backend)
         : config_(std::move(config)), journal_(config_.data_dir), store_(config_.data_dir),
+          prices_(store_, [this] { return this->config(); }, !backend),
           gateway_(backend ? std::move(backend)
                            : std::make_unique<BrowserGateway>(config_, store_)),
-          worker_([this](std::stop_token token) { work_loop(token); }) {}
+          worker_([this](std::stop_token token) { work_loop(token); }) { store_.recover_requests(); }
     ~Service() { shutdown(); log_writer_.join(); }
     void shutdown() {
         stop();
@@ -87,12 +91,18 @@ class Service {
         if (worker_.joinable())
             worker_.join();
         gateway_->close();
+        prices_.stop();
     }
     Config config() {
         std::lock_guard lock(config_mutex_);
         return config_;
     }
     Store &store() { return store_; }
+    PriceService &prices() { return prices_; }
+    void usage_failure(std::string_view id) {
+        usage_healthy_ = false;
+        log({{"event", "request_history_error"}, {"request_id", id}, {"code", "request_history_write_failed"}});
+    }
     std::optional<std::string> authenticate_generation(std::string_view token) {
         if (auto principal = config().authenticate(token)) return principal;
         return store_.authenticate_managed(token);
@@ -149,12 +159,14 @@ class Service {
                               if (auto pending = weak.lock())
                                   generate(pending);
                           },
-                          [weak] {
+                          [this, weak] {
                               auto work = weak.lock();
                               if (!work)
                                   return;
                               work->pipe->cancel();
                               work->pipe->finish(Error(503, "stopping", "Service is stopping"));
+                              try { work->usage->producer_done("stopping"); }
+                              catch (const std::exception &) { usage_failure(work->usage->id()); }
                           }});
         available_.notify_one();
         return true;
@@ -188,6 +200,7 @@ class Service {
             return {{"running", true},
                     {"version", "0.1.0"},
                     {"logging_healthy", logging_healthy_.load()},
+                    {"usage_healthy", usage_healthy_.load()},
                     {"pending_logs", pending_logs_.load()},
                     {"uptime_seconds", std::chrono::duration_cast<std::chrono::seconds>(Clock::now()-started_).count()},
                     {"active", bool(active_)},
@@ -386,6 +399,8 @@ class Service {
     std::vector<json::object> log_queue_;
     std::atomic<bool> logging_healthy_{true};
     Store store_;
+    PriceService prices_;
+    std::atomic<bool> usage_healthy_{true};
     std::unique_ptr<GenerationBackend> gateway_;
     std::mutex queue_mutex_, operations_mutex_;
     std::condition_variable available_;
@@ -576,6 +591,7 @@ class Service {
             }
     }
     void generate(const std::shared_ptr<Work> &work) {
+        if (!work->usage->start()) return;
         auto cfg = config();
         auto token = work->pipe->cancellation.get_token();
         struct Trace {
@@ -590,7 +606,7 @@ class Service {
                 try {
                     // Only wire locations are logged, never their content.
                     if (!upstream_ignored.empty())
-                        service.log({{"event", "upstream_fields_ignored"}, {"request_id", work.id},
+                        service.log({{"event", "upstream_fields_ignored"}, {"request_id", work.usage->id()},
                                      {"locations", upstream_ignored}});
                     auto elapsed = [](auto begin, auto end) {
                         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin)
@@ -598,7 +614,7 @@ class Service {
                     };
                     service.log(json::object{
                                      {"event", "generation"},
-                                     {"request_id", work.id},
+                                     {"request_id", work.usage->id()},
                                      {"model", work.model},
                                      {"stream", work.stream},
                                      {"queue_ms", elapsed(work.queued, start)},
@@ -647,8 +663,9 @@ class Service {
             request.principal = work->principal;
             work->model = request.model;
             work->include_usage = request.include_usage;
+            work->usage->normalized(request.model, request.gemini);
             if (!request.ignored_parameters.empty())
-                log({{"event", "generation_parameters_ignored"}, {"request_id", work->id},
+                log({{"event", "generation_parameters_ignored"}, {"request_id", work->usage->id()},
                      {"parameters", request.ignored_parameters},
                      {"reason", "No verified private upstream mapping"}});
             trace.normalized = Clock::now();
@@ -670,9 +687,9 @@ class Service {
                                 "No usable account for this model; import or reset credentials "
                                 "with the CLI");
                 }
-                json::object usage;
+                work->usage->begin_attempt(account->id);
                 { std::lock_guard lock(queue_mutex_); active_account_id_ = account->id; }
-                log({{"event", "generation_attempt"}, {"request_id", work->id},
+                log({{"event", "generation_attempt"}, {"request_id", work->usage->id()},
                     {"account_id", account->id}, {"attempt", attempt+1}});
                 try {
                     bool received = false;
@@ -680,6 +697,7 @@ class Service {
                     gateway_->generate(
                         request, *account,
                         [&](json::object event) {
+                            work->usage->event(event, has_content(event));
                             check_cancel(token);
                             for (auto &location : take_upstream_ignored(event))
                                 if (std::find(trace.upstream_ignored.begin(), trace.upstream_ignored.end(), location) ==
@@ -688,8 +706,6 @@ class Service {
                             if (event.empty())
                                 return;
                             received = true;
-                            if (auto p = event.if_contains("usageMetadata"); p && p->is_object())
-                                usage = p->as_object();
                             if (has_content(event))
                                 delivered = true;
                             if (auto candidates = event.if_contains("candidates"); candidates && candidates->is_array())
@@ -712,10 +728,13 @@ class Service {
                                     "Upstream returned no generation events");
                     if (!completed)
                         throw Error(502, "incomplete_upstream", "Upstream response ended without a finish reason");
-                    store_.success(account->id, request.model, usage);
+                    store_.success(account->id, request.model);
+                    work->usage->end_attempt();
+                    work->usage->producer_done();
                     work->pipe->finish();
                     return;
                 } catch (const Error &e) {
+                    work->usage->end_attempt(e.code);
                     if (token.stop_requested() || delivered)
                         throw;
                     const bool last = attempt + 1 == cfg.limits.max_attempts;
@@ -745,7 +764,7 @@ class Service {
                         if (last) throw;
                         // The page captures a new template on the next attempt;
                         // the request keeps its single session recovery.
-                        log({{"event", "template_refresh"}, {"request_id", work->id},
+                        log({{"event", "template_refresh"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"code", e.code}});
                         gateway_->clear_template();
                         retry_account = account;
@@ -754,7 +773,7 @@ class Service {
                     case FailureAction::restart_browser: {
                         recovered = true;
                         const bool rebuild = decision.action == FailureAction::rebuild_session;
-                        log({{"event", "session_recovery"}, {"request_id", work->id},
+                        log({{"event", "session_recovery"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"code", e.code},
                              {"action", rebuild ? "rebuild_session" : "restart_browser"}});
                         if (rebuild) gateway_->reset_session();
@@ -764,7 +783,7 @@ class Service {
                     }
                     case FailureAction::cool_and_switch:
                         store_.failure(account->id, request.model, decision.cooldown, e.retry_after);
-                        log({{"event", "account_failure"}, {"request_id", work->id},
+                        log({{"event", "account_failure"}, {"request_id", work->usage->id()},
                              {"account_id", account->id}, {"kind", decision.cooldown}, {"code", e.code}});
                         previous = e;
                         excluded.push_back(account->id);
@@ -782,16 +801,20 @@ class Service {
                 // Only stable diagnostics, never raw CDP exceptions or page data.
                 try {
                     auto diagnostics = gateway_->diagnostics();
-                    json::object record{{"event", "browser_failure"}, {"request_id", work->id}, {"code", e.code}};
+                    json::object record{{"event", "browser_failure"}, {"request_id", work->usage->id()}, {"code", e.code}};
                     for (auto key : {"phase", "bridgeSource", "bridgeSha256", "status", "templateCaptured"})
                         if (auto value = diagnostics.if_contains(key)) record[key] = *value;
                     log(std::move(record));
                 } catch (...) {}
             }
             work->pipe->finish(e);
+            try { work->usage->producer_done(e.code); }
+            catch (const std::exception &) { usage_failure(work->usage->id()); }
         } catch (const std::exception &) {
             trace.error = "internal";
             work->pipe->finish(Error(500, "internal", "Generation failed internally"));
+            try { work->usage->producer_done("internal"); }
+            catch (const std::exception &) { usage_failure(work->usage->id()); }
         }
     }
 };
@@ -950,6 +973,7 @@ struct ConnectionState {
     unsigned response_status = 200;
     std::string origin, category = "http";
     std::unique_ptr<ResponsesStream> responses_stream;
+    std::shared_ptr<RequestUsage> usage;
 };
 std::map<std::string, std::string> query_parameters(std::string_view target) {
     std::map<std::string, std::string> result;
@@ -1117,6 +1141,38 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
             {"retention", "until_explicit_local_deletion"}, {"poll_ms", 200}}}};
     else if (get && path == "/status") command = {{"command", "status"}};
     else if (get && path == "/stats") command = {{"command", "stats"}};
+    else if (get && (path == "/usage/requests" || path == "/usage/summary")) {
+        if (path == "/usage/summary" && (query.contains("before") || query.contains("snapshot") || query.contains("limit")))
+            throw Error(400, "invalid_request_query", "Summary queries do not accept pagination");
+        for (auto &[key, value] : query)
+            if (key != "from" && key != "to" && key != "before" && key != "snapshot" && key != "limit" &&
+                key != "model" && key != "account" && key != "status" && key != "id" && !(path == "/usage/summary" && key == "scope"))
+                throw Error(400, "invalid_request_query", "Unknown request history filter");
+        auto number = [&](const char *key) -> std::int64_t {
+            auto text = parameter(key, "0");
+            std::int64_t value = 0;
+            auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+            if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || value < 0)
+                throw Error(400, "invalid_request_query", "Request history timestamps and cursors must be nonnegative integers");
+            return value;
+        };
+        RequestQuery filter;
+        auto scope = parameter("scope");
+        if (!scope.empty() && scope != "lifetime" && scope != "filtered")
+            throw Error(400, "invalid_request_query", "scope must be lifetime or filtered");
+        filter.cumulative = scope == "lifetime";
+        filter.from = number("from"); filter.to = number("to"); filter.before = number("before"); filter.snapshot = number("snapshot");
+        filter.limit = static_cast<unsigned>(limit); filter.model = parameter("model"); filter.account = parameter("account");
+        filter.status = parameter("status"); filter.id = parameter("id");
+        result = path == "/usage/requests" ? service.store().requests(filter)
+            : service.store().stats(query.empty() ? std::nullopt : std::optional<RequestQuery>(filter));
+    }
+    else if (get && path.starts_with("/usage/requests/")) result = service.store().request(decode_url(path.substr(16)));
+    else if (get && path == "/pricing") result = service.prices().status();
+    else if (post && path == "/pricing/refresh") {
+        if (!admin_body(request).empty()) throw Error(400, "invalid_price_refresh", "Price refresh takes an empty object");
+        service.prices().refresh(); result = service.prices().status(); status = 202;
+    }
     else if (method == http::verb::delete_ && path == "/stats") command = {{"command", "stats.reset"}};
     else if (get && path == "/accounts") command = {{"command", "accounts.list"}};
     else if (get && path == "/accounts/active") {
@@ -1443,6 +1499,9 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
                                : json::object{{"models", std::move(list)}});
         co_return;
     }
+    state.usage = std::make_shared<RequestUsage>(service.store(),
+        responses ? "resp_" + random_hex(16) : "chatcmpl-" + random_hex(12),
+        responses ? "responses" : openai ? "chat_completions" : "gemini");
     auto content_type = request[http::field::content_type];
     if (!json_content_type(content_type))
         throw Error(415, "content_type", "Content-Type must be application/json");
@@ -1453,16 +1512,17 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         throw Error(400, "invalid_json", "Request body must be a JSON object");
     std::string().swap(request.body());
     auto work = std::make_shared<Work>();
+    work->usage = state.usage;
     work->input_bytes = input_bytes;
     work->protocol = (openai || responses) ? Protocol::openai : Protocol::gemini;
     work->responses = responses;
-    if (responses) work->id = "resp_" + random_hex(16);
     work->principal = *principal;
     work->body = std::move(value.as_object());
     work->stream =
         (openai || responses) ? bool_or(work->body, "stream") : path.ends_with(":streamGenerateContent");
     work->model =
         (openai || responses) ? string_or(work->body, "model") : decode_url(path.substr(15, path.find(':') - 15));
+    work->usage->configure(work->model, work->stream);
     work->pipe = std::make_shared<EventPipe>(cfg.limits.object_bytes);
     auto executor = co_await net::this_coro::executor;
     work->wakeup = std::make_shared<net::steady_timer>(executor);
@@ -1500,9 +1560,9 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
             merge_event(aggregate, *event, cfg.limits.object_bytes, &aggregate_bound);
             work->pipe->acknowledge();
         }
-        auto output = responses ? responses_response(aggregate, work->model, work->id,
+        auto output = responses ? responses_response(aggregate, work->model, work->usage->id(),
                                                      work->response_options, &service.store(), work->principal)
-                      : openai ? openai_response(aggregate, work->model, work->id, &service.store(),
+                      : openai ? openai_response(aggregate, work->model, work->usage->id(), &service.store(),
                                                work->principal)
                              : aggregate;
         co_await send_json(stream, 200, output);
@@ -1513,7 +1573,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         throw Error(502, "empty_upstream", "Upstream returned no content");
     if (responses)
         state.responses_stream = std::make_unique<ResponsesStream>(
-            work->model, work->id, work->response_options, cfg.limits.object_bytes,
+            work->model, work->usage->id(), work->response_options, cfg.limits.object_bytes,
             &service.store(), work->principal);
     http::response<http::empty_body> response(http::status::ok, 11);
     response.set(http::field::content_type, "text/event-stream");
@@ -1544,7 +1604,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     std::set<std::int64_t> roles_sent;
     while (event) {
         auto output =
-            openai ? openai_delta(*event, work->model, work->id, &service.store(), work->principal)
+            openai ? openai_delta(*event, work->model, work->usage->id(), &service.store(), work->principal)
                    : *event;
         if (openai) {
             output["created"] = created;
@@ -1565,7 +1625,7 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
         event = co_await next_event(work, cfg.limits.queue_seconds);
     }
     if (openai && work->include_usage && final_usage) {
-        json::object usage_chunk{{"id", work->id},           {"object", "chat.completion.chunk"},
+        json::object usage_chunk{{"id", work->usage->id()},           {"object", "chat.completion.chunk"},
                                  {"created", created},       {"model", work->model},
                                  {"choices", json::array{}}, {"usage", std::move(*final_usage)}};
         co_await json_sse(stream, usage_chunk, cfg.limits.relay_bytes);
@@ -1581,15 +1641,19 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
     beast::tcp_stream stream(std::move(socket));
     ConnectionState state;
     std::optional<Error> error;
+    bool delivered = true;
     try {
         co_await handle(stream, service, state);
     } catch (const Error &e) {
         error = e;
     } catch (const boost::system::system_error &e) {
+        delivered = false;
         if (e.code() == http::error::body_limit)
             error = Error(413, "request_limit", "Request exceeds configured size limit");
         else if (e.code() == beast::error::timeout)
             error = Error(504, "network_timeout", "HTTP I/O timed out");
+        else if (state.usage)
+            error = Error(499, "client_disconnected", "Client disconnected");
     } catch (const std::exception &) {
         error = Error(500, "internal", "Request failed internally");
     }
@@ -1605,8 +1669,12 @@ net::awaitable<void> connection(tcp::socket socket, Service &service,
             } else if (error->status != 499)
                 co_await send_json(stream, static_cast<unsigned>(error->status),
                                    error_json(*error, state.openai), state.origin);
-        } catch (...) {
-        }
+        } catch (...) { delivered = false; }
+    }
+    if (state.usage) {
+        try { state.usage->http_done(error && !state.committed ? error->status : state.response_status,
+                                   error ? error->code : "", delivered && (!error || error->status != 499)); }
+        catch (const std::exception &) { service.usage_failure(state.usage->id()); }
     }
     if (state.audit) {
         try { service.log({{"event", "http_request"}, {"category", state.category},
