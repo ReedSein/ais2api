@@ -163,7 +163,7 @@ public:
         emit(finished);
     }
 
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account& account, std::stop_token cancel = {}) override {
         check_cancel(cancel);
         {

@@ -76,8 +76,14 @@ curl -X PATCH -H "Authorization: Bearer $AIS2API_ADMIN_KEY" \
 | GET | `/rotation` | 轮换与首选状态 |
 | POST | `/rotation/next` | 切换到下一个账号（不代表浏览器已就绪） |
 | POST | `/rotation/clear-cooldown` | 清除冷却；必填 `id`，可选精确匹配的 `model` |
-| GET | `/models` | 缓存的模型信息 |
-| POST | `/models/refresh` | 通过浏览器重新发现模型 |
+| GET | `/models` | 读取本地保存的模型信息，不启动浏览器 |
+| POST | `/models/refresh` | 通过浏览器重新发现，成功后整份保存 |
+
+`GET /models` 返回 `models`、`source`（`saved`、`configured` 或 `none`）、`account_id`（账号不存在时为 `null`）以及 `saved_at`（Unix 秒，未保存时为 `null`）。模型对象中的 `source` 同样标明 `saved` 或 `configured`。
+
+读取按当前账号、首选账号、首个账号的顺序选择一个账号，过期或冷却不会删除其保存记录；不会借用另一账号的结果。当前账号无保存结果时才使用 `configured_models`。OpenAI/Gemini 客户端的模型列表和详情也读取这份本地清单，首次为空时可在管理页面执行实时发现。
+
+刷新使用同一账号并强制重新访问上游，继续返回 HTTP 202，通过操作接口轮询。只有校验及数据库保存均成功时，操作才标为 `done`，其 `result` 与模型列表使用相同字段。无账号或账号被禁用、发现失败、无有效模型的异常结果以及保存失败均报告操作失败，旧清单与保存时间保持不变。删除账号同时删除该账号的清单。已保存不等于当前调用权限已验证。
 
 ### 密钥
 

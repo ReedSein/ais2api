@@ -22,7 +22,7 @@ struct ImportBackend : GenerationBackend {
     bool expand_state = false;
     std::string failure_code = "secret";
     void generate(const Request &, const Account &, const EventSink &, std::stop_token) override {}
-    json::array models(std::stop_token = {}) override { return {}; }
+    json::array models(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe(const Account &, std::stop_token = {}) override { return {}; }
     json::object probe_import(Account &a, std::stop_token token = {}) override {
         check_cancel(token);

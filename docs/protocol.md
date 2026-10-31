@@ -20,8 +20,9 @@
 
 模型发现与生成引导相互独立：等待所选账号身份确认后，捕获页面真实的 ListModels 请求（fetch 或 XHR），重放前检查账号槽位。它不需要提示词编辑器、Run 按钮、生成模板或快照服务。
 
-- 实时结果来源为 `live`；成功结果按账号缓存 10 分钟（`cache`）。
-- 没有可用账号或发现失败时，可以返回显式配置的 `configured_models`（`configured`）。
+- 手动刷新每次重新请求上游；校验并完整保存后返回 `saved`，记录按账号持久保留，不随浏览器退出或服务重启消失。
+- `/v1/models`、`/v1beta/models` 及模型详情读取本地清单，不启动浏览器或排队发现。当前账号无保存记录时返回显式配置的 `configured_models`（`configured`），二者都没有时返回空列表。
+- 读取和刷新使用当前账号，其次是首选账号，均不存在时使用第一个账号。刷新失败或保存失败明确报告错误并保留旧结果，备用配置不作为发现结果保存。
 - 页面身份缺失或不明确，与“确认是另一个账号”是两种情况，都不允许跨账号复用结果。
 - 不会虚构模型目录或 API Key。
 
@@ -116,7 +117,7 @@
 - **有函数声明**：上游不允许 Google 搜索与自定义函数同时使用。`search_model_drop_functions` 为 `true`（默认）时，舍弃函数声明、加入搜索，并把 `tools.functionDeclarations` 与非 NONE 的 `toolConfig.functionCallingConfig` 记为忽略参数；为 `false` 时保留调用方的工具不变，不加入搜索。
 - `functionCallingConfig.mode: NONE` 仍会禁用包括搜索在内的所有工具。
 
-不带后缀的 id 不会默认搜索，除非请求自己声明。模型列表（`/v1/models`、`/v1beta/models` 及其详情路由）会在每个支持 generateContent 的 Gemini、Gemma 和图片模型（不含 embedding 与 TTS 模型）之后追加 `<id>-search` 条目，`source` 为 `search_variant`；Gemini 列表的 displayName 追加 ` (Search)`。真实模型 id 不会被覆盖。管理控制台的模型页只显示发现缓存。
+不带后缀的 id 不会默认搜索，除非请求自己声明。模型列表（`/v1/models`、`/v1beta/models` 及其详情路由）会在每个支持 generateContent 的 Gemini、Gemma 和图片模型（不含 embedding 与 TTS 模型）之后追加 `<id>-search` 条目，`source` 为 `search_variant`；Gemini 列表的 displayName 追加 ` (Search)`。真实模型 id 不会被覆盖。管理控制台的模型页只显示保存的发现结果或备用配置。
 
 Chat Completions 的 `web_search_options` 对所请求的模型应用同样的规则。`search_context_size`（low/medium/high）、`user_location`（`{"type":"approximate","approximate":{city,country,region,timezone}}`）与 `filters.allowed_domains` 会校验格式并记为忽略参数，没有经过验证的私有字段可映射。Responses 的 `web_search` / `web_search_preview` 工具（每个请求一个）会转换为这些选项，扁平的位置字段转换为 Chat 的嵌套格式；用 `tool_choice` 指定网页搜索仍不支持。由于不返回搜索来源，Responses 不输出 `web_search_call` 项。
 

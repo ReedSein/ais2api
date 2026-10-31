@@ -12,6 +12,7 @@
 #include <deque>
 #include <future>
 #include <limits>
+#include <set>
 #include <sqlite3.h>
 #include <sstream>
 #include <thread>
@@ -59,6 +60,53 @@ void exec(sqlite3 *db, const char *sql) {
         sqlite3_free(error);
         throw Error(500, "database", s);
     }
+}
+json::array discovered_models(json::array values) {
+    auto invalid = [] {
+        throw Error(502, "model_discovery_invalid",
+                    "Model discovery returned an invalid or empty list");
+    };
+    if (values.empty() || json::serialize(values).size() > 1024 * 1024)
+        invalid();
+    std::set<std::string> ids;
+    for (auto &value : values) {
+        if (!value.is_object())
+            invalid();
+        auto &item = value.as_object();
+        for (auto key : {"id", "name"})
+            if (auto field = item.if_contains(key); field && !field->is_string())
+                invalid();
+        const auto name = string_or(item, "name");
+        auto id = string_or(item, "id");
+        if (id.empty() && name.starts_with("models/"))
+            id = name.substr(7);
+        if (id.empty() || id.size() > 512 ||
+            id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") !=
+                std::string::npos ||
+            (!name.empty() && name != "models/" + id) || !ids.insert(id).second)
+            invalid();
+        if (auto source = item.if_contains("source");
+            source && (!source->is_string() || source->as_string() != "live"))
+            invalid();
+        for (auto key : {"displayName", "description"})
+            if (auto field = item.if_contains(key); field && !field->is_string())
+                invalid();
+        for (auto key : {"inputTokenLimit", "outputTokenLimit"})
+            if (auto field = item.if_contains(key);
+                field && !field->is_uint64() && !(field->is_int64() && field->as_int64() >= 0))
+                invalid();
+        if (auto methods = item.if_contains("supportedGenerationMethods")) {
+            if (!methods->is_array())
+                invalid();
+            for (auto &method : methods->as_array())
+                if (!method.is_string())
+                    invalid();
+        }
+        item["id"] = id;
+        item["name"] = "models/" + id;
+        item["source"] = "saved";
+    }
+    return values;
 }
 Account decode(Statement &s) {
     Account a;
@@ -384,6 +432,8 @@ struct Store::Impl {
                          "accounts(id) ON DELETE CASCADE,seed INTEGER NOT NULL,timezone TEXT NOT NULL "
                          "DEFAULT '',locale TEXT NOT NULL DEFAULT '');INSERT OR IGNORE INTO "
                          "fingerprints(account,seed) SELECT id,10000+abs(random()%90000) FROM accounts");
+                exec(db, "CREATE TABLE IF NOT EXISTS model_catalog(account TEXT PRIMARY KEY REFERENCES "
+                         "accounts(id) ON DELETE CASCADE,models TEXT NOT NULL,saved_at INTEGER NOT NULL)");
                 ready.set_value();
             } catch (...) {
                 ready.set_exception(std::current_exception());
@@ -740,6 +790,38 @@ std::optional<Account> Store::choose(std::string_view model,
             probed.row();
         }
         return a;
+    });
+}
+ModelCatalog Store::model_catalog() {
+    return impl_->run([&] {
+        ModelCatalog result;
+        Statement row(impl_->db,
+            "SELECT a.id,m.models,m.saved_at FROM accounts a LEFT JOIN model_catalog m ON m.account=a.id "
+            "ORDER BY (a.id=(SELECT v FROM settings WHERE k='current')) DESC,"
+            "(a.id=(SELECT v FROM settings WHERE k='selected')) DESC,a.rowid LIMIT 1");
+        if (row.row()) {
+            result.account_id = row.str(0);
+            auto models = row.str(1);
+            if (!models.empty()) {
+                result.models = json::parse(models).as_array();
+                result.saved_at = sqlite3_column_int64(row.p, 2);
+            }
+        }
+        return result;
+    });
+}
+ModelCatalog Store::save_models(std::string_view account_id, json::array models) {
+    auto values = discovered_models(std::move(models));
+    return impl_->run([&] {
+        const auto saved_at = unix_seconds();
+        // One statement replaces the entire snapshot in an implicit transaction.
+        Statement save(impl_->db, "INSERT INTO model_catalog(account,models,saved_at) VALUES(?,?,?) "
+                                 "ON CONFLICT(account) DO UPDATE SET models=excluded.models,saved_at=excluded.saved_at");
+        save.text(1, account_id);
+        save.text(2, json::serialize(values));
+        save.integer(3, saved_at);
+        save.row();
+        return ModelCatalog{std::string(account_id), std::move(values), saved_at};
     });
 }
 json::object Store::rotation_status() {

@@ -87,6 +87,13 @@ export interface Model {
   [key: string]: unknown
 }
 
+export interface ModelCatalog {
+  models: Model[]
+  source: 'saved' | 'configured' | 'none'
+  account_id: string | null
+  saved_at: number | null
+}
+
 export interface StatRecord {
   account: string
   model: string
@@ -205,7 +212,7 @@ export interface BrowserDiagnostics {
   running?: boolean
   isolatedContext?: boolean
   templateCaptured?: boolean
-  modelDiscovery?: 'not_loaded' | 'live_rpc_cache' | string
+  modelDiscovery?: 'not_loaded' | 'live_rpc' | string
   chunkBytes?: number
   /** Last cookie write-back result: saved | unchanged | failed | not_attempted. */
   cookieRefresh?: string

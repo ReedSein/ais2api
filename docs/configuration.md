@@ -57,7 +57,7 @@
 | `search_model_drop_functions` | 布尔，`true` | 热更新 | `*-search` 模型同时收到自定义函数时：`true` 舍弃函数、保留搜索；`false` 保留函数、不加搜索。见 [搜索模型](protocol.md#search-models)。 |
 | `model_aliases` | 对象，`{}` | 热更新 | 模型别名，键为客户端使用的名称，值为实际模型 id，例如 `{"flash": "gemini-3.1-flash-lite"}`。 |
 | `model_defaults` | 对象，`{}` | 热更新 | 按模型 id 设置默认请求字段（Gemini 请求格式），客户端显式传入的字段优先。例如 `{"gemini-3.1-flash-lite": {"generationConfig": {"temperature": 0.7}}}`。 |
-| `configured_models` | 数组，`[]` | 热更新 | 手动声明的模型（字符串 id 或模型对象）。仅在没有账号或实时发现失败时作为 `source: "configured"` 返回，不代表这些模型真实可用。 |
+| `configured_models` | 数组，`[]` | 热更新 | 手动声明的备用模型（字符串 id 或模型对象）。当前账号没有保存的发现结果时作为 `source: "configured"` 返回，不代表真实可用。实时发现失败会报错并保留旧清单，不会把备用模型保存为发现结果。 |
 
 ### 资源限额 `limits`
 

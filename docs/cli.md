@@ -128,7 +128,7 @@ ais2api operations status OPERATION_ID
 - **config validate**：在本地校验配置。
 - **config reload**：需要服务正在运行，应用可热更新的设置（包括 `api_key`，修改后旧 Key 立即失效）；存在需要重启的差异时返回 `restart_required`。
 - **stats**：显示记录的调用计数与 usage。
-- **models list**：服务运行时请求实时发现，可能启动浏览器；服务未运行时只能返回 `configured_models`。
+- **models list**：服务运行时请求实时发现并保存完整结果，可能启动浏览器；失败报错并保留之前保存的结果。客户端模型列表只读取本地，不发起发现。服务未运行时本命令只能返回 `configured_models`。
 
 模型发现和账号探测以排队的异步操作执行，使状态查询和停止命令保持响应。命令行每 200 毫秒查询一次结果，最多等待 120 秒；仍未完成时以 `operation_pending` 退出，可以用返回的 ID 执行 `operations status` 继续查询。操作结果只临时保留。
 

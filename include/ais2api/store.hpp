@@ -26,6 +26,11 @@ struct BrowserFingerprint {
 // verified before it is stored (Cookie import) keeps the identity it was
 // verified with.
 unsigned default_fingerprint_seed(std::string_view account_id);
+struct ModelCatalog {
+    std::string account_id;
+    json::array models;
+    std::int64_t saved_at = 0;
+};
 class Store {
 public:
     explicit Store(const fs::path& directory);
@@ -51,6 +56,10 @@ public:
     void remove_account(std::string_view id);
     void select_account(std::string_view id);
     void reset_account(std::string_view id);
+    // The current account, then the preferred account, then the first account.
+    // Saved information remains readable during expiry and cooldowns.
+    ModelCatalog model_catalog();
+    ModelCatalog save_models(std::string_view account_id, json::array models);
     json::object rotation_status();
     std::string rotate_account();
     void clear_cooldown(std::string_view id, std::string_view model = {});

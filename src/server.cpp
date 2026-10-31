@@ -159,9 +159,10 @@ class Service {
         available_.notify_one();
         return true;
     }
-    json::array cached_models() {
-        std::lock_guard lock(models_mutex_);
-        auto out = models_;
+    json::object model_catalog() {
+        auto saved = store_.model_catalog();
+        auto out = std::move(saved.models);
+        const bool persisted = !out.empty();
         if (out.empty()) {
             auto cfg = config();
             for (auto &item : cfg.configured_models) {
@@ -175,7 +176,10 @@ class Service {
                 }
             }
         }
-        return out;
+        const auto source = persisted ? "saved" : out.empty() ? "none" : "configured";
+        return {{"models", std::move(out)}, {"source", source},
+                {"account_id", saved.account_id.empty() ? json::value(nullptr) : json::value(saved.account_id)},
+                {"saved_at", saved.saved_at ? json::value(saved.saved_at) : json::value(nullptr)}};
     }
     json::object control(const json::object &command) {
         auto action = string_or(command, "command");
@@ -383,13 +387,12 @@ class Service {
     std::atomic<bool> logging_healthy_{true};
     Store store_;
     std::unique_ptr<GenerationBackend> gateway_;
-    std::mutex queue_mutex_, models_mutex_, operations_mutex_;
+    std::mutex queue_mutex_, operations_mutex_;
     std::condition_variable available_;
     std::deque<Task> queue_;
     std::shared_ptr<EventPipe> active_;
     std::string active_account_id_;
     Clock::time_point started_ = Clock::now();
-    json::array models_;
     std::map<std::string, Operation> operations_;
     std::atomic<bool> stopping_{false};
     std::stop_source shutdown_;
@@ -469,12 +472,17 @@ class Service {
                      json::object result;
                      gateway_->reconfigure(config());
                      if (string_or(command, "command") == "models.list") {
-                         auto values = gateway_->models(shutdown_.get_token());
-                         {
-                             std::lock_guard guard(models_mutex_);
-                             models_ = values;
-                         }
-                         result = {{"models", values}};
+                         auto catalog = store_.model_catalog();
+                         if (catalog.account_id.empty())
+                             throw Error(503, "no_available_account", "No account for model discovery");
+                         const auto account = store_.account(catalog.account_id);
+                         if (account.disabled)
+                             throw Error(503, "no_available_account", "The model discovery account is disabled");
+                         auto values = gateway_->models(account, shutdown_.get_token());
+                         check_cancel(shutdown_.get_token());
+                         auto saved = store_.save_models(account.id, std::move(values));
+                         result = {{"models", std::move(saved.models)}, {"source", "saved"},
+                                   {"account_id", saved.account_id}, {"saved_at", saved.saved_at}};
                      } else {
                          json::array results;
                          auto id = string_or(command, "id");
@@ -1159,7 +1167,7 @@ net::awaitable<void> handle_admin(beast::tcp_stream& stream, Service& service,
         } else service.store().revoke_managed_key(id);
         result = {{"ok", true}};
     }
-    else if (get && path == "/models") result = {{"models", service.cached_models()}};
+    else if (get && path == "/models") result = service.model_catalog();
     else if (post && path == "/models/refresh") command = {{"command", "models.list"}};
     else if (post && path == "/accounts/probe") { command = {{"command", "accounts.probe"}}; }
     else if (post && path == "/accounts/import") {
@@ -1359,33 +1367,8 @@ net::awaitable<void> handle(beast::tcp_stream &stream, Service &service, Connect
     if (!principal)
         throw Error(401, "authentication", "A valid API key is required");
     if (models) {
-        auto operation = service.control({{"command", "models.list"}});
-        auto operation_id = string_or(operation, "operation_id");
-        struct ReleaseOperation {
-            Service& service; std::string id;
-            ~ReleaseOperation() { service.forget_operation(id); }
-        } release{service, operation_id};
-        auto executor = co_await net::this_coro::executor;
-        net::steady_timer polling(executor);
-        auto until = Clock::now() + 90s;
-        while (true) {
-            auto result = service.control({{"command", "operation.status"}, {"id", operation_id}});
-            auto status = string_or(result, "status");
-            if (status == "done")
-                break;
-            if (status == "failed") {
-                auto e = result.at("error").as_object();
-                throw Error(static_cast<int>(e.at("status").as_int64()), string_or(e, "code"),
-                            string_or(e, "message"));
-            }
-            if (Clock::now() > until)
-                throw Error(504, "model_discovery_timeout",
-                            "Model discovery is still queued or preparing the browser");
-            polling.expires_after(25ms);
-            co_await polling.async_wait(net::use_awaitable);
-        }
         json::array list;
-        auto available = service.cached_models();
+        auto available = service.model_catalog().at("models").as_array();
         // Each eligible model is followed by its "<id>-search" variant, which
         // enables Google Search by default; real ids are never shadowed.
         std::set<std::string> listed;

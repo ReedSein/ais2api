@@ -1828,15 +1828,14 @@
     "/models": {
       "get": {
         "operationId": "get_models",
-        "summary": "Get cached/configured models without browser startup",
+        "summary": "Get saved/configured models without browser startup",
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true
+                  "$ref": "#/components/schemas/ModelCatalog"
                 }
               }
             }
@@ -1872,7 +1871,8 @@
     "/models/refresh": {
       "post": {
         "operationId": "post_models_refresh",
-        "summary": "Queue live model discovery",
+        "summary": "Queue fresh discovery and persist a complete model catalog",
+        "description": "A successful operation returns ModelCatalog as its result. Discovery, validation or persistence failure leaves the previous catalog unchanged and reports a failed operation. No configured or cached list substitutes for a successful discovery.",
         "responses": {
           "400": {
             "description": "Invalid request",
@@ -2411,6 +2411,22 @@
             "items": {
               "$ref": "#/components/schemas/Account"
             }
+          }
+        }
+      },
+      "ModelCatalog": {
+        "type": "object",
+        "required": ["models", "source", "account_id", "saved_at"],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": true }
+          },
+          "source": { "type": "string", "enum": ["saved", "configured", "none"] },
+          "account_id": { "type": ["string", "null"] },
+          "saved_at": {
+            "type": ["integer", "null"],
+            "description": "Unix seconds when the complete catalog was saved; null without a saved discovery."
           }
         }
       },
